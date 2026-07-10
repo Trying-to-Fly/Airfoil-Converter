@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import math
-from typing import List, Sequence, Tuple
+from typing import List, Optional, Sequence, Tuple
 
 Point2 = Tuple[float, float]
 Vec3 = Tuple[float, float, float]
@@ -25,6 +25,18 @@ MAIN_PLANE_FRAMES: dict[str, Tuple[Vec3, Vec3]] = {
     "XY": ((1.0, 0.0, 0.0), (0.0, 1.0, 0.0)),
     "XZ": ((1.0, 0.0, 0.0), (0.0, 0.0, 1.0)),
     "YZ": ((0.0, 1.0, 0.0), (0.0, 0.0, 1.0)),
+}
+
+# The two axis letters spanning each main plane, in their default (chord, up) order.
+PLANE_LETTERS: dict[str, Tuple[str, str]] = {"XY": ("X", "Y"), "XZ": ("X", "Z"), "YZ": ("Y", "Z")}
+
+AXIS_VECTORS: dict[str, Vec3] = {
+    "+X": (1.0, 0.0, 0.0),
+    "-X": (-1.0, 0.0, 0.0),
+    "+Y": (0.0, 1.0, 0.0),
+    "-Y": (0.0, -1.0, 0.0),
+    "+Z": (0.0, 0.0, 1.0),
+    "-Z": (0.0, 0.0, -1.0),
 }
 
 PERPENDICULAR = "Perpendicular"
@@ -72,6 +84,55 @@ def normalize(a: Vec3, what: str = "direction") -> Vec3:
 
 def negate(a: Vec3) -> Vec3:
     return (-a[0], -a[1], -a[2])
+
+
+def chord_axis_options(main_plane: str) -> Tuple[str, ...]:
+    """The four signed axes the chord may run along inside a main plane."""
+    try:
+        a, b = PLANE_LETTERS[main_plane]
+    except KeyError:
+        raise GeometryError(f"Unknown plane {main_plane!r}.") from None
+    return (f"+{a}", f"-{a}", f"+{b}", f"-{b}")
+
+
+def up_axis_options(main_plane: str, chord_axis: str) -> Tuple[str, ...]:
+    """The two signed axes 'up' may take, once the chord has claimed the other one."""
+    a, b = PLANE_LETTERS[main_plane]
+    letter = chord_axis[-1]
+    if letter not in (a, b):
+        raise GeometryError(f"Chord axis {chord_axis} does not lie in the {main_plane} plane.")
+    other = b if letter == a else a
+    return (f"+{other}", f"-{other}")
+
+
+def default_axes(main_plane: str) -> Tuple[str, str]:
+    """The (chord, up) axis names reproducing the plane's conventional frame."""
+    a, b = PLANE_LETTERS[main_plane]
+    return f"+{a}", f"+{b}"
+
+
+def axis_frame(
+    chord_axis: str, up_axis: str, main_plane: Optional[str] = None
+) -> Tuple[Vec3, Vec3]:
+    """Build a frame from two named signed axes, e.g. ('-Z', '+Y')."""
+    for name in (chord_axis, up_axis):
+        if name not in AXIS_VECTORS:
+            raise GeometryError(f"Unknown axis {name!r}. Use one of {sorted(AXIS_VECTORS)}.")
+
+    if chord_axis[-1] == up_axis[-1]:
+        raise GeometryError(
+            f"Chord and up cannot both run along {chord_axis[-1]} — they must be perpendicular."
+        )
+
+    u = AXIS_VECTORS[chord_axis]
+    v = AXIS_VECTORS[up_axis]
+
+    if main_plane is not None:
+        normal = PLANE_NORMALS[main_plane]
+        for label, name, vec in (("Chord", chord_axis, u), ("Up", up_axis, v)):
+            if abs(dot(vec, normal)) > 1e-12:
+                raise GeometryError(f"{label} axis {name} is not in the {main_plane} plane.")
+    return u, v
 
 
 def main_plane_frame(plane: str) -> Tuple[Vec3, Vec3]:
@@ -127,10 +188,27 @@ def plane_frame(
     constraint: str = PERPENDICULAR,
     main_plane: str = "XY",
     flip: bool = False,
+    rotate180: bool = False,
+    chord_axis: Optional[str] = None,
+    up_axis: Optional[str] = None,
 ) -> Tuple[Vec3, Vec3]:
-    """Return the (chord, up) unit vectors for the selected plane mode."""
+    """Return the (chord, up) unit vectors for the selected plane mode.
+
+    On main planes, ``chord_axis``/``up_axis`` name the signed axes directly
+    (e.g. '-Z', '+Y'); omitting them keeps the plane's conventional frame.
+    ``rotate180`` spins the airfoil within its plane, swapping nose with tail
+    and top with bottom. ``flip`` mirrors 'up' alone.
+    """
     if mode in MAIN_PLANES:
-        u, v = main_plane_frame(mode)
+        if chord_axis is None and up_axis is None:
+            u, v = main_plane_frame(mode)
+        else:
+            defaults = default_axes(mode)
+            u, v = axis_frame(
+                chord_axis or defaults[0],
+                up_axis or defaults[1],
+                main_plane=mode,
+            )
     elif mode == "3points":
         u, v = three_point_frame(p1, p2, p3)
     elif mode == "2points":
@@ -143,7 +221,11 @@ def plane_frame(
     else:
         raise GeometryError(f"Unknown plane mode {mode!r}.")
 
-    return (u, negate(v)) if flip else (u, v)
+    if rotate180:
+        u, v = negate(u), negate(v)
+    if flip:
+        v = negate(v)
+    return u, v
 
 
 def to_3d(

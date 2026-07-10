@@ -30,10 +30,31 @@ download and double-click, no Python needed.
 4. Optionally enter a **target chord** to rescale (blank keeps the CSV's chord).
 5. Choose the **plane**: a main plane (XY / XZ / YZ), a plane through 3 points,
    or a plane through 2 points constrained perpendicular or parallel to a main plane.
-6. Set where the **leading edge** lands. This is where the CSV's 2D origin is placed.
+6. Point the airfoil where you want it (see *Orientation* below).
+7. Set where the **leading edge** lands. This is where the CSV's 2D origin is placed.
    It defaults to the origin for main planes, and to `P1` for custom planes,
    until you type in it yourself.
-7. **Export.** Output goes next to the CSV by default.
+8. **Export.** Output goes next to the CSV by default.
+
+## Orientation
+
+On a **main plane**, two dropdowns place the airfoil outright:
+
+- **Chord runs along** — the signed axis from the leading edge toward the
+  trailing edge. Pick the axis the *body* extends along; the nose then points
+  the opposite way. On YZ, `-Z` puts the trailing edge at −Z, so the nose
+  points **+Z**.
+- **Up direction** — which way the airfoil's thickness and camber face. Only the
+  remaining in-plane axis is offered, and changing the chord axis re-offers it.
+
+On a **3-point or 2-point plane** the chord is fixed by `P1 -> P2`, so those
+dropdowns are disabled. Instead, **Flip up direction** mirrors which side of the
+chord counts as up.
+
+**Flip airfoil (rotate 180° in plane)** works in every mode. It spins the section
+a half-turn about the leading-edge point: nose swaps with tail *and* top swaps
+with bottom, so the shape is unchanged and a cambered section ends up cambered
+the other way. It is not a nose-to-tail mirror.
 
 Coordinates are written in millimetres, six decimals, three space-separated
 columns per line — use with millimetre-unit SolidWorks documents.

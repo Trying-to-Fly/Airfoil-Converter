@@ -56,6 +56,7 @@ class ConverterApp(ttk.Frame):
         self.data: Optional[AirfoilData] = None
         self._le_manual = False
         self._syncing = False
+        self._syncing_axes = False
 
         self.csv_path = tk.StringVar()
         self.loaded_text = tk.StringVar(value="No CSV loaded.")
@@ -67,6 +68,10 @@ class ConverterApp(ttk.Frame):
         self.constraint = tk.StringVar(value=geometry.PERPENDICULAR)
         self.main_plane = tk.StringVar(value="XY")
         self.flip = tk.BooleanVar(value=False)
+        self.rotate180 = tk.BooleanVar(value=False)
+        default_chord, default_up = geometry.default_axes("XY")
+        self.chord_axis = tk.StringVar(value=default_chord)
+        self.up_axis = tk.StringVar(value=default_up)
         self.extension = tk.StringVar(value=".sldcrv")
         self.out_folder = tk.StringVar()
         self.status = tk.StringVar(value="Load a CSV to begin.")
@@ -82,6 +87,7 @@ class ConverterApp(ttk.Frame):
         for row in self.p_vars:
             for var in row:
                 var.trace_add("write", lambda *_: self._sync_leading_edge())
+        self.chord_axis.trace_add("write", lambda *_: self._on_chord_axis_changed())
         self._on_plane_mode_changed()
 
     # ---------------------------------------------------------------- layout
@@ -181,9 +187,30 @@ class ConverterApp(ttk.Frame):
         )
         self.main_plane_box.grid(row=4, column=5, sticky="w", padx=(4, 0), pady=(6, 0))
 
-        ttk.Checkbutton(plane, text="Flip up direction", variable=self.flip).grid(
-            row=5, column=0, columnspan=4, sticky="w", pady=(6, 0)
+        ttk.Label(plane, text="Chord runs along:").grid(row=5, column=0, sticky="w", pady=(6, 0))
+        self.chord_axis_box = ttk.Combobox(
+            plane,
+            textvariable=self.chord_axis,
+            values=geometry.chord_axis_options("XY"),
+            state="readonly",
+            width=5,
         )
+        self.chord_axis_box.grid(row=5, column=1, columnspan=2, sticky="w", pady=(6, 0))
+        ttk.Label(plane, text="Up direction:").grid(row=5, column=3, sticky="e", pady=(6, 0))
+        self.up_axis_box = ttk.Combobox(
+            plane,
+            textvariable=self.up_axis,
+            values=geometry.up_axis_options("XY", "+X"),
+            state="readonly",
+            width=5,
+        )
+        self.up_axis_box.grid(row=5, column=4, columnspan=2, sticky="w", padx=(4, 0), pady=(6, 0))
+
+        self.flip_check = ttk.Checkbutton(plane, text="Flip up direction", variable=self.flip)
+        self.flip_check.grid(row=6, column=0, columnspan=3, sticky="w", pady=(6, 0))
+        ttk.Checkbutton(
+            plane, text="Flip airfoil (rotate 180° in plane)", variable=self.rotate180
+        ).grid(row=7, column=0, columnspan=6, sticky="w")
         row += 1
 
         placement = ttk.LabelFrame(self, text="Placement", padding=8)
@@ -251,12 +278,48 @@ class ConverterApp(ttk.Frame):
         self.constraint_box.configure(state=constraint_state)
         self.main_plane_box.configure(state=constraint_state)
 
+        # On main planes the axis pickers set 'up' outright, so the flip checkbox
+        # would only be a confusing second way to say the same thing.
+        axis_state = "disabled" if custom else "readonly"
+        self.chord_axis_box.configure(state=axis_state)
+        self.up_axis_box.configure(state=axis_state)
+        self.flip_check.configure(state="normal" if custom else "disabled")
+        if not custom:
+            self.flip.set(False)
+            self._reset_axes(mode)
+
         self._le_manual = False
         self._sync_leading_edge()
         self.le_hint.configure(
             text="Defaults to P1 — the 2D origin lands here." if custom
             else "Defaults to (0, 0, 0) — the 2D origin lands here."
         )
+
+    def _reset_axes(self, main_plane: str) -> None:
+        """Restore the plane's conventional chord/up axes and refresh both dropdowns."""
+        chord, up = geometry.default_axes(main_plane)
+        self._syncing_axes = True
+        try:
+            self.chord_axis_box.configure(values=geometry.chord_axis_options(main_plane))
+            self.chord_axis.set(chord)
+            self.up_axis_box.configure(values=geometry.up_axis_options(main_plane, chord))
+            self.up_axis.set(up)
+        finally:
+            self._syncing_axes = False
+
+    def _on_chord_axis_changed(self) -> None:
+        """The chord claims one axis; 'up' must come from the other one."""
+        mode = self.plane_mode.get()
+        if self._syncing_axes or mode not in geometry.MAIN_PLANES:
+            return
+        options = geometry.up_axis_options(mode, self.chord_axis.get())
+        self._syncing_axes = True
+        try:
+            self.up_axis_box.configure(values=options)
+            if self.up_axis.get() not in options:
+                self.up_axis.set(options[0])
+        finally:
+            self._syncing_axes = False
 
     def _sync_leading_edge(self) -> None:
         """Keep the leading edge at its default until the user edits it."""
@@ -369,8 +432,10 @@ class ConverterApp(ttk.Frame):
         factor = geometry.scale_factor(self.data.chord, self._read_target_chord())
 
         mode = self.plane_mode.get()
-        kwargs = {"flip": self.flip.get()}
-        if mode == MODE_3POINTS:
+        kwargs = {"flip": self.flip.get(), "rotate180": self.rotate180.get()}
+        if mode in geometry.MAIN_PLANES:
+            kwargs.update(chord_axis=self.chord_axis.get(), up_axis=self.up_axis.get())
+        elif mode == MODE_3POINTS:
             kwargs.update(
                 p1=self._read_vec(self.p_vars[0], "P1"),
                 p2=self._read_vec(self.p_vars[1], "P2"),

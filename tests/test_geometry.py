@@ -39,6 +39,130 @@ def test_unknown_mode():
         g.plane_frame("weird")
 
 
+# ------------------------------------------------- explicit chord / up axes
+
+
+def test_default_axes_reproduce_the_conventional_frames():
+    for plane in g.MAIN_PLANES:
+        chord, up = g.default_axes(plane)
+        assert g.plane_frame(plane, chord_axis=chord, up_axis=up) == g.plane_frame(plane)
+
+
+def test_chord_axis_options_are_the_two_in_plane_axes():
+    assert g.chord_axis_options("YZ") == ("+Y", "-Y", "+Z", "-Z")
+    assert g.chord_axis_options("XZ") == ("+X", "-X", "+Z", "-Z")
+    assert g.chord_axis_options("XY") == ("+X", "-X", "+Y", "-Y")
+
+
+def test_up_axis_options_exclude_the_chord_axis():
+    assert g.up_axis_options("YZ", "-Z") == ("+Y", "-Y")
+    assert g.up_axis_options("YZ", "+Y") == ("+Z", "-Z")
+
+
+def test_up_axis_options_reject_an_out_of_plane_chord():
+    with pytest.raises(GeometryError, match="does not lie in the YZ plane"):
+        g.up_axis_options("YZ", "+X")
+
+
+def test_leading_edge_can_be_aimed_along_plus_z_on_yz():
+    """The reported case: on YZ the nose pointed -Y; aiming the chord at -Z points it +Z."""
+    u, v = g.plane_frame("YZ", chord_axis="-Z", up_axis="+Y")
+    assert u == approx((0, 0, -1))
+    assert v == approx((0, 1, 0))
+    # The trailing edge lands at -Z, so the nose at the origin points +Z.
+    points = g.to_3d([(0, 0), (175, 0)], (0, 0, 0), u, v)
+    assert points[0] == approx((0, 0, 0))
+    assert points[1] == approx((0, 0, -175))
+
+
+def test_axis_frame_rejects_a_repeated_axis():
+    with pytest.raises(GeometryError, match="both run along Y"):
+        g.axis_frame("+Y", "-Y")
+
+
+def test_axis_frame_rejects_an_unknown_axis():
+    with pytest.raises(GeometryError, match="Unknown axis"):
+        g.axis_frame("+Q", "+Y")
+
+
+def test_axis_frame_rejects_axes_outside_the_named_plane():
+    with pytest.raises(GeometryError, match=r"Chord axis \+X is not in the YZ plane"):
+        g.axis_frame("+X", "+Y", main_plane="YZ")
+    with pytest.raises(GeometryError, match=r"Up axis \+X is not in the YZ plane"):
+        g.axis_frame("+Y", "+X", main_plane="YZ")
+
+
+def test_axis_frame_is_always_orthonormal():
+    for plane in g.MAIN_PLANES:
+        for chord in g.chord_axis_options(plane):
+            for up in g.up_axis_options(plane, chord):
+                u, v = g.axis_frame(chord, up, main_plane=plane)
+                assert g.length(u) == pytest.approx(1.0)
+                assert g.length(v) == pytest.approx(1.0)
+                assert g.dot(u, v) == pytest.approx(0.0)
+
+
+# ------------------------------------------------------- 180-degree rotation
+
+
+def test_rotate180_negates_both_axes():
+    u, v = g.plane_frame("XY", rotate180=True)
+    assert u == approx((-1, 0, 0))
+    assert v == approx((0, -1, 0))
+
+
+def test_rotate180_swaps_nose_and_tail_about_the_leading_edge():
+    """Nose stays put; the body and the camber both swing to the other side."""
+    u, v = g.plane_frame("XY")
+    ru, rv = g.plane_frame("XY", rotate180=True)
+    section = [(0.0, 0.0), (100.0, 0.0), (50.0, 10.0)]
+    normal = g.to_3d(section, (0, 0, 0), u, v)
+    rotated = g.to_3d(section, (0, 0, 0), ru, rv)
+    assert normal[0] == approx((0, 0, 0)) and rotated[0] == approx((0, 0, 0))
+    assert normal[1] == approx((100, 0, 0)) and rotated[1] == approx((-100, 0, 0))
+    assert normal[2] == approx((50, 10, 0)) and rotated[2] == approx((-50, -10, 0))
+
+
+def test_rotate180_preserves_shape():
+    """A 180-degree rotation is rigid: every pairwise distance survives it."""
+    section = [(0.0, 0.0), (175.0, 0.0), (60.0, 12.0), (40.0, -4.0)]
+    u, v = g.plane_frame("XZ")
+    ru, rv = g.plane_frame("XZ", rotate180=True)
+    plain = g.to_3d(section, (3, 4, 5), u, v)
+    spun = g.to_3d(section, (3, 4, 5), ru, rv)
+    for i in range(len(section)):
+        for j in range(i + 1, len(section)):
+            assert g.length(g.sub(plain[i], plain[j])) == pytest.approx(
+                g.length(g.sub(spun[i], spun[j]))
+            )
+
+
+def test_rotate180_applied_twice_is_identity():
+    u, v = g.plane_frame("YZ")
+    ru, rv = g.plane_frame("YZ", rotate180=True)
+    assert g.negate(ru) == approx(u)
+    assert g.negate(rv) == approx(v)
+
+
+def test_rotate180_and_flip_compose_to_a_chord_only_mirror():
+    """Rotating then flipping up leaves 'up' alone and reverses only the chord."""
+    u, v = g.plane_frame("XY", rotate180=True, flip=True)
+    assert u == approx((-1, 0, 0))
+    assert v == approx((0, 1, 0))
+
+
+def test_rotate180_works_on_custom_planes():
+    u, v = g.plane_frame("3points", p1=(0, 0, 0), p2=(1, 0, 0), p3=(0, 1, 0), rotate180=True)
+    assert u == approx((-1, 0, 0))
+    assert v == approx((0, -1, 0))
+
+
+def test_rotate180_combines_with_explicit_axes():
+    u, v = g.plane_frame("YZ", chord_axis="-Z", up_axis="+Y", rotate180=True)
+    assert u == approx((0, 0, 1))
+    assert v == approx((0, -1, 0))
+
+
 # ------------------------------------------------------------------ 3 points
 
 
