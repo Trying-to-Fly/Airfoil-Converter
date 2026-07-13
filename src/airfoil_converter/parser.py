@@ -1,4 +1,4 @@
-"""Read an airfoil-plotter CSV export into metadata plus named point sections."""
+"""Read the two source formats: an airfoil-plotter CSV, or a curve file of XYZ points."""
 
 from __future__ import annotations
 
@@ -8,6 +8,7 @@ from dataclasses import dataclass, field
 from typing import Dict, List, Optional, Sequence, Tuple
 
 Point2 = Tuple[float, float]
+Vec3 = Tuple[float, float, float]
 
 AIRFOIL = "airfoil surface"
 CAMBER = "camber line"
@@ -109,3 +110,51 @@ def parse_csv(path: str) -> AirfoilData:
     except OSError as exc:
         raise AirfoilParseError(f"Could not read {path}: {exc}") from exc
     return parse_rows(rows)
+
+
+# ---------------------------------------------------------------- curve files
+
+
+def _read_text(path: str) -> List[str]:
+    try:
+        with open(path, "r", encoding="utf-8-sig", errors="replace") as handle:
+            return handle.readlines()
+    except OSError as exc:
+        raise AirfoilParseError(f"Could not read {path}: {exc}") from exc
+
+
+def _as_xyz(line: str) -> Optional[Vec3]:
+    fields = line.replace(",", " ").split()
+    if len(fields) != 3:
+        return None
+    try:
+        return float(fields[0]), float(fields[1]), float(fields[2])
+    except ValueError:
+        return None
+
+
+def is_curve_file(path: str) -> bool:
+    """A curve file leads with a point, not with an airfoil-plotter header row."""
+    for line in _read_text(path):
+        if line.strip():
+            return _as_xyz(line) is not None
+    return False
+
+
+def parse_curve(path: str) -> List[Vec3]:
+    """Read a Curve Through XYZ Points file: one point per line, three columns, in mm."""
+    points: List[Vec3] = []
+    for number, line in enumerate(_read_text(path), start=1):
+        if not line.strip():
+            continue
+        point = _as_xyz(line)
+        if point is None:
+            raise AirfoilParseError(
+                f"Line {number} of {path} is not three numbers: {line.strip()!r}. "
+                "A curve file holds one XYZ point per line."
+            )
+        points.append(point)
+
+    if len(points) < 3:
+        raise AirfoilParseError(f"{path} holds {len(points)} points — too few to be a curve.")
+    return points

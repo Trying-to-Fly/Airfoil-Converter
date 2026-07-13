@@ -4,6 +4,10 @@ Converts airfoil-plotter CSV exports into SolidWorks *Curve Through XYZ Points*
 files (`.sldcrv` or `.txt`), with plane placement, leading-edge offset, optional
 chord rescale, and a constant-distance surface offset.
 
+It also reads curve files back in, so a section you already have — one this app
+wrote, or one exported from SolidWorks — can be re-placed, rescaled, pitched, or
+offset without going back to the CSV.
+
 No runtime dependencies — just Python 3.9+ with tkinter (bundled with the
 standard Windows Python installer).
 
@@ -21,22 +25,51 @@ download and double-click, no Python needed.
 
 ## Using it
 
-1. **Browse** to an airfoil-plotter CSV (see `sd7037-il.csv` for the expected format).
+1. **Browse** to an airfoil-plotter CSV (see `sd7037-il.csv` for the expected
+   format), or to a curve file (see *Curve files as input* below).
 2. Choose what to export: the airfoil surface, the camber line, or both.
 3. Pick how to handle the trailing edge:
    - **Drop duplicate** — remove the repeated final point; one open curve. The
      trailing edge is left open by exactly the last segment of the CSV loop.
    - **Auto-close** — make the last point exactly equal the first, giving a closed curve.
    - **Split upper/lower** — two files, each running leading edge to trailing edge.
-4. Optionally enter a **target chord** to rescale (blank keeps the CSV's chord).
+4. Optionally enter a **target chord** to rescale (blank keeps the source's chord).
 5. Optionally enter an **offset** and pick *Inward* or *Outward* (see *Offset* below).
 6. Choose the **plane**: a main plane (XY / XZ / YZ), a plane through 3 points,
-   or a plane through 2 points constrained perpendicular or parallel to a main plane.
+   a plane through 2 points constrained perpendicular or parallel to a main
+   plane, or — for a loaded curve — **As loaded**, its own plane.
 7. Point the airfoil where you want it (see *Orientation* below).
-8. Set where the **leading edge** lands. This is where the CSV's 2D origin is placed.
-   It defaults to the origin for main planes, and to `P1` for custom planes,
-   until you type in it yourself.
-9. **Export.** Output goes next to the CSV by default.
+8. Set where the **leading edge** lands. This is where the 2D origin is placed.
+   It defaults to the origin for main planes, to `P1` for custom planes, and to
+   the curve's own leading edge for a loaded curve, until you type in it yourself.
+9. **Export.** Output goes next to the source file by default.
+
+## Curve files as input
+
+The **Browse** dialog takes a *Curve Through XYZ Points* file — `.sldcrv` or
+`.txt`, one `X Y Z` point per line in millimetres — as well as a CSV. Feed it
+one this app wrote, or one exported from SolidWorks. The format is worked out
+from the file's contents, not its extension, so a plotter CSV saved as `.txt`
+still reads as a CSV.
+
+A curve already stands somewhere in space, so the app reads it back onto the
+plane it was drawn on: the longest span across the curve is taken as the chord,
+the blunter of its two ends as the leading edge. The plane picker gains an **As
+loaded** option, chosen by default, which keeps the curve exactly where it is —
+so *load a rib, offset it 2 mm inward, export* gives you the inner wall in the
+same plane, in the same place, with nothing else moved. Pick a different plane
+instead and the curve is re-placed like a CSV would be; **target chord**,
+**angle of attack** and the flips all still apply.
+
+Two things to know:
+
+- **The chord is read off the points, not from a header.** A curve carries no
+  metadata, so it comes back to within the point spacing at the nose — a 175 mm
+  section may report 174.964 mm. Rescaling to a target chord measures from that.
+- **A curve must be flat and must close.** A section that strays off its own
+  plane is refused, and so is half a surface: *Split upper/lower* output encloses
+  no area, so there is no wall to walk around. Offset the whole loop, and split
+  it afterwards if you need the halves.
 
 ## Offset
 
@@ -79,9 +112,10 @@ On a **main plane**, two dropdowns place the airfoil outright:
 - **Up direction** — which way the airfoil's thickness and camber face. Only the
   remaining in-plane axis is offered, and changing the chord axis re-offers it.
 
-On a **3-point or 2-point plane** the chord is fixed by `P1 -> P2`, so those
-dropdowns are disabled. Instead, **Flip up direction** mirrors which side of the
-chord counts as up.
+On a **3-point or 2-point plane** the chord is fixed by `P1 -> P2`, and on an
+**As loaded** plane it is fixed by the curve itself, so those dropdowns are
+disabled. Instead, **Flip up direction** mirrors which side of the chord counts
+as up.
 
 **Flip airfoil (rotate 180° in plane)** works in every mode. It spins the section
 a half-turn about the leading-edge point: nose swaps with tail *and* top swaps
@@ -125,8 +159,8 @@ Layout:
 
 ```
 src/airfoil_converter/
-  parser.py     # CSV -> metadata + point sections
-  geometry.py   # plane frames, 2D->3D transform, trailing-edge handling, offsetting
+  parser.py     # CSV -> metadata + point sections; curve file -> XYZ points
+  geometry.py   # plane frames, 2D<->3D transform, trailing-edge handling, offsetting
   writer.py     # .sldcrv / .txt output
   gui.py        # tkinter window
 tests/

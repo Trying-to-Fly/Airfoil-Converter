@@ -1,8 +1,9 @@
-"""Plane frames, the 2D->3D transform, and trailing-edge handling."""
+"""Plane frames, the 2D<->3D transform, trailing-edge handling, and offsetting."""
 
 from __future__ import annotations
 
 import math
+from dataclasses import dataclass
 from typing import List, Optional, Sequence, Tuple
 
 Point2 = Tuple[float, float]
@@ -14,6 +15,9 @@ POINT_TOL = 1e-9
 DIR_TOL = 1e-9
 
 MAIN_PLANES = ("XY", "XZ", "YZ")
+
+# The plane a loaded curve file already lies on.
+LOADED = "loaded"
 
 # Corner arcs on the outer side of a turn are chorded at this angular step.
 ARC_STEP_DEG = 5.0
@@ -226,17 +230,24 @@ def plane_frame(
     pitch: float = 0.0,
     chord_axis: Optional[str] = None,
     up_axis: Optional[str] = None,
+    frame: Optional[Tuple[Vec3, Vec3]] = None,
 ) -> Tuple[Vec3, Vec3]:
     """Return the (chord, up) unit vectors for the selected plane mode.
 
     On main planes, ``chord_axis``/``up_axis`` name the signed axes directly
     (e.g. '-Z', '+Y'); the chord axis points trailing edge -> leading edge, and
-    omitting both keeps the plane's conventional frame. ``rotate180`` spins the
-    airfoil within its plane, swapping nose with tail and top with bottom.
-    ``flip`` mirrors 'up' alone. ``pitch`` is the angle of attack in degrees,
-    applied last, about the leading edge and relative to the final 'up'.
+    omitting both keeps the plane's conventional frame. Mode ``LOADED`` takes
+    the plane a curve file was already drawn on, passed in as ``frame``.
+    ``rotate180`` spins the airfoil within its plane, swapping nose with tail
+    and top with bottom. ``flip`` mirrors 'up' alone. ``pitch`` is the angle of
+    attack in degrees, applied last, about the leading edge and relative to the
+    final 'up'.
     """
-    if mode in MAIN_PLANES:
+    if mode == LOADED:
+        if frame is None:
+            raise GeometryError("No curve is loaded, so there is no plane to keep it on.")
+        u, v = frame
+    elif mode in MAIN_PLANES:
         if chord_axis is None and up_axis is None:
             u, v = main_plane_frame(mode)
         else:
@@ -277,6 +288,111 @@ def to_3d(
     for x, y in points:
         out.append(add(leading_edge, add(scale(u, x * scale_factor), scale(v, y * scale_factor))))
     return out
+
+
+# ------------------------------------------------- reading a curve back in 2D
+
+# A loaded curve may stray this far from its own plane, as a fraction of its
+# chord, before we call it a 3D curve rather than a flat section.
+PLANARITY_TOL = 1e-4
+# The section's bluntness is judged over this much of the chord at either end.
+NOSE_BAND = 0.1
+
+
+@dataclass
+class FlatSection:
+    """A 3D curve read back as a 2D section, with the frame it was found on.
+
+    ``to_3d(points, origin, u, v)`` reproduces the curve where it stood.
+    """
+
+    points: List[Point2]
+    origin: Vec3  # The leading-edge point: the 2D origin.
+    u: Vec3
+    v: Vec3
+    chord: float
+
+
+def _newell_normal(points: Sequence[Vec3]) -> Vec3:
+    """The area normal of a closed polygon: steady even when the points are noisy."""
+    n = [0.0, 0.0, 0.0]
+    count = len(points)
+    for i in range(count):
+        (x0, y0, z0), (x1, y1, z1) = points[i], points[(i + 1) % count]
+        n[0] += (y0 - y1) * (z0 + z1)
+        n[1] += (z0 - z1) * (x0 + x1)
+        n[2] += (x0 - x1) * (y0 + y1)
+    return (n[0], n[1], n[2])
+
+
+def _farthest_pair(points: Sequence[Vec3]) -> Tuple[Vec3, Vec3, float]:
+    """The two points furthest apart. On an airfoil these are the nose and the tail."""
+    best = (points[0], points[1], -1.0)
+    for i, a in enumerate(points):
+        for b in points[i + 1 :]:
+            span = length(sub(b, a))
+            if span > best[2]:
+                best = (a, b, span)
+    return best
+
+
+def _spread(points: Sequence[Point2], lo: float, hi: float) -> float:
+    """How thick the section stands between two chordwise stations."""
+    ys = [y for x, y in points if lo <= x <= hi]
+    return max(ys) - min(ys) if ys else 0.0
+
+
+def flatten_curve(points: Sequence[Vec3], tol: float = PLANARITY_TOL) -> FlatSection:
+    """Read a 3D curve back as a 2D section lying on its own plane.
+
+    The chord is taken as the longest span across the curve — nose to tail, on
+    an airfoil — and the blunter of its two ends is called the leading edge, so
+    the section comes back the way a CSV's does: nose at the 2D origin, tail out
+    along +x, and the loop running counter-clockwise.
+    """
+    pts = list(points)
+    if len(pts) < 3:
+        raise GeometryError("A curve needs at least three points to be read as a section.")
+
+    a, b, span = _farthest_pair(pts)
+    if span <= POINT_TOL:
+        raise GeometryError("Every point of the curve is in the same place.")
+
+    normal = _newell_normal(pts)
+    if length(normal) <= DIR_TOL * span * span:
+        raise GeometryError("The curve is a straight line — it does not lie on a plane.")
+    normal = normalize(normal, "curve normal")
+
+    strays = max(abs(dot(sub(p, pts[0]), normal)) for p in pts)
+    if strays > tol * span:
+        raise GeometryError(
+            f"The curve is not flat: it strays {strays:.4g} mm off its own plane, more "
+            f"than the {tol * span:.4g} mm allowed for a {span:.4g} mm chord. Only a "
+            "planar section can be offset."
+        )
+
+    # The chord line, laid flat on the plane.
+    along = sub(b, a)
+    u = normalize(sub(along, scale(normal, dot(along, normal))), "chord direction")
+    v = cross(normal, u)
+
+    def project(origin: Vec3, u: Vec3, v: Vec3) -> List[Point2]:
+        return [(dot(sub(p, origin), u), dot(sub(p, origin), v)) for p in pts]
+
+    # Whichever end carries more thickness just behind it is the leading edge.
+    flat = project(a, u, v)
+    if _spread(flat, span - NOSE_BAND * span, span) > _spread(flat, 0.0, NOSE_BAND * span):
+        a, u = b, negate(u)
+        v = cross(normal, u)
+        flat = project(a, u, v)
+
+    # Face the plane from the side that sees the loop run counter-clockwise, so
+    # that 'up' means up and the surfaces split the way the CSV's do.
+    if signed_area(clean_loop(flat)) < 0.0:
+        v = negate(v)
+        flat = [(x, -y) for x, y in flat]
+
+    return FlatSection(points=flat, origin=a, u=u, v=v, chord=max(x for x, _ in flat))
 
 
 def scale_factor(csv_chord: float, target_chord: float | None) -> float:
@@ -481,9 +597,26 @@ def offset_airfoil(
     if not math.isfinite(distance):
         raise GeometryError("Offset distance must be a finite number.")
 
-    loop = clean_loop(points)
+    given = list(points)
+    loop = clean_loop(given)
     if len(loop) < 3:
         raise GeometryError("Not enough points to offset the airfoil surface.")
+
+    # An offset needs a section to walk around. One surface of an airfoil — an
+    # upper skin on its own, say — encloses nothing, and its ends stand a chord
+    # apart rather than meeting at the trailing edge. Measure that on the points
+    # as given: cleaning the loop drops the very point that closes it.
+    ends = math.hypot(given[0][0] - given[-1][0], given[0][1] - given[-1][1])
+    span = max(
+        max(x for x, _ in loop) - min(x for x, _ in loop),
+        max(y for _, y in loop) - min(y for _, y in loop),
+    )
+    if ends > 0.1 * span:
+        raise GeometryError(
+            "This curve does not close on itself — its two ends stand far apart, so it "
+            "encloses no section to offset. Offsetting needs the whole airfoil loop, "
+            "not a single surface of it."
+        )
     if abs(distance) <= POINT_TOL:
         return auto_close(loop)
 

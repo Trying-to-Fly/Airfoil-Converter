@@ -2,7 +2,16 @@ import os
 
 import pytest
 
-from airfoil_converter.parser import AIRFOIL, CAMBER, CHORD, AirfoilParseError, parse_csv, parse_rows
+from airfoil_converter.parser import (
+    AIRFOIL,
+    CAMBER,
+    CHORD,
+    AirfoilParseError,
+    is_curve_file,
+    parse_csv,
+    parse_curve,
+    parse_rows,
+)
 
 SAMPLE_CSV = os.path.join(os.path.dirname(os.path.dirname(__file__)), "sd7037-il.csv")
 
@@ -103,3 +112,51 @@ def test_real_sample_file():
 def test_unreadable_file_is_an_error():
     with pytest.raises(AirfoilParseError, match="Could not read"):
         parse_csv(os.path.join(os.path.dirname(SAMPLE_CSV), "does-not-exist.csv"))
+
+
+# ---------------------------------------------------------------- curve files
+
+CURVE = """175.000000 0.000000 0.000000
+90.000000 12.000000 0.000000
+0.000000 0.000000 0.000000
+90.000000 -6.000000 0.000000
+"""
+
+
+def write(tmp_path, name, text):
+    path = tmp_path / name
+    path.write_text(text, encoding="ascii")
+    return str(path)
+
+
+def test_parse_curve_reads_three_columns(tmp_path):
+    points = parse_curve(write(tmp_path, "c.sldcrv", CURVE))
+    assert points[0] == (175.0, 0.0, 0.0)
+    assert points[1] == (90.0, 12.0, 0.0)
+    assert len(points) == 4
+
+
+def test_parse_curve_skips_blank_lines(tmp_path):
+    points = parse_curve(write(tmp_path, "c.txt", "\n" + CURVE.replace("\n", "\n\n")))
+    assert len(points) == 4
+
+
+def test_parse_curve_rejects_a_line_that_is_not_a_point(tmp_path):
+    with pytest.raises(AirfoilParseError, match="not three numbers"):
+        parse_curve(write(tmp_path, "c.sldcrv", CURVE + "175.0 0.0\n"))
+
+
+def test_parse_curve_rejects_too_few_points(tmp_path):
+    with pytest.raises(AirfoilParseError, match="too few"):
+        parse_curve(write(tmp_path, "c.sldcrv", "0 0 0\n1 1 1\n"))
+
+
+def test_a_curve_file_is_told_from_a_csv(tmp_path):
+    assert is_curve_file(write(tmp_path, "c.sldcrv", CURVE))
+    assert not is_curve_file(SAMPLE_CSV)
+
+
+def test_a_curve_file_is_told_by_content_not_extension(tmp_path):
+    """The app writes .txt curves, and a plotter CSV may well be named .txt too."""
+    assert is_curve_file(write(tmp_path, "curve.txt", CURVE))
+    assert not is_curve_file(write(tmp_path, "plotter.txt", MINIMAL))

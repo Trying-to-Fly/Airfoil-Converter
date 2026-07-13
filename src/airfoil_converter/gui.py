@@ -7,9 +7,9 @@ import tkinter as tk
 from tkinter import filedialog, ttk
 from typing import List, Optional, Sequence, Tuple
 
-from . import geometry, writer
+from . import geometry, parser, writer
 from .geometry import GeometryError
-from .parser import AirfoilData, AirfoilParseError, parse_csv
+from .parser import AIRFOIL, AirfoilData, AirfoilParseError, parse_csv
 
 Point2 = Tuple[float, float]
 Vec3 = Tuple[float, float, float]
@@ -21,6 +21,7 @@ TE_MODES = (TE_DROP, TE_CLOSE, TE_SPLIT)
 
 MODE_3POINTS = "3points"
 MODE_2POINTS = "2points"
+MODE_LOADED = geometry.LOADED
 
 OFFSET_INWARD = "Inward"
 OFFSET_OUTWARD = "Outward"
@@ -58,12 +59,13 @@ class ConverterApp(ttk.Frame):
         self.columnconfigure(0, weight=1)
 
         self.data: Optional[AirfoilData] = None
+        self.section: Optional[geometry.FlatSection] = None  # Set by a curve file only.
         self._le_manual = False
         self._syncing = False
         self._syncing_axes = False
 
         self.csv_path = tk.StringVar()
-        self.loaded_text = tk.StringVar(value="No CSV loaded.")
+        self.loaded_text = tk.StringVar(value="No file loaded.")
         self.export_airfoil = tk.BooleanVar(value=True)
         self.export_camber = tk.BooleanVar(value=True)
         self.te_mode = tk.StringVar(value=TE_DROP)
@@ -105,7 +107,7 @@ class ConverterApp(ttk.Frame):
         source = ttk.LabelFrame(self, text="Source", padding=8)
         source.grid(row=row, column=0, sticky="ew", pady=(0, 8))
         source.columnconfigure(1, weight=1)
-        ttk.Label(source, text="CSV file:").grid(row=0, column=0, sticky="w")
+        ttk.Label(source, text="CSV or curve:").grid(row=0, column=0, sticky="w")
         ttk.Entry(source, textvariable=self.csv_path).grid(row=0, column=1, sticky="ew", padx=6)
         ttk.Button(source, text="Browse", command=self._browse_csv).grid(row=0, column=2)
         ttk.Label(source, textvariable=self.loaded_text, foreground="#555").grid(
@@ -181,6 +183,19 @@ class ConverterApp(ttk.Frame):
                 variable=self.plane_mode,
                 command=self._on_plane_mode_changed,
             ).grid(row=0, column=i, sticky="w", padx=(0, 10))
+        self.loaded_radio = ttk.Radiobutton(
+            radios,
+            text="As loaded",
+            value=MODE_LOADED,
+            variable=self.plane_mode,
+            command=self._on_plane_mode_changed,
+            state="disabled",
+        )
+        self.loaded_radio.grid(row=1, column=0, columnspan=3, sticky="w", pady=(2, 0))
+        ttk.Label(
+            radios, text="(keeps a loaded curve on its own plane, where it stands)",
+            foreground="#555",
+        ).grid(row=1, column=3, columnspan=3, sticky="w")
 
         for pi, name in enumerate(("P1", "P2", "P3")):
             ttk.Label(plane, text=name).grid(row=1 + pi, column=0, sticky="w", pady=(4, 0))
@@ -306,6 +321,7 @@ class ConverterApp(ttk.Frame):
     def _on_plane_mode_changed(self) -> None:
         mode = self.plane_mode.get()
         custom = mode in (MODE_3POINTS, MODE_2POINTS)
+        on_main_plane = mode in geometry.MAIN_PLANES
         needed = 3 if mode == MODE_3POINTS else (2 if mode == MODE_2POINTS else 0)
         for pi, entries in enumerate(self.p_entries):
             state = "normal" if pi < needed else "disabled"
@@ -317,21 +333,26 @@ class ConverterApp(ttk.Frame):
         self.main_plane_box.configure(state=constraint_state)
 
         # On main planes the axis pickers set 'up' outright, so the flip checkbox
-        # would only be a confusing second way to say the same thing.
-        axis_state = "disabled" if custom else "readonly"
+        # would only be a confusing second way to say the same thing. Off them —
+        # on a custom plane, or on a loaded curve's own plane — there are no axes
+        # to pick, and flipping 'up' is the only choice left.
+        axis_state = "readonly" if on_main_plane else "disabled"
         self.chord_axis_box.configure(state=axis_state)
         self.up_axis_box.configure(state=axis_state)
-        self.flip_check.configure(state="normal" if custom else "disabled")
-        if not custom:
+        self.flip_check.configure(state="disabled" if on_main_plane else "normal")
+        if on_main_plane:
             self.flip.set(False)
             self._reset_axes(mode)
 
         self._le_manual = False
         self._sync_leading_edge()
-        self.le_hint.configure(
-            text="Defaults to P1 — the 2D origin lands here." if custom
-            else "Defaults to (0, 0, 0) — the 2D origin lands here."
-        )
+        if mode == MODE_LOADED:
+            hint = "Defaults to the curve's own leading edge — it exports back in place."
+        elif custom:
+            hint = "Defaults to P1 — the 2D origin lands here."
+        else:
+            hint = "Defaults to (0, 0, 0) — the 2D origin lands here."
+        self.le_hint.configure(text=hint)
 
     def _reset_axes(self, main_plane: str) -> None:
         """Restore the plane's conventional chord/up axes and refresh both dropdowns."""
@@ -363,19 +384,29 @@ class ConverterApp(ttk.Frame):
         """Keep the leading edge at its default until the user edits it."""
         if self._le_manual or self._syncing:
             return
+        mode = self.plane_mode.get()
         self._syncing = True
         try:
-            custom = self.plane_mode.get() in (MODE_3POINTS, MODE_2POINTS)
-            source = self.p_vars[0] if custom else None
-            for i, var in enumerate(self.le_vars):
-                var.set(source[i].get() if source else "0")
+            if mode == MODE_LOADED and self.section is not None:
+                values = [f"{c:g}" for c in self.section.origin]
+            elif mode in (MODE_3POINTS, MODE_2POINTS):
+                values = [var.get() for var in self.p_vars[0]]
+            else:
+                values = ["0", "0", "0"]
+            for var, value in zip(self.le_vars, values):
+                var.set(value)
         finally:
             self._syncing = False
 
     def _browse_csv(self) -> None:
         path = filedialog.askopenfilename(
-            title="Select airfoil CSV",
-            filetypes=[("CSV files", "*.csv"), ("All files", "*.*")],
+            title="Select an airfoil CSV or a curve file",
+            filetypes=[
+                ("Airfoil CSV or curve", "*.csv *.sldcrv *.txt"),
+                ("Airfoil CSV", "*.csv"),
+                ("Curve files", "*.sldcrv *.txt"),
+                ("All files", "*.*"),
+            ],
         )
         if path:
             self.csv_path.set(path)
@@ -386,12 +417,25 @@ class ConverterApp(ttk.Frame):
         if path:
             self.out_folder.set(path)
 
+    def _load_curve(self, path: str) -> AirfoilData:
+        """Read a curve file back into a 2D section on the plane it was drawn on."""
+        section = geometry.flatten_curve(parser.parse_curve(path))
+        self.section = section
+        return AirfoilData(
+            name=os.path.splitext(os.path.basename(path))[0],
+            chord=section.chord,
+            sections={AIRFOIL: section.points},
+        )
+
     def _load(self, path: str) -> None:
+        self.section = None
         try:
-            data = parse_csv(path)
-        except AirfoilParseError as exc:
+            curve = parser.is_curve_file(path)
+            data = self._load_curve(path) if curve else parse_csv(path)
+        except (AirfoilParseError, GeometryError) as exc:
             self.data = None
-            self.loaded_text.set("No CSV loaded.")
+            self.loaded_text.set("No file loaded.")
+            self.loaded_radio.configure(state="disabled")
             self._set_status(str(exc), ok=False)
             return
 
@@ -402,12 +446,27 @@ class ConverterApp(ttk.Frame):
             self.export_camber.set(False)
 
         summary = f"Loaded: {data.name}, chord {data.chord:g} mm, {len(data.airfoil)} pts"
-        if not has_camber:
+        if curve:
+            summary += " (curve file)"
+        elif not has_camber:
             summary += " (no camber line)"
         self.loaded_text.set(summary)
+
+        # A curve already stands somewhere, so keeping it there is the sane default.
+        self.loaded_radio.configure(state="normal" if curve else "disabled")
+        if curve:
+            self.plane_mode.set(MODE_LOADED)
+        elif self.plane_mode.get() == MODE_LOADED:
+            self.plane_mode.set("XY")
+        self._on_plane_mode_changed()
+
         if not self.out_folder.get():
             self.out_folder.set(os.path.dirname(os.path.abspath(path)))
-        self._set_status("CSV loaded. Set the plane and export.")
+        self._set_status(
+            "Curve loaded on its own plane. Set an offset and export."
+            if curve
+            else "CSV loaded. Set the plane and export."
+        )
 
     # ---------------------------------------------------------------- export
 
@@ -504,6 +563,10 @@ class ConverterApp(ttk.Frame):
         }
         if mode in geometry.MAIN_PLANES:
             kwargs.update(chord_axis=self.chord_axis.get(), up_axis=self.up_axis.get())
+        elif mode == MODE_LOADED:
+            if self.section is None:
+                raise InputError("Load a curve file to export it on its own plane.")
+            kwargs.update(frame=(self.section.u, self.section.v))
         elif mode == MODE_3POINTS:
             kwargs.update(
                 p1=self._read_vec(self.p_vars[0], "P1"),

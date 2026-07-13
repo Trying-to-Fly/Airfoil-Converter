@@ -510,3 +510,104 @@ def test_offset_rejects_a_non_finite_distance():
 def test_offset_rejects_a_degenerate_loop():
     with pytest.raises(GeometryError, match="Not enough points"):
         g.offset_airfoil([(0.0, 0.0), (1.0, 0.0)], -1.0)
+
+
+def test_offset_rejects_a_curve_that_does_not_close():
+    """One surface of an airfoil encloses nothing — there is no wall to walk round."""
+    upper, _ = g.split_surfaces(LOOP)
+    with pytest.raises(GeometryError, match="does not close on itself"):
+        g.offset_airfoil(upper, -1.0)
+
+
+def test_offset_accepts_the_gap_a_dropped_trailing_edge_leaves():
+    """Drop-duplicate output is open by one segment of a dense loop; still a section."""
+    dropped = g.drop_duplicate(circle(50.0))
+    assert min(wall(g.offset_airfoil(dropped, -5.0), dropped)) >= 5.0 - 1e-6
+
+
+# ------------------------------------------------- reading a curve back in 2D
+
+# A section shaped like an airfoil: blunt at x=0, sharp at x=100.
+SECTION = [
+    (100.0, 0.0), (60.0, 6.0), (30.0, 8.0), (8.0, 6.0), (0.0, 0.0),
+    (8.0, -4.0), (30.0, -5.0), (60.0, -3.0), (100.0, 0.0),
+]
+
+
+@pytest.mark.parametrize(
+    "plane,le,pitch",
+    [
+        ("XY", (0.0, 0.0, 0.0), 0.0),
+        ("XZ", (10.0, -3.0, 7.0), 0.0),
+        ("YZ", (1.0, 2.0, 3.0), 12.0),
+        ("3points", (5.0, 5.0, 5.0), -8.0),
+    ],
+)
+def test_flatten_puts_a_curve_back_exactly_where_it_stood(plane, le, pitch):
+    """Read a curve in, write it out unchanged: the points must land back on themselves."""
+    u, v = g.plane_frame(plane, p1=(1, 2, 3), p2=(4, -1, 2), p3=(0, 5, 7), pitch=pitch)
+    drawn = g.to_3d(SECTION, le, u, v)
+
+    section = g.flatten_curve(drawn)
+    back = g.to_3d(section.points, section.origin, section.u, section.v)
+    for was, now in zip(drawn, back):
+        assert now == approx(was)
+
+
+def test_flatten_finds_the_chord_and_the_blunt_end():
+    section = g.flatten_curve(g.to_3d(SECTION, (3.0, 4.0, 5.0), *g.plane_frame("XZ")))
+    assert section.chord == pytest.approx(100.0)
+    assert section.origin == approx((3.0, 4.0, 5.0))  # the blunt nose, not the sharp tail
+    assert section.points[0] == approx((100.0, 0.0))  # and the 2D section reads like a CSV's
+
+
+def test_flatten_reads_a_reversed_curve_the_same_way_round():
+    """A curve drawn tail-first still comes back nose-at-the-origin."""
+    drawn = g.to_3d(SECTION, (0.0, 0.0, 0.0), *g.plane_frame("XY"))
+    section = g.flatten_curve(list(reversed(drawn)))
+    assert section.origin == approx((0.0, 0.0, 0.0))
+    assert section.chord == pytest.approx(100.0)
+    assert g.signed_area(g.clean_loop(section.points)) > 0  # still counter-clockwise
+
+
+def test_flatten_rejects_a_curve_that_is_not_flat():
+    drawn = g.to_3d(SECTION, (0.0, 0.0, 0.0), *g.plane_frame("XY"))
+    drawn[3] = (drawn[3][0], drawn[3][1], 5.0)  # lift one point out of the plane
+    with pytest.raises(GeometryError, match="not flat"):
+        g.flatten_curve(drawn)
+
+
+def test_flatten_tolerates_the_rounding_in_a_written_file():
+    """Curves are written to six decimals, so they are never quite flat."""
+    drawn = [
+        tuple(round(c, 6) for c in p)
+        for p in g.to_3d(SECTION, (1.0, 2.0, 3.0), *g.plane_frame("3points",
+                         p1=(1, 2, 3), p2=(4, -1, 2), p3=(0, 5, 7)))
+    ]
+    assert g.flatten_curve(drawn).chord == pytest.approx(100.0, abs=1e-4)
+
+
+def test_flatten_rejects_a_straight_line():
+    with pytest.raises(GeometryError, match="straight line"):
+        g.flatten_curve([(0.0, 0.0, 0.0), (1.0, 1.0, 1.0), (2.0, 2.0, 2.0)])
+
+
+def test_flatten_rejects_a_curve_with_too_few_points():
+    with pytest.raises(GeometryError, match="at least three points"):
+        g.flatten_curve([(0.0, 0.0, 0.0), (1.0, 0.0, 0.0)])
+
+
+def test_loaded_plane_mode_keeps_the_curves_own_frame():
+    u, v = g.plane_frame("XZ")
+    assert g.plane_frame(g.LOADED, frame=(u, v)) == (approx(u), approx(v))
+
+
+def test_loaded_plane_mode_still_pitches_and_flips():
+    u, v = g.plane_frame("XY")
+    assert g.plane_frame(g.LOADED, frame=(u, v), flip=True)[1] == approx((0, -1, 0))
+    assert g.plane_frame(g.LOADED, frame=(u, v), rotate180=True)[0] == approx((-1, 0, 0))
+
+
+def test_loaded_plane_mode_needs_a_frame():
+    with pytest.raises(GeometryError, match="no plane to keep it on"):
+        g.plane_frame(g.LOADED)
