@@ -1,8 +1,8 @@
 # Airfoil Converter
 
 Converts airfoil-plotter CSV exports into SolidWorks *Curve Through XYZ Points*
-files (`.sldcrv` or `.txt`), with plane placement, leading-edge offset, and
-optional chord rescale.
+files (`.sldcrv` or `.txt`), with plane placement, leading-edge offset, optional
+chord rescale, and a constant-distance surface offset.
 
 No runtime dependencies — just Python 3.9+ with tkinter (bundled with the
 standard Windows Python installer).
@@ -24,26 +24,58 @@ download and double-click, no Python needed.
 1. **Browse** to an airfoil-plotter CSV (see `sd7037-il.csv` for the expected format).
 2. Choose what to export: the airfoil surface, the camber line, or both.
 3. Pick how to handle the trailing edge:
-   - **Drop duplicate** — remove the repeated final point; one open curve.
+   - **Drop duplicate** — remove the repeated final point; one open curve. The
+     trailing edge is left open by exactly the last segment of the CSV loop.
    - **Auto-close** — make the last point exactly equal the first, giving a closed curve.
    - **Split upper/lower** — two files, each running leading edge to trailing edge.
 4. Optionally enter a **target chord** to rescale (blank keeps the CSV's chord).
-5. Choose the **plane**: a main plane (XY / XZ / YZ), a plane through 3 points,
+5. Optionally enter an **offset** and pick *Inward* or *Outward* (see *Offset* below).
+6. Choose the **plane**: a main plane (XY / XZ / YZ), a plane through 3 points,
    or a plane through 2 points constrained perpendicular or parallel to a main plane.
-6. Point the airfoil where you want it (see *Orientation* below).
-7. Set where the **leading edge** lands. This is where the CSV's 2D origin is placed.
+7. Point the airfoil where you want it (see *Orientation* below).
+8. Set where the **leading edge** lands. This is where the CSV's 2D origin is placed.
    It defaults to the origin for main planes, and to `P1` for custom planes,
    until you type in it yourself.
-8. **Export.** Output goes next to the CSV by default.
+9. **Export.** Output goes next to the CSV by default.
+
+## Offset
+
+**Offset** does what SolidWorks *Offset Entities* does to a closed contour: it
+walks the surface at a fixed perpendicular distance, so the wall between the
+original section and the offset one is the same thickness everywhere. Use it for
+a skin, a wall, or a rib pocket.
+
+This is *not* a rescale, and the offset curve is generally **not the same
+airfoil**. Holding a constant distance is what matters, and where the two
+disagree, distance wins:
+
+- **A sharp trailing edge cannot survive an inward offset.** Where the section
+  is thinner than twice the offset, the offset upper and lower surfaces run into
+  each other, so the curve is trimmed back to where they cross. An inward offset
+  therefore ends in a new, blunter trailing edge, some way forward of the old
+  one — the more you offset, the further forward. The same happens at the nose
+  once the offset exceeds the leading-edge radius.
+- **An outward offset rounds a sharp trailing edge**, to an arc of the offset
+  radius, because that is what a true offset of a corner is.
+- Offset **too far inward** and the section runs out entirely; the app says so
+  rather than writing a curve.
+
+The distance is in millimetres **of the finished part** — it is applied after any
+target-chord rescale, so a 2 mm offset is 2 mm of wall whatever the chord. Only
+the airfoil surface is offset; the camber line is written unchanged. The offset
+appears in the filename (`sd7037-il_airfoil_in2mm.sldcrv`), so a set of walls
+does not overwrite itself.
+
+To get a *smaller but identical* profile instead, leave the offset blank and use
+**target chord** — that scales the section, thickness and all.
 
 ## Orientation
 
 On a **main plane**, two dropdowns place the airfoil outright:
 
-- **Chord runs along** — the signed axis from the leading edge toward the
-  trailing edge. Pick the axis the *body* extends along; the nose then points
-  the opposite way. On YZ, `-Z` puts the trailing edge at −Z, so the nose
-  points **+Z**.
+- **Chord runs along** — the signed axis from the trailing edge toward the
+  leading edge. Pick the axis the *nose* points along; the body then extends the
+  opposite way. On YZ, `+Z` points the nose at +Z and puts the trailing edge at −Z.
 - **Up direction** — which way the airfoil's thickness and camber face. Only the
   remaining in-plane axis is offered, and changing the chord axis re-offers it.
 
@@ -56,12 +88,20 @@ a half-turn about the leading-edge point: nose swaps with tail *and* top swaps
 with bottom, so the shape is unchanged and a cambered section ends up cambered
 the other way. It is not a nose-to-tail mirror.
 
+**Angle of attack** pitches the section within its plane, about the leading-edge
+point, and applies in every mode. Positive is nose-up: the leading edge stays
+put and the trailing edge swings toward the *down* side of whatever you chose as
+up. It is applied last, so it measures against the final orientation — after any
+flip or 180° rotation. Blank or `0` leaves the section unpitched.
+
 Coordinates are written in millimetres, six decimals, three space-separated
 columns per line — use with millimetre-unit SolidWorks documents.
 
-> **Trailing edge note:** try *Drop duplicate* first. Some SolidWorks versions
-> reject the coincident first/last points produced by *Auto-close* as
-> self-intersecting.
+> **Trailing edge note:** a *Curve Through XYZ Points* is always an open spline,
+> so *Drop duplicate* leaves a visible gap at the trailing edge — it removes the
+> point that closed the loop. Use *Auto-close* for a closed section, or *Split
+> upper/lower* if your SolidWorks version rejects the coincident first/last
+> points of a closed curve as self-intersecting.
 
 ## Building the executable
 
@@ -70,7 +110,7 @@ pip install pyinstaller
 build.bat
 ```
 
-This produces `dist\Airfoil Converter v1.0.exe`, a single self-contained file.
+This produces `dist\Airfoil Converter v1.1.exe`, a single self-contained file.
 If `build.bat` cannot find `pyinstaller`, use `python -m PyInstaller` instead —
 pip may have installed the scripts outside your PATH.
 
@@ -86,7 +126,7 @@ Layout:
 ```
 src/airfoil_converter/
   parser.py     # CSV -> metadata + point sections
-  geometry.py   # plane frames, 2D->3D transform, trailing-edge handling
+  geometry.py   # plane frames, 2D->3D transform, trailing-edge handling, offsetting
   writer.py     # .sldcrv / .txt output
   gui.py        # tkinter window
 tests/

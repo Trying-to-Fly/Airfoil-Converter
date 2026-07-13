@@ -65,14 +65,23 @@ def test_up_axis_options_reject_an_out_of_plane_chord():
 
 
 def test_leading_edge_can_be_aimed_along_plus_z_on_yz():
-    """The reported case: on YZ the nose pointed -Y; aiming the chord at -Z points it +Z."""
-    u, v = g.plane_frame("YZ", chord_axis="-Z", up_axis="+Y")
+    """The reported case: on YZ the nose pointed -Y; aiming the chord at +Z points it +Z."""
+    u, v = g.plane_frame("YZ", chord_axis="+Z", up_axis="+Y")
     assert u == approx((0, 0, -1))
     assert v == approx((0, 1, 0))
     # The trailing edge lands at -Z, so the nose at the origin points +Z.
     points = g.to_3d([(0, 0), (175, 0)], (0, 0, 0), u, v)
     assert points[0] == approx((0, 0, 0))
     assert points[1] == approx((0, 0, -175))
+
+
+def test_chord_axis_names_the_trailing_to_leading_direction():
+    """The body extends opposite the named axis, so the nose points along it."""
+    for plane in g.MAIN_PLANES:
+        for chord in g.chord_axis_options(plane):
+            up = g.up_axis_options(plane, chord)[0]
+            u, _ = g.axis_frame(chord, up, main_plane=plane)
+            assert u == approx(g.negate(g.AXIS_VECTORS[chord]))
 
 
 def test_axis_frame_rejects_a_repeated_axis():
@@ -158,9 +167,76 @@ def test_rotate180_works_on_custom_planes():
 
 
 def test_rotate180_combines_with_explicit_axes():
-    u, v = g.plane_frame("YZ", chord_axis="-Z", up_axis="+Y", rotate180=True)
+    u, v = g.plane_frame("YZ", chord_axis="+Z", up_axis="+Y", rotate180=True)
     assert u == approx((0, 0, 1))
     assert v == approx((0, -1, 0))
+
+
+# --------------------------------------------------------- angle of attack
+
+
+def test_zero_pitch_changes_nothing():
+    assert g.plane_frame("XY", pitch=0.0) == g.plane_frame("XY")
+
+
+def test_positive_pitch_drops_the_trailing_edge():
+    """The leading edge is the pivot, so a nose-up section puts its tail below."""
+    u, v = g.plane_frame("XY", pitch=30.0)
+    nose, tail = g.to_3d([(0, 0), (100, 0)], (0, 0, 0), u, v)
+    assert nose == approx((0, 0, 0))
+    assert tail == approx((100 * math.cos(math.radians(30)), -50.0, 0))
+
+
+def test_negative_pitch_raises_the_trailing_edge():
+    u, v = g.plane_frame("XY", pitch=-30.0)
+    _, tail = g.to_3d([(0, 0), (100, 0)], (0, 0, 0), u, v)
+    assert tail[1] == pytest.approx(50.0)
+
+
+def test_pitch_is_measured_against_the_chosen_up_axis():
+    """On YZ with the nose at +Z and up at +Y, a nose-up tail sinks in -Y."""
+    u, v = g.plane_frame("YZ", chord_axis="+Z", up_axis="+Y", pitch=10.0)
+    _, tail = g.to_3d([(0, 0), (100, 0)], (0, 0, 0), u, v)
+    assert tail[2] < 0  # still behind the nose
+    assert tail[1] == pytest.approx(-100 * math.sin(math.radians(10)))
+
+
+def test_pitch_keeps_the_frame_orthonormal():
+    u, v = g.plane_frame("3points", p1=(1, 2, 3), p2=(4, -1, 2), p3=(0, 5, 7), pitch=17.5)
+    assert g.length(u) == pytest.approx(1.0)
+    assert g.length(v) == pytest.approx(1.0)
+    assert g.dot(u, v) == pytest.approx(0.0, abs=1e-12)
+
+
+def test_pitch_stays_in_the_plane():
+    """Rotating by the angle of attack must not tilt the section out of its plane."""
+    normal = g.cross(*g.plane_frame("3points", p1=(1, 2, 3), p2=(4, -1, 2), p3=(0, 5, 7)))
+    u, v = g.plane_frame("3points", p1=(1, 2, 3), p2=(4, -1, 2), p3=(0, 5, 7), pitch=42.0)
+    assert g.dot(u, normal) == pytest.approx(0.0, abs=1e-12)
+    assert g.dot(v, normal) == pytest.approx(0.0, abs=1e-12)
+
+
+def test_pitch_preserves_shape():
+    section = [(0.0, 0.0), (175.0, 0.0), (60.0, 12.0), (40.0, -4.0)]
+    plain = g.to_3d(section, (3, 4, 5), *g.plane_frame("XZ"))
+    pitched = g.to_3d(section, (3, 4, 5), *g.plane_frame("XZ", pitch=8.0))
+    for i in range(len(section)):
+        for j in range(i + 1, len(section)):
+            assert g.length(g.sub(plain[i], plain[j])) == pytest.approx(
+                g.length(g.sub(pitched[i], pitched[j]))
+            )
+
+
+def test_pitch_accumulates_with_rotate180():
+    """rotate180 spins first, so the pitch still measures against the final up."""
+    u, v = g.plane_frame("XY", rotate180=True, pitch=90.0)
+    assert u == approx((0, 1, 0))
+    assert v == approx((-1, 0, 0))
+
+
+def test_pitch_rejects_a_non_finite_angle():
+    with pytest.raises(GeometryError, match="finite number of degrees"):
+        g.plane_frame("XY", pitch=float("inf"))
 
 
 # ------------------------------------------------------------------ 3 points
@@ -321,3 +397,116 @@ def test_split_surfaces_needs_an_interior_leading_edge():
 def test_split_surfaces_rejects_tiny_input():
     with pytest.raises(GeometryError, match="Not enough points"):
         g.split_surfaces([(0.0, 0.0), (1.0, 0.0)])
+
+
+# ----------------------------------------------------------------- offsetting
+
+
+RECT = [(100.0, 5.0), (0.0, 5.0), (0.0, -5.0), (100.0, -5.0), (100.0, 5.0)]
+
+# Trimmed corners land on the chord line to within rounding, not exactly on it.
+POINT_EPS = 1e-9
+
+# LOOP is a wedge 5 thick per 50 of chord, so its nose and tail recede by
+# distance / sin(atan(5/50)) = 10.0499 per unit of inward offset.
+WEDGE_RECESSION = 1.0 / math.sin(math.atan2(5.0, 50.0))
+
+
+def circle(radius, n=180):
+    pts = [
+        (radius * math.cos(2 * math.pi * i / n), radius * math.sin(2 * math.pi * i / n))
+        for i in range(n)
+    ]
+    return pts + [pts[0]]
+
+
+def wall(offset, original):
+    """How far each point of an offset curve stands from the curve it came from."""
+    loop = g.clean_loop(original)
+    return [g.distance_to_loop(p, loop) for p in offset]
+
+
+def extent(points):
+    xs = [x for x, _ in points]
+    ys = [y for _, y in points]
+    return max(xs) - min(xs), max(ys) - min(ys)
+
+
+@pytest.mark.parametrize("distance", [-5.0, -0.5, 0.5, 5.0])
+def test_offset_holds_a_constant_distance_all_the_way_round(distance):
+    original = circle(50.0)
+    gaps = wall(g.offset_airfoil(original, distance), original)
+    assert min(gaps) == pytest.approx(abs(distance), rel=1e-6)
+    assert max(gaps) == pytest.approx(abs(distance), rel=1e-6)
+
+
+def test_outward_offset_grows_and_inward_offset_shrinks():
+    original = circle(50.0)
+    grown = abs(g.signed_area(g.clean_loop(g.offset_airfoil(original, 5.0))))
+    shrunk = abs(g.signed_area(g.clean_loop(g.offset_airfoil(original, -5.0))))
+    assert grown > abs(g.signed_area(g.clean_loop(original))) > shrunk
+    assert shrunk == pytest.approx(math.pi * 45.0**2, rel=1e-3)
+
+
+def test_offset_is_a_wall_not_a_rescale():
+    """A rescale keeps the profile; an offset takes the same distance off every face."""
+    chord, thickness = extent(g.offset_airfoil(RECT, -1.0))
+    assert chord == pytest.approx(98.0)
+    # A rescale to a 98 chord would leave 9.8 of thickness. An offset leaves 8.
+    assert thickness == pytest.approx(8.0)
+
+
+def test_inward_offset_trims_the_sharp_trailing_edge():
+    """The offset upper and lower surfaces cross ahead of a sharp TE; the tail past it goes."""
+    inner = g.offset_airfoil(LOOP, -2.0)
+    assert max(x for x, _ in inner) == pytest.approx(100.0 - 2.0 * WEDGE_RECESSION)
+    assert max(wall(inner, LOOP)) == pytest.approx(2.0, rel=1e-6)
+
+
+@pytest.mark.parametrize("distance", [-4.0, -2.0, -0.5, 0.5, 3.0])
+def test_offset_never_comes_closer_than_the_distance(distance):
+    """The trim's whole job: no surviving point may undercut the wall thickness."""
+    assert min(wall(g.offset_airfoil(LOOP, distance), LOOP)) >= abs(distance) - 1e-6
+
+
+@pytest.mark.parametrize("distance", [-1.0, 1.0])
+def test_offset_returns_a_closed_loop_starting_at_the_trailing_edge(distance):
+    out = g.offset_airfoil(LOOP, distance)
+    assert out[0] == out[-1]
+    assert out[0][0] == pytest.approx(max(x for x, _ in out))
+
+
+def test_offset_survives_a_clockwise_loop():
+    """The CSV's winding must not decide which way 'outward' points."""
+    ccw = g.clean_loop(g.offset_airfoil(LOOP, -1.0))
+    cw = g.clean_loop(g.offset_airfoil(list(reversed(LOOP)), -1.0))
+    assert g.signed_area(cw) == pytest.approx(-g.signed_area(ccw))
+    for from_cw, from_ccw in zip(sorted(cw), sorted(ccw)):
+        assert from_cw == approx(from_ccw)
+
+
+def test_offset_output_still_splits_into_two_surfaces():
+    upper, lower = g.split_surfaces(g.offset_airfoil(LOOP, -1.0))
+    assert upper[0] == lower[0]  # both start at the leading edge
+    assert upper[-1] == lower[-1]  # and end at the trailing edge
+    assert all(y >= -POINT_EPS for _, y in upper)
+    assert all(y <= POINT_EPS for _, y in lower)
+
+
+def test_zero_offset_just_closes_the_loop():
+    assert g.offset_airfoil(LOOP, 0.0) == LOOP
+
+
+def test_offset_rejects_eating_the_whole_section():
+    with pytest.raises(GeometryError, match="eats the whole section"):
+        g.offset_airfoil(LOOP, -20.0)
+
+
+def test_offset_rejects_a_non_finite_distance():
+    with pytest.raises(GeometryError, match="finite"):
+        g.offset_airfoil(LOOP, float("nan"))
+
+
+def test_offset_rejects_a_degenerate_loop():
+    with pytest.raises(GeometryError, match="Not enough points"):
+        g.offset_airfoil([(0.0, 0.0), (1.0, 0.0)], -1.0)

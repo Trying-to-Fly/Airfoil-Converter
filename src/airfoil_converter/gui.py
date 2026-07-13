@@ -22,6 +22,10 @@ TE_MODES = (TE_DROP, TE_CLOSE, TE_SPLIT)
 MODE_3POINTS = "3points"
 MODE_2POINTS = "2points"
 
+OFFSET_INWARD = "Inward"
+OFFSET_OUTWARD = "Outward"
+OFFSET_DIRECTIONS = (OFFSET_INWARD, OFFSET_OUTWARD)
+
 OK_COLOR = "#1a7f37"
 ERROR_COLOR = "#b42318"
 
@@ -64,11 +68,14 @@ class ConverterApp(ttk.Frame):
         self.export_camber = tk.BooleanVar(value=True)
         self.te_mode = tk.StringVar(value=TE_DROP)
         self.target_chord = tk.StringVar()
+        self.offset = tk.StringVar()
+        self.offset_dir = tk.StringVar(value=OFFSET_INWARD)
         self.plane_mode = tk.StringVar(value="XY")
         self.constraint = tk.StringVar(value=geometry.PERPENDICULAR)
         self.main_plane = tk.StringVar(value="XY")
         self.flip = tk.BooleanVar(value=False)
         self.rotate180 = tk.BooleanVar(value=False)
+        self.pitch = tk.StringVar(value="0")
         default_chord, default_up = geometry.default_axes("XY")
         self.chord_axis = tk.StringVar(value=default_chord)
         self.up_axis = tk.StringVar(value=default_up)
@@ -133,6 +140,25 @@ class ConverterApp(ttk.Frame):
         ttk.Label(export, text="(blank = keep CSV chord)", foreground="#555").grid(
             row=2, column=2, sticky="w", padx=(6, 0), pady=(6, 0)
         )
+
+        ttk.Label(export, text="Offset (mm):").grid(row=3, column=0, sticky="w", pady=(6, 0))
+        ttk.Entry(export, textvariable=self.offset, width=12).grid(
+            row=3, column=1, sticky="w", pady=(6, 0)
+        )
+        ttk.Combobox(
+            export,
+            textvariable=self.offset_dir,
+            values=OFFSET_DIRECTIONS,
+            state="readonly",
+            width=9,
+        ).grid(row=3, column=2, sticky="w", padx=(6, 0), pady=(6, 0))
+        ttk.Label(
+            export,
+            text="(blank = none. Offsets the surface at a constant distance, like\n"
+            "SolidWorks Offset Entities — the camber line is left alone.)",
+            foreground="#555",
+            justify="left",
+        ).grid(row=4, column=0, columnspan=4, sticky="w", pady=(2, 0))
         row += 1
 
         plane = ttk.LabelFrame(self, text="Plane", padding=8)
@@ -205,12 +231,24 @@ class ConverterApp(ttk.Frame):
             width=5,
         )
         self.up_axis_box.grid(row=5, column=4, columnspan=2, sticky="w", padx=(4, 0), pady=(6, 0))
+        ttk.Label(
+            plane, text="(trailing edge → leading edge: the nose points this way)",
+            foreground="#555",
+        ).grid(row=6, column=0, columnspan=6, sticky="w")
 
         self.flip_check = ttk.Checkbutton(plane, text="Flip up direction", variable=self.flip)
-        self.flip_check.grid(row=6, column=0, columnspan=3, sticky="w", pady=(6, 0))
+        self.flip_check.grid(row=7, column=0, columnspan=3, sticky="w", pady=(6, 0))
         ttk.Checkbutton(
             plane, text="Flip airfoil (rotate 180° in plane)", variable=self.rotate180
-        ).grid(row=7, column=0, columnspan=6, sticky="w")
+        ).grid(row=8, column=0, columnspan=6, sticky="w")
+
+        ttk.Label(plane, text="Angle of attack (°):").grid(row=9, column=0, sticky="w", pady=(6, 0))
+        ttk.Entry(plane, textvariable=self.pitch, width=9).grid(
+            row=9, column=1, columnspan=2, sticky="w", pady=(6, 0)
+        )
+        ttk.Label(
+            plane, text="(+ pitches the nose up, about the leading edge)", foreground="#555"
+        ).grid(row=9, column=3, columnspan=3, sticky="w", padx=(6, 0), pady=(6, 0))
         row += 1
 
         placement = ttk.LabelFrame(self, text="Placement", padding=8)
@@ -377,27 +415,54 @@ class ConverterApp(ttk.Frame):
         values = [_parse_float(v.get(), f"{name} {axis}") for v, axis in zip(vars_, "XYZ")]
         return (values[0], values[1], values[2])
 
+    def _read_pitch(self) -> float:
+        text = self.pitch.get().strip()
+        if not text:
+            return 0.0
+        return _parse_float(text, "Angle of attack")
+
     def _read_target_chord(self) -> Optional[float]:
         text = self.target_chord.get().strip()
         if not text:
             return None
         return _parse_float(text, "Target chord")
 
-    def _curves(self) -> List[Tuple[str, List[Point2]]]:
+    def _read_offset(self) -> float:
+        """The offset in millimetres of finished part: positive out, negative in."""
+        text = self.offset.get().strip()
+        if not text:
+            return 0.0
+        value = _parse_float(text, "Offset")
+        if value < 0.0:
+            raise InputError(
+                "Offset must not be negative — choose Inward or Outward instead."
+            )
+        return -value if self.offset_dir.get() == OFFSET_INWARD else value
+
+    def _curves(self, factor: float) -> List[Tuple[str, List[Point2]]]:
         assert self.data is not None
         curves: List[Tuple[str, List[Point2]]] = []
 
         if self.export_airfoil.get():
             surface = self.data.airfoil
+            name = "airfoil"
+            offset = self._read_offset()
+            if offset:
+                # The offset is quoted in finished millimetres, so it has to be
+                # undone by the rescale that to_3d will apply to these points.
+                surface = geometry.offset_airfoil(surface, offset / factor)
+                side = "out" if offset > 0 else "in"
+                name = f"airfoil_{side}{abs(offset):g}mm"
+
             mode = self.te_mode.get()
             if mode == TE_DROP:
-                curves.append(("airfoil", geometry.drop_duplicate(surface)))
+                curves.append((name, geometry.drop_duplicate(surface)))
             elif mode == TE_CLOSE:
-                curves.append(("airfoil", geometry.auto_close(surface)))
+                curves.append((name, geometry.auto_close(surface)))
             elif mode == TE_SPLIT:
                 upper, lower = geometry.split_surfaces(surface)
-                curves.append(("airfoil_upper", upper))
-                curves.append(("airfoil_lower", lower))
+                curves.append((f"{name}_upper", upper))
+                curves.append((f"{name}_lower", lower))
             else:
                 raise InputError(f"Unknown TE handling mode {mode!r}.")
 
@@ -432,7 +497,11 @@ class ConverterApp(ttk.Frame):
         factor = geometry.scale_factor(self.data.chord, self._read_target_chord())
 
         mode = self.plane_mode.get()
-        kwargs = {"flip": self.flip.get(), "rotate180": self.rotate180.get()}
+        kwargs = {
+            "flip": self.flip.get(),
+            "rotate180": self.rotate180.get(),
+            "pitch": self._read_pitch(),
+        }
         if mode in geometry.MAIN_PLANES:
             kwargs.update(chord_axis=self.chord_axis.get(), up_axis=self.up_axis.get())
         elif mode == MODE_3POINTS:
@@ -451,7 +520,7 @@ class ConverterApp(ttk.Frame):
         u, v = geometry.plane_frame(mode, **kwargs)
 
         leading_edge = self._read_vec(self.le_vars, "Leading edge")
-        curves = self._curves()
+        curves = self._curves(factor)
 
         stem = os.path.splitext(os.path.basename(self.csv_path.get()))[0]
         extension = self.extension.get()
