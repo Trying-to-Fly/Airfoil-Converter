@@ -3,8 +3,9 @@
 from __future__ import annotations
 
 import os
+import sys
 import tkinter as tk
-from tkinter import filedialog, ttk
+from tkinter import filedialog, font as tkfont, ttk
 from typing import List, Optional, Sequence, Tuple
 
 from . import geometry, parser, writer
@@ -14,10 +15,10 @@ from .parser import AIRFOIL, AirfoilData, AirfoilParseError, parse_csv
 Point2 = Tuple[float, float]
 Vec3 = Tuple[float, float, float]
 
-TE_DROP = "Drop duplicate"
 TE_CLOSE = "Auto-close"
+TE_OPEN = "Leave open"
 TE_SPLIT = "Split upper/lower"
-TE_MODES = (TE_DROP, TE_CLOSE, TE_SPLIT)
+TE_MODES = (TE_CLOSE, TE_OPEN, TE_SPLIT)
 
 MODE_3POINTS = "3points"
 MODE_2POINTS = "2points"
@@ -51,8 +52,9 @@ def _parse_float(text: str, field: str) -> float:
 
 
 class ConverterApp(ttk.Frame):
-    def __init__(self, master: tk.Misc) -> None:
-        super().__init__(master, padding=12)
+    def __init__(self, master: tk.Misc, scale: float = 1.0) -> None:
+        super().__init__(master, padding=int(round(12 * scale)))
+        self.scale = scale
         self.grid(sticky="nsew")
         master.columnconfigure(0, weight=1)
         master.rowconfigure(0, weight=1)
@@ -68,7 +70,8 @@ class ConverterApp(ttk.Frame):
         self.loaded_text = tk.StringVar(value="No file loaded.")
         self.export_airfoil = tk.BooleanVar(value=True)
         self.export_camber = tk.BooleanVar(value=True)
-        self.te_mode = tk.StringVar(value=TE_DROP)
+        self.te_mode = tk.StringVar(value=TE_CLOSE)
+        self.te_thickness = tk.StringVar(value="0")
         self.target_chord = tk.StringVar()
         self.offset = tk.StringVar()
         self.offset_dir = tk.StringVar(value=OFFSET_INWARD)
@@ -101,10 +104,15 @@ class ConverterApp(ttk.Frame):
 
     # ---------------------------------------------------------------- layout
 
+    def _px(self, pixels: int) -> int:
+        """A pixel count, grown to the screen's DPI. Fonts scale themselves; these do not."""
+        return int(round(pixels * self.scale))
+
     def _build(self) -> None:
         row = 0
+        pad = self._px(8)
 
-        source = ttk.LabelFrame(self, text="Source", padding=8)
+        source = ttk.LabelFrame(self, text="Source", padding=pad)
         source.grid(row=row, column=0, sticky="ew", pady=(0, 8))
         source.columnconfigure(1, weight=1)
         ttk.Label(source, text="CSV or curve:").grid(row=0, column=0, sticky="w")
@@ -115,7 +123,7 @@ class ConverterApp(ttk.Frame):
         )
         row += 1
 
-        export = ttk.LabelFrame(self, text="Export", padding=8)
+        export = ttk.LabelFrame(self, text="Export", padding=pad)
         export.grid(row=row, column=0, sticky="ew", pady=(0, 8))
         export.columnconfigure(3, weight=1)
         ttk.Checkbutton(export, text="Airfoil surface", variable=self.export_airfoil).grid(
@@ -135,17 +143,29 @@ class ConverterApp(ttk.Frame):
             width=18,
         ).grid(row=1, column=1, columnspan=2, sticky="w", pady=(6, 0))
 
-        ttk.Label(export, text="Target chord (mm):").grid(row=2, column=0, sticky="w", pady=(6, 0))
-        ttk.Entry(export, textvariable=self.target_chord, width=12).grid(
+        ttk.Label(export, text="TE thickness (mm):").grid(row=2, column=0, sticky="w", pady=(6, 0))
+        ttk.Entry(export, textvariable=self.te_thickness, width=12).grid(
             row=2, column=1, sticky="w", pady=(6, 0)
         )
+        ttk.Label(
+            export,
+            text="(0 = keep the section's own trailing edge, and the full chord. Otherwise it is\n"
+            "cut back to a vertical line where it stands this thick — so it comes out shorter.)",
+            foreground="#555",
+            justify="left",
+        ).grid(row=3, column=0, columnspan=4, sticky="w", pady=(2, 0))
+
+        ttk.Label(export, text="Target chord (mm):").grid(row=4, column=0, sticky="w", pady=(6, 0))
+        ttk.Entry(export, textvariable=self.target_chord, width=12).grid(
+            row=4, column=1, sticky="w", pady=(6, 0)
+        )
         ttk.Label(export, text="(blank = keep CSV chord)", foreground="#555").grid(
-            row=2, column=2, sticky="w", padx=(6, 0), pady=(6, 0)
+            row=4, column=2, sticky="w", padx=(6, 0), pady=(6, 0)
         )
 
-        ttk.Label(export, text="Offset (mm):").grid(row=3, column=0, sticky="w", pady=(6, 0))
+        ttk.Label(export, text="Offset (mm):").grid(row=5, column=0, sticky="w", pady=(6, 0))
         ttk.Entry(export, textvariable=self.offset, width=12).grid(
-            row=3, column=1, sticky="w", pady=(6, 0)
+            row=5, column=1, sticky="w", pady=(6, 0)
         )
         ttk.Combobox(
             export,
@@ -153,17 +173,17 @@ class ConverterApp(ttk.Frame):
             values=OFFSET_DIRECTIONS,
             state="readonly",
             width=9,
-        ).grid(row=3, column=2, sticky="w", padx=(6, 0), pady=(6, 0))
+        ).grid(row=5, column=2, sticky="w", padx=(6, 0), pady=(6, 0))
         ttk.Label(
             export,
             text="(blank = none. Offsets the surface at a constant distance, like\n"
             "SolidWorks Offset Entities — the camber line is left alone.)",
             foreground="#555",
             justify="left",
-        ).grid(row=4, column=0, columnspan=4, sticky="w", pady=(2, 0))
+        ).grid(row=6, column=0, columnspan=4, sticky="w", pady=(2, 0))
         row += 1
 
-        plane = ttk.LabelFrame(self, text="Plane", padding=8)
+        plane = ttk.LabelFrame(self, text="Plane", padding=pad)
         plane.grid(row=row, column=0, sticky="ew", pady=(0, 8))
         radios = ttk.Frame(plane)
         radios.grid(row=0, column=0, columnspan=8, sticky="w")
@@ -266,7 +286,7 @@ class ConverterApp(ttk.Frame):
         ).grid(row=9, column=3, columnspan=3, sticky="w", padx=(6, 0), pady=(6, 0))
         row += 1
 
-        placement = ttk.LabelFrame(self, text="Placement", padding=8)
+        placement = ttk.LabelFrame(self, text="Placement", padding=pad)
         placement.grid(row=row, column=0, sticky="ew", pady=(0, 8))
         ttk.Label(placement, text="Leading edge at:").grid(row=0, column=0, sticky="w")
         self.le_entries: List[ttk.Entry] = []
@@ -280,7 +300,7 @@ class ConverterApp(ttk.Frame):
         self.le_hint.grid(row=1, column=0, columnspan=7, sticky="w", pady=(4, 0))
         row += 1
 
-        out = ttk.LabelFrame(self, text="Output", padding=8)
+        out = ttk.LabelFrame(self, text="Output", padding=pad)
         out.grid(row=row, column=0, sticky="ew", pady=(0, 8))
         out.columnconfigure(1, weight=1)
         fmt = ttk.Frame(out)
@@ -302,7 +322,9 @@ class ConverterApp(ttk.Frame):
         ttk.Button(self, text="Export", command=self._export).grid(row=row, column=0, pady=(0, 8))
         row += 1
 
-        self.status_label = ttk.Label(self, textvariable=self.status, wraplength=520)
+        self.status_label = ttk.Label(
+            self, textvariable=self.status, wraplength=self._px(520)
+        )
         self.status_label.grid(row=row, column=0, sticky="w")
 
     # ----------------------------------------------------------- interaction
@@ -486,6 +508,16 @@ class ConverterApp(ttk.Frame):
             return None
         return _parse_float(text, "Target chord")
 
+    def _read_te_thickness(self) -> float:
+        """The trailing-edge thickness in millimetres of finished part. Zero means no cut."""
+        text = self.te_thickness.get().strip()
+        if not text:
+            return 0.0
+        value = _parse_float(text, "TE thickness")
+        if value < 0.0:
+            raise InputError("TE thickness must not be negative.")
+        return value
+
     def _read_offset(self) -> float:
         """The offset in millimetres of finished part: positive out, negative in."""
         text = self.offset.get().strip()
@@ -513,8 +545,14 @@ class ConverterApp(ttk.Frame):
                 side = "out" if offset > 0 else "in"
                 name = f"airfoil_{side}{abs(offset):g}mm"
 
+            # Blunting comes after the offset, so the cut lands on the curve that
+            # actually gets exported. It too is quoted in finished millimetres.
+            thickness = self._read_te_thickness()
+            if thickness:
+                surface = geometry.blunt_trailing_edge(surface, thickness / factor)
+
             mode = self.te_mode.get()
-            if mode == TE_DROP:
+            if mode == TE_OPEN:
                 curves.append((name, geometry.drop_duplicate(surface)))
             elif mode == TE_CLOSE:
                 curves.append((name, geometry.auto_close(surface)))
@@ -597,11 +635,57 @@ class ConverterApp(ttk.Frame):
         self._set_status("Wrote " + ", ".join(written))
 
 
+def _declare_dpi_aware() -> None:
+    """Ask Windows for real pixels, before Tk opens a window.
+
+    A process that does not say it understands high-DPI screens is handed a
+    pretend 96-DPI one and has everything it draws — its own widgets, and the
+    common dialogs it opens — bitmap-stretched up to the true resolution. That
+    stretching is what makes the Browse dialog look coarse and blurry.
+    """
+    if sys.platform != "win32":
+        return
+    import ctypes
+
+    try:
+        ctypes.windll.shcore.SetProcessDpiAwareness(1)  # System DPI aware.
+    except (AttributeError, OSError):
+        try:
+            ctypes.windll.user32.SetProcessDPIAware()  # Windows 8 and older.
+        except (AttributeError, OSError):
+            pass
+
+
+def _scale_to_dpi(root: tk.Tk) -> float:
+    """Grow Tk's fonts to the screen we just admitted to. Returns the scale factor."""
+    dpi = root.winfo_fpixels("1i")
+    if dpi <= 0:
+        return 1.0
+    root.tk.call("tk", "scaling", dpi / 72.0)
+
+    factor = dpi / 96.0
+    if factor <= 1.01:
+        return 1.0
+    # A font sized in points already follows the scaling set above; one sized in
+    # pixels — Tk writes those as a negative size — has to be grown by hand.
+    for name in tkfont.names(root):
+        try:
+            f = tkfont.nametofont(name, root)
+        except tk.TclError:
+            continue
+        size = f.cget("size")
+        if size < 0:
+            f.configure(size=int(round(size * factor)))
+    return factor
+
+
 def main() -> None:
+    _declare_dpi_aware()
     root = tk.Tk()
     root.title("Airfoil Converter")
-    root.minsize(560, 200)
-    ConverterApp(root)
+    scale = _scale_to_dpi(root)
+    root.minsize(int(560 * scale), int(200 * scale))
+    ConverterApp(root, scale=scale)
     root.mainloop()
 
 

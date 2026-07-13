@@ -525,6 +525,81 @@ def test_offset_accepts_the_gap_a_dropped_trailing_edge_leaves():
     assert min(wall(g.offset_airfoil(dropped, -5.0), dropped)) >= 5.0 - 1e-6
 
 
+# --------------------------------------------------------- blunt trailing edge
+
+# LOOP is a diamond: aft of x=50 it thins from 10 mm to nothing at x=100, so it
+# stands T mm thick at x = 100 - 5T.
+
+
+@pytest.mark.parametrize("thickness", [0.5, 2.0, 5.0])
+def test_blunt_te_cuts_the_section_back_to_a_vertical_line(thickness):
+    cut = g.blunt_trailing_edge(LOOP, thickness)
+    (x0, y0), (x1, y1) = cut[0], cut[-1]
+    assert x0 == pytest.approx(x1)  # One end sits directly above the other.
+    assert abs(y0 - y1) == pytest.approx(thickness, rel=1e-9)
+    assert x0 == pytest.approx(100.0 - 5.0 * thickness, rel=1e-9)
+
+
+def test_blunt_te_shortens_the_airfoil_rather_than_stretching_it():
+    """The chord ends at the cut: what the cut takes off is not made up elsewhere."""
+    cut = g.blunt_trailing_edge(LOOP, 2.0)
+    assert max(x for x, _ in cut) == pytest.approx(90.0)
+    assert min(x for x, _ in cut) == pytest.approx(0.0)  # The nose does not move.
+
+
+def test_zero_thickness_leaves_the_section_alone():
+    assert g.blunt_trailing_edge(LOOP, 0.0) == LOOP
+
+
+def test_blunt_te_leaves_an_already_blunter_trailing_edge_alone():
+    """A section that ends thicker than asked for has nothing to give up."""
+    assert g.blunt_trailing_edge(OPEN_TE, 1.0) == OPEN_TE
+
+
+def test_blunt_te_cuts_a_section_that_already_ends_blunt():
+    cut = g.blunt_trailing_edge(OPEN_TE, 3.0)
+    (x0, y0), (x1, y1) = cut[0], cut[-1]
+    assert x0 == pytest.approx(x1) == pytest.approx(93.75)
+    assert abs(y0 - y1) == pytest.approx(3.0)
+
+
+def test_blunt_te_keeps_the_leading_edge_and_both_surfaces():
+    cut = g.blunt_trailing_edge(LOOP, 2.0)
+    upper, lower = g.split_surfaces(cut)
+    assert upper[0] == lower[0] == (0.0, 0.0)
+    assert upper[-1] == pytest.approx((90.0, 1.0))
+    assert lower[-1] == pytest.approx((90.0, -1.0))
+
+
+def test_auto_close_shuts_a_blunt_trailing_edge_with_the_vertical_line():
+    closed = g.auto_close(g.blunt_trailing_edge(LOOP, 2.0))
+    assert closed[-1] == closed[0]
+    assert closed[-2][0] == pytest.approx(closed[-1][0])  # The closing line is vertical.
+
+
+def test_blunt_te_squares_off_a_rounded_offset_trailing_edge():
+    """An outward offset rounds the sharp tail; the cut flattens it again."""
+    cut = g.blunt_trailing_edge(g.offset_airfoil(LOOP, 2.0), 1.5)
+    (x0, y0), (x1, y1) = cut[0], cut[-1]
+    assert x0 == pytest.approx(x1)
+    assert abs(y0 - y1) == pytest.approx(1.5, rel=1e-6)
+
+
+def test_blunt_te_rejects_a_cut_thicker_than_the_section():
+    with pytest.raises(GeometryError, match="thicker than the section itself"):
+        g.blunt_trailing_edge(LOOP, 20.0)
+
+
+def test_blunt_te_rejects_a_negative_thickness():
+    with pytest.raises(GeometryError, match="not be negative"):
+        g.blunt_trailing_edge(LOOP, -1.0)
+
+
+def test_blunt_te_rejects_a_non_finite_thickness():
+    with pytest.raises(GeometryError, match="finite"):
+        g.blunt_trailing_edge(LOOP, float("inf"))
+
+
 # ------------------------------------------------- reading a curve back in 2D
 
 # A section shaped like an airfoil: blunt at x=0, sharp at x=100.

@@ -29,20 +29,23 @@ download and double-click, no Python needed.
    format), or to a curve file (see *Curve files as input* below).
 2. Choose what to export: the airfoil surface, the camber line, or both.
 3. Pick how to handle the trailing edge:
-   - **Drop duplicate** — remove the repeated final point; one open curve. The
-     trailing edge is left open by exactly the last segment of the CSV loop.
-   - **Auto-close** — make the last point exactly equal the first, giving a closed curve.
+   - **Auto-close** (the default) — make the last point exactly equal the first,
+     giving a closed curve.
+   - **Leave open** — remove the repeated final point; one open curve, left open
+     at the trailing edge.
    - **Split upper/lower** — two files, each running leading edge to trailing edge.
-4. Optionally enter a **target chord** to rescale (blank keeps the source's chord).
-5. Optionally enter an **offset** and pick *Inward* or *Outward* (see *Offset* below).
-6. Choose the **plane**: a main plane (XY / XZ / YZ), a plane through 3 points,
+4. Optionally enter a **TE thickness** to blunt the trailing edge (see *Trailing
+   edge* below). `0` keeps the section's own trailing edge, and its full chord.
+5. Optionally enter a **target chord** to rescale (blank keeps the source's chord).
+6. Optionally enter an **offset** and pick *Inward* or *Outward* (see *Offset* below).
+7. Choose the **plane**: a main plane (XY / XZ / YZ), a plane through 3 points,
    a plane through 2 points constrained perpendicular or parallel to a main
    plane, or — for a loaded curve — **As loaded**, its own plane.
-7. Point the airfoil where you want it (see *Orientation* below).
-8. Set where the **leading edge** lands. This is where the 2D origin is placed.
+8. Point the airfoil where you want it (see *Orientation* below).
+9. Set where the **leading edge** lands. This is where the 2D origin is placed.
    It defaults to the origin for main planes, to `P1` for custom planes, and to
    the curve's own leading edge for a loaded curve, until you type in it yourself.
-9. **Export.** Output goes next to the source file by default.
+10. **Export.** Output goes next to the source file by default.
 
 ## Curve files as input
 
@@ -70,6 +73,29 @@ Two things to know:
   plane is refused, and so is half a surface: *Split upper/lower* output encloses
   no area, so there is no wall to walk around. Offset the whole loop, and split
   it afterwards if you need the halves.
+
+## Trailing edge
+
+A drawn airfoil ends in a point of no thickness. A built one cannot, so **TE
+thickness** cuts the section back to a trailing edge you can actually make.
+
+The cut is a *vertical* line — a line of constant chordwise station — placed
+where the section stands exactly that thick. The curve comes back with its two
+ends one directly above the other, so a single straight line closes the section
+in CAD. In *Auto-close* that line is drawn for you; in *Leave open* you draw it
+yourself, and in *Split upper/lower* the two halves end level with each other.
+
+**The chord ends at the cut.** What the cut takes off is not made up elsewhere:
+the section is not stretched back out to its nominal chord, so a 175 mm airfoil
+given a 1.5 mm trailing edge comes out about 166 mm long, nose to cut. The
+airfoil is simply shorter. Set the thickness to `0` — the default — to keep the
+section's own trailing edge and its full chord.
+
+The thickness is in millimetres **of the finished part**, so it is applied after
+any target-chord rescale, and after any offset — the cut lands on the curve that
+actually gets exported. A trailing edge thicker than the section itself is
+refused, and a section that already ends blunter than you asked for is left
+alone: it has nothing to give up.
 
 ## Offset
 
@@ -132,10 +158,10 @@ Coordinates are written in millimetres, six decimals, three space-separated
 columns per line — use with millimetre-unit SolidWorks documents.
 
 > **Trailing edge note:** a *Curve Through XYZ Points* is always an open spline,
-> so *Drop duplicate* leaves a visible gap at the trailing edge — it removes the
-> point that closed the loop. Use *Auto-close* for a closed section, or *Split
-> upper/lower* if your SolidWorks version rejects the coincident first/last
-> points of a closed curve as self-intersecting.
+> so *Leave open* leaves a visible gap at the trailing edge — it removes the
+> point that closed the loop. *Auto-close* is the default and gives a closed
+> section; use *Split upper/lower* if your SolidWorks version rejects the
+> coincident first/last points of a closed curve as self-intersecting.
 
 ## Building the executable
 

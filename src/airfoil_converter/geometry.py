@@ -429,6 +429,110 @@ def auto_close(points: Sequence[Point2]) -> List[Point2]:
     return pts
 
 
+def clean_open_curve(points: Sequence[Point2]) -> List[Point2]:
+    """Drop repeated points from an open curve, keeping both of its ends."""
+    pts: List[Point2] = []
+    for p in points:
+        if not pts or not _same_point(pts[-1], p):
+            pts.append(p)
+    return pts
+
+
+# --------------------------------------------------------- blunt trailing edge
+
+
+def _thickness_at(loop: Sequence[Point2], x: float) -> float:
+    """How far the section stands, top to bottom, where a vertical line at ``x`` cuts it."""
+    ys: List[float] = []
+    n = len(loop)
+    for i in range(n):
+        (x0, y0), (x1, y1) = loop[i], loop[(i + 1) % n]
+        if (x0 <= x < x1) or (x1 <= x < x0):
+            ys.append(y0 + (y1 - y0) * (x - x0) / (x1 - x0))
+    return max(ys) - min(ys) if len(ys) >= 2 else 0.0
+
+
+def _thickest_station(loop: Sequence[Point2]) -> Tuple[float, float]:
+    """The chordwise station where the section stands thickest, and how thick it is."""
+    return max(((x, _thickness_at(loop, x)) for x, _ in loop), key=lambda s: s[1])
+
+
+def _cut_at(loop: Sequence[Point2], x: float) -> List[Point2]:
+    """Keep the part of a closed loop ahead of a vertical line, cut ends included.
+
+    The walk starts at the aftmost point — behind the line, so the chain always
+    opens where the loop first crosses it and closes where it crosses back.
+    """
+    start = max(range(len(loop)), key=lambda i: loop[i][0])
+    pts = list(loop[start:]) + list(loop[:start])
+    n = len(pts)
+
+    chains: List[List[Point2]] = []
+    chain: List[Point2] = []
+    for i in range(n):
+        (x0, y0), (x1, y1) = pts[i], pts[(i + 1) % n]
+        ahead = x0 <= x
+        if ahead:
+            chain.append((x0, y0))
+        if ahead != (x1 <= x):
+            chain.append((x, y0 + (y1 - y0) * (x - x0) / (x1 - x0)))
+            if ahead:
+                chains.append(chain)
+                chain = []
+    if chain:
+        chains.append(chain)
+    if not chains:
+        raise GeometryError("The trailing-edge cut misses the section entirely.")
+    return max(chains, key=len)
+
+
+def blunt_trailing_edge(points: Sequence[Point2], thickness: float) -> List[Point2]:
+    """Cut a closed airfoil loop back to a trailing edge of the given thickness.
+
+    The cut is the vertical line — a line of constant chordwise station — where
+    the section stands exactly ``thickness`` thick, so the curve comes back open,
+    its two ends one directly above the other, ready to be closed by a straight
+    line in CAD. The chord ends at that line: the section is not stretched to make
+    up what the cut took off, so the airfoil simply comes out shorter than the
+    chord it was drawn to. A thickness of zero leaves the loop as it stands.
+    """
+    if not math.isfinite(thickness):
+        raise GeometryError("Trailing-edge thickness must be a finite number.")
+    if thickness < 0.0:
+        raise GeometryError("Trailing-edge thickness must not be negative.")
+    if thickness <= POINT_TOL:
+        return list(points)
+
+    loop = clean_loop(points)
+    if len(loop) < 3:
+        raise GeometryError("Not enough points to blunt the trailing edge.")
+
+    # A section that already ends blunter than this has nothing to give up.
+    tail = max(x for x, _ in loop)
+    ends = [y for x, y in loop if x >= tail - POINT_TOL]
+    if max(ends) - min(ends) >= thickness:
+        return list(points)
+
+    station, thickest = _thickest_station(loop)
+    if thickness >= thickest:
+        raise GeometryError(
+            f"A {thickness:g} mm trailing edge is thicker than the section itself, which "
+            f"stands {thickest:g} mm at its thickest — the cut would take the whole airfoil."
+        )
+
+    # Aft of its thickest station a section only thins, down to nothing at the
+    # tail, so the one place it stands this thick can be closed in on.
+    lo, hi = station, tail
+    for _ in range(80):
+        mid = 0.5 * (lo + hi)
+        if _thickness_at(loop, mid) > thickness:
+            lo = mid
+        else:
+            hi = mid
+
+    return clean_open_curve(_cut_at(loop, 0.5 * (lo + hi)))
+
+
 # ------------------------------------------------------------------ offsetting
 
 
