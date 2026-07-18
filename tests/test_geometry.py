@@ -330,6 +330,79 @@ def test_unknown_constraint():
         g.plane_frame("2points", p1=(0, 0, 0), p2=(1, 0, 0), constraint="Tangent")
 
 
+# ------------------------------------------------------------- normal line
+
+
+def test_normal_line_along_z_gives_the_xy_frame():
+    u, v = g.plane_frame(g.NORMAL_LINE, p1=(0, 0, 0), p2=(0, 0, 5))
+    assert u == approx((1, 0, 0))
+    assert v == approx((0, 1, 0))
+
+
+def test_normal_line_along_x_gives_the_yz_frame():
+    """The line runs along X, so the chord falls back to the +Y convention."""
+    u, v = g.plane_frame(g.NORMAL_LINE, p1=(0, 0, 0), p2=(3, 0, 0))
+    assert u == approx((0, 1, 0))
+    assert v == approx((0, 0, 1))
+
+
+def test_normal_line_along_minus_y_gives_the_xz_frame():
+    u, v = g.plane_frame(g.NORMAL_LINE, p1=(0, 0, 0), p2=(0, -2, 0))
+    assert u == approx((1, 0, 0))
+    assert v == approx((0, 0, 1))
+
+
+def test_swapping_the_line_ends_flips_up():
+    """Reversing the line turns the plane over: same chord, opposite 'up'."""
+    _, v = g.plane_frame(g.NORMAL_LINE, p1=(0, 0, 0), p2=(0, 0, 5))
+    _, v_swapped = g.plane_frame(g.NORMAL_LINE, p1=(0, 0, 5), p2=(0, 0, 0))
+    assert v_swapped == approx(g.negate(v))
+
+
+def test_normal_line_frame_is_perpendicular_to_the_line():
+    n = g.normalize(g.sub((4.0, -1.0, 2.0), (1.0, 2.0, 3.0)))
+    u, v = g.plane_frame(g.NORMAL_LINE, p1=(1, 2, 3), p2=(4, -1, 2))
+    assert g.dot(u, n) == pytest.approx(0.0, abs=1e-12)
+    assert g.dot(v, n) == pytest.approx(0.0, abs=1e-12)
+
+
+def test_normal_line_frame_is_orthonormal():
+    u, v = g.plane_frame(g.NORMAL_LINE, p1=(1, 2, 3), p2=(4, -1, 2))
+    assert g.length(u) == pytest.approx(1.0)
+    assert g.length(v) == pytest.approx(1.0)
+    assert g.dot(u, v) == pytest.approx(0.0, abs=1e-12)
+
+
+def test_normal_line_only_the_direction_matters():
+    """Moving the line without turning it keeps the same frame."""
+    frame = g.plane_frame(g.NORMAL_LINE, p1=(0, 0, 0), p2=(1, 2, 3))
+    moved = g.plane_frame(g.NORMAL_LINE, p1=(7, -4, 9), p2=(8, -2, 12))
+    assert moved[0] == approx(frame[0])
+    assert moved[1] == approx(frame[1])
+
+
+def test_normal_line_chord_faces_plus_x_seen_from_p2():
+    """The convention: chord toward +X, and (u, v, line) right-handed."""
+    n = g.normalize(g.sub((4.0, -1.0, 2.0), (1.0, 2.0, 3.0)))
+    u, v = g.plane_frame(g.NORMAL_LINE, p1=(1, 2, 3), p2=(4, -1, 2))
+    assert g.dot(u, (1.0, 0.0, 0.0)) > 0
+    assert g.cross(u, v) == approx(n)
+
+
+def test_normal_line_still_flips_rotates_and_pitches():
+    u, v = g.plane_frame(g.NORMAL_LINE, p1=(0, 0, 0), p2=(0, 0, 5), flip=True)
+    assert (u, v) == (approx((1, 0, 0)), approx((0, -1, 0)))
+    u, v = g.plane_frame(g.NORMAL_LINE, p1=(0, 0, 0), p2=(0, 0, 5), rotate180=True)
+    assert (u, v) == (approx((-1, 0, 0)), approx((0, -1, 0)))
+    u, v = g.plane_frame(g.NORMAL_LINE, p1=(0, 0, 0), p2=(0, 0, 5), pitch=90.0)
+    assert (u, v) == (approx((0, -1, 0)), approx((1, 0, 0)))
+
+
+def test_normal_line_rejects_coincident_points():
+    with pytest.raises(GeometryError, match="coincident"):
+        g.plane_frame(g.NORMAL_LINE, p1=(1, 1, 1), p2=(1, 1, 1))
+
+
 # ------------------------------------------------------------------ transform
 
 

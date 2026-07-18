@@ -19,6 +19,9 @@ MAIN_PLANES = ("XY", "XZ", "YZ")
 # The plane a loaded curve file already lies on.
 LOADED = "loaded"
 
+# A plane given by its normal: the line P1 -> P2, with the plane through P1.
+NORMAL_LINE = "normal_line"
+
 # Corner arcs on the outer side of a turn are chorded at this angular step.
 ARC_STEP_DEG = 5.0
 # A miter reaching further than this many offset distances is bevelled instead.
@@ -184,6 +187,24 @@ def perpendicular_frame(p1: Vec3, p2: Vec3, main_plane: str) -> Tuple[Vec3, Vec3
     return u, cross(normalize(n), u)
 
 
+def normal_line_frame(p1: Vec3, p2: Vec3) -> Tuple[Vec3, Vec3]:
+    """Plane through P1 whose normal is the line P1 -> P2.
+
+    The line fixes the plane but not the airfoil's directions on it, so the
+    frame follows a convention: seen from P2, looking back along the line at
+    the plane, the chord runs toward global +X — or toward +Y when the line
+    itself runs along X — and 'up' completes that view. Swapping P1 and P2
+    turns the plane over, flipping 'up'.
+    """
+    n = normalize(sub(p2, p1), "normal direction P1->P2")
+    for axis in ((1.0, 0.0, 0.0), (0.0, 1.0, 0.0)):
+        chord = sub(axis, scale(n, dot(axis, n)))
+        if length(chord) > DIR_TOL:
+            u = normalize(chord)
+            return u, cross(n, u)
+    raise GeometryError("Could not orient a frame on the plane.")  # pragma: no cover
+
+
 def parallel_frame(p1: Vec3, p2: Vec3, main_plane: str) -> Tuple[Vec3, Vec3]:
     """Plane through P1,P2 parallel to a main plane. Requires (P2-P1) to lie in it."""
     m = PLANE_NORMALS[main_plane]
@@ -236,8 +257,10 @@ def plane_frame(
 
     On main planes, ``chord_axis``/``up_axis`` name the signed axes directly
     (e.g. '-Z', '+Y'); the chord axis points trailing edge -> leading edge, and
-    omitting both keeps the plane's conventional frame. Mode ``LOADED`` takes
-    the plane a curve file was already drawn on, passed in as ``frame``.
+    omitting both keeps the plane's conventional frame. Mode ``NORMAL_LINE``
+    takes the plane through ``p1`` perpendicular to the line ``p1 -> p2``.
+    Mode ``LOADED`` takes the plane a curve file was already drawn on, passed
+    in as ``frame``.
     ``rotate180`` spins the airfoil within its plane, swapping nose with tail
     and top with bottom. ``flip`` mirrors 'up' alone. ``pitch`` is the angle of
     attack in degrees, applied last, about the leading edge and relative to the
@@ -259,6 +282,8 @@ def plane_frame(
             )
     elif mode == "3points":
         u, v = three_point_frame(p1, p2, p3)
+    elif mode == NORMAL_LINE:
+        u, v = normal_line_frame(p1, p2)
     elif mode == "2points":
         if constraint == PERPENDICULAR:
             u, v = perpendicular_frame(p1, p2, main_plane)

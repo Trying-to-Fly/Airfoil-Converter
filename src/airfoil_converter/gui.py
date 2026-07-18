@@ -22,6 +22,7 @@ TE_MODES = (TE_CLOSE, TE_OPEN, TE_SPLIT)
 
 MODE_3POINTS = "3points"
 MODE_2POINTS = "2points"
+MODE_NORMAL = geometry.NORMAL_LINE
 MODE_LOADED = geometry.LOADED
 
 OFFSET_INWARD = "Inward"
@@ -203,6 +204,17 @@ class ConverterApp(ttk.Frame):
                 variable=self.plane_mode,
                 command=self._on_plane_mode_changed,
             ).grid(row=0, column=i, sticky="w", padx=(0, 10))
+        ttk.Radiobutton(
+            radios,
+            text="Normal to line",
+            value=MODE_NORMAL,
+            variable=self.plane_mode,
+            command=self._on_plane_mode_changed,
+        ).grid(row=1, column=0, columnspan=3, sticky="w", pady=(2, 0))
+        ttk.Label(
+            radios, text="(the plane through P1 perpendicular to the line P1 → P2)",
+            foreground="#555",
+        ).grid(row=1, column=3, columnspan=3, sticky="w", pady=(2, 0))
         self.loaded_radio = ttk.Radiobutton(
             radios,
             text="As loaded",
@@ -211,11 +223,11 @@ class ConverterApp(ttk.Frame):
             command=self._on_plane_mode_changed,
             state="disabled",
         )
-        self.loaded_radio.grid(row=1, column=0, columnspan=3, sticky="w", pady=(2, 0))
+        self.loaded_radio.grid(row=2, column=0, columnspan=3, sticky="w", pady=(2, 0))
         ttk.Label(
             radios, text="(keeps a loaded curve on its own plane, where it stands)",
             foreground="#555",
-        ).grid(row=1, column=3, columnspan=3, sticky="w")
+        ).grid(row=2, column=3, columnspan=3, sticky="w")
 
         for pi, name in enumerate(("P1", "P2", "P3")):
             ttk.Label(plane, text=name).grid(row=1 + pi, column=0, sticky="w", pady=(4, 0))
@@ -342,9 +354,9 @@ class ConverterApp(ttk.Frame):
 
     def _on_plane_mode_changed(self) -> None:
         mode = self.plane_mode.get()
-        custom = mode in (MODE_3POINTS, MODE_2POINTS)
+        custom = mode in (MODE_3POINTS, MODE_2POINTS, MODE_NORMAL)
         on_main_plane = mode in geometry.MAIN_PLANES
-        needed = 3 if mode == MODE_3POINTS else (2 if mode == MODE_2POINTS else 0)
+        needed = 3 if mode == MODE_3POINTS else (2 if mode in (MODE_2POINTS, MODE_NORMAL) else 0)
         for pi, entries in enumerate(self.p_entries):
             state = "normal" if pi < needed else "disabled"
             for entry in entries:
@@ -411,7 +423,7 @@ class ConverterApp(ttk.Frame):
         try:
             if mode == MODE_LOADED and self.section is not None:
                 values = [f"{c:g}" for c in self.section.origin]
-            elif mode in (MODE_3POINTS, MODE_2POINTS):
+            elif mode in (MODE_3POINTS, MODE_2POINTS, MODE_NORMAL):
                 values = [var.get() for var in self.p_vars[0]]
             else:
                 values = ["0", "0", "0"]
@@ -617,6 +629,11 @@ class ConverterApp(ttk.Frame):
                 p2=self._read_vec(self.p_vars[1], "P2"),
                 constraint=self.constraint.get(),
                 main_plane=self.main_plane.get(),
+            )
+        elif mode == MODE_NORMAL:
+            kwargs.update(
+                p1=self._read_vec(self.p_vars[0], "P1"),
+                p2=self._read_vec(self.p_vars[1], "P2"),
             )
         u, v = geometry.plane_frame(mode, **kwargs)
 

@@ -40,7 +40,8 @@ download and double-click, no Python needed.
 6. Optionally enter an **offset** and pick *Inward* or *Outward* (see *Offset* below).
 7. Choose the **plane**: a main plane (XY / XZ / YZ), a plane through 3 points,
    a plane through 2 points constrained perpendicular or parallel to a main
-   plane, or — for a loaded curve — **As loaded**, its own plane.
+   plane, a plane **normal to a line** — through `P1`, perpendicular to the
+   line `P1 -> P2` — or, for a loaded curve, **As loaded**, its own plane.
 8. Point the airfoil where you want it (see *Orientation* below).
 9. Set where the **leading edge** lands. This is where the 2D origin is placed.
    It defaults to the origin for main planes, to `P1` for custom planes, and to
@@ -143,6 +144,14 @@ On a **3-point or 2-point plane** the chord is fixed by `P1 -> P2`, and on an
 disabled. Instead, **Flip up direction** mirrors which side of the chord counts
 as up.
 
+On a **normal-to-line plane** the line fixes only the plane, not the airfoil's
+directions on it, so they follow a convention: seen from `P2`, looking back
+along the line at the plane, the chord runs toward global +X (or toward +Y when
+the line itself runs along X) and up completes that view. A line along +Z
+therefore reproduces the XY plane's frame exactly. Swapping `P1` and `P2` turns
+the plane over — same plane, opposite up — and **Flip up direction**, the 180°
+flip and the angle of attack all apply as usual.
+
 **Flip airfoil (rotate 180° in plane)** works in every mode. It spins the section
 a half-turn about the leading-edge point: nose swaps with tail *and* top swaps
 with bottom, so the shape is unchanged and a cambered section ends up cambered
@@ -170,7 +179,7 @@ pip install pyinstaller
 build.bat
 ```
 
-This produces `dist\Airfoil Converter v1.1.exe`, a single self-contained file.
+This produces `dist\Airfoil Converter v1.3.exe`, a single self-contained file.
 If `build.bat` cannot find `pyinstaller`, use `python -m PyInstaller` instead —
 pip may have installed the scripts outside your PATH.
 
