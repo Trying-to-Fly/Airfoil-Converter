@@ -18,12 +18,16 @@ Vec3 = Tuple[float, float, float]
 TE_CLOSE = "Auto-close"
 TE_OPEN = "Leave open"
 TE_SPLIT = "Split upper/lower"
-TE_MODES = (TE_CLOSE, TE_OPEN, TE_SPLIT)
+TE_LINE = "Close with TE line"
+TE_MODES = (TE_CLOSE, TE_OPEN, TE_SPLIT, TE_LINE)
 
 MODE_3POINTS = "3points"
 MODE_2POINTS = "2points"
 MODE_NORMAL = geometry.NORMAL_LINE
 MODE_LOADED = geometry.LOADED
+
+# In-plane rotation, in quarter turns: the label's index is the number of turns.
+ROTATIONS = ("0°", "90°", "180°", "270°")
 
 OFFSET_INWARD = "Inward"
 OFFSET_OUTWARD = "Outward"
@@ -73,6 +77,7 @@ class ConverterApp(ttk.Frame):
         self.export_camber = tk.BooleanVar(value=True)
         self.te_mode = tk.StringVar(value=TE_CLOSE)
         self.te_thickness = tk.StringVar(value="0")
+        self.keep_chord = tk.BooleanVar(value=False)
         self.target_chord = tk.StringVar()
         self.offset = tk.StringVar()
         self.offset_dir = tk.StringVar(value=OFFSET_INWARD)
@@ -80,7 +85,7 @@ class ConverterApp(ttk.Frame):
         self.constraint = tk.StringVar(value=geometry.PERPENDICULAR)
         self.main_plane = tk.StringVar(value="XY")
         self.flip = tk.BooleanVar(value=False)
-        self.rotate180 = tk.BooleanVar(value=False)
+        self.rotation = tk.StringVar(value=ROTATIONS[0])
         self.pitch = tk.StringVar(value="0")
         default_chord, default_up = geometry.default_axes("XY")
         self.chord_axis = tk.StringVar(value=default_chord)
@@ -143,15 +148,25 @@ class ConverterApp(ttk.Frame):
             state="readonly",
             width=18,
         ).grid(row=1, column=1, columnspan=2, sticky="w", pady=(6, 0))
+        ttk.Label(
+            export,
+            text="(TE line = the surface open, plus a\ntwo-point curve closing the gap)",
+            foreground="#555",
+            justify="left",
+        ).grid(row=1, column=3, sticky="w", padx=(6, 0), pady=(6, 0))
 
         ttk.Label(export, text="TE thickness (mm):").grid(row=2, column=0, sticky="w", pady=(6, 0))
         ttk.Entry(export, textvariable=self.te_thickness, width=12).grid(
             row=2, column=1, sticky="w", pady=(6, 0)
         )
+        ttk.Checkbutton(
+            export, text="Keep chord after the cut", variable=self.keep_chord
+        ).grid(row=2, column=2, columnspan=2, sticky="w", padx=(12, 0), pady=(6, 0))
         ttk.Label(
             export,
             text="(0 = keep the section's own trailing edge, and the full chord. Otherwise it is\n"
-            "cut back to a vertical line where it stands this thick — so it comes out shorter.)",
+            "cut back to a vertical line where it stands this thick — so it comes out shorter,\n"
+            "unless 'Keep chord' scales it back up to the full chord with the gap still exact.)",
             foreground="#555",
             justify="left",
         ).grid(row=3, column=0, columnspan=4, sticky="w", pady=(2, 0))
@@ -285,9 +300,20 @@ class ConverterApp(ttk.Frame):
 
         self.flip_check = ttk.Checkbutton(plane, text="Flip up direction", variable=self.flip)
         self.flip_check.grid(row=7, column=0, columnspan=3, sticky="w", pady=(6, 0))
-        ttk.Checkbutton(
-            plane, text="Flip airfoil (rotate 180° in plane)", variable=self.rotate180
-        ).grid(row=8, column=0, columnspan=6, sticky="w")
+        ttk.Label(plane, text="Rotate in plane:").grid(row=8, column=0, sticky="w", pady=(6, 0))
+        ttk.Combobox(
+            plane,
+            textvariable=self.rotation,
+            values=ROTATIONS,
+            state="readonly",
+            width=6,
+        ).grid(row=8, column=1, columnspan=2, sticky="w", pady=(6, 0))
+        ttk.Label(
+            plane,
+            text="(quarter turns about the leading edge, the way a\n+ angle of attack turns)",
+            foreground="#555",
+            justify="left",
+        ).grid(row=8, column=3, columnspan=3, sticky="w", padx=(6, 0), pady=(6, 0))
 
         ttk.Label(plane, text="Angle of attack (°):").grid(row=9, column=0, sticky="w", pady=(6, 0))
         ttk.Entry(plane, textvariable=self.pitch, width=9).grid(
@@ -508,6 +534,15 @@ class ConverterApp(ttk.Frame):
         values = [_parse_float(v.get(), f"{name} {axis}") for v, axis in zip(vars_, "XYZ")]
         return (values[0], values[1], values[2])
 
+    def _read_quarter_turns(self) -> int:
+        """The in-plane rotation, as a count of 90° turns."""
+        try:
+            return ROTATIONS.index(self.rotation.get())
+        except ValueError:
+            raise InputError(
+                f"Rotation must be one of {', '.join(ROTATIONS)} (got {self.rotation.get()!r})."
+            ) from None
+
     def _read_pitch(self) -> float:
         text = self.pitch.get().strip()
         if not text:
@@ -561,7 +596,9 @@ class ConverterApp(ttk.Frame):
             # actually gets exported. It too is quoted in finished millimetres.
             thickness = self._read_te_thickness()
             if thickness:
-                surface = geometry.blunt_trailing_edge(surface, thickness / factor)
+                surface = geometry.blunt_trailing_edge(
+                    surface, thickness / factor, keep_chord=self.keep_chord.get()
+                )
 
             mode = self.te_mode.get()
             if mode == TE_OPEN:
@@ -572,6 +609,11 @@ class ConverterApp(ttk.Frame):
                 upper, lower = geometry.split_surfaces(surface)
                 curves.append((f"{name}_upper", upper))
                 curves.append((f"{name}_lower", lower))
+            elif mode == TE_LINE:
+                # The gap is closed by its own two-point curve, which imports as a
+                # straight line; closing it inside the spline would bulge it.
+                curves.append((name, geometry.drop_duplicate(surface)))
+                curves.append((f"{name}_te", geometry.trailing_edge_line(surface)))
             else:
                 raise InputError(f"Unknown TE handling mode {mode!r}.")
 
@@ -608,7 +650,7 @@ class ConverterApp(ttk.Frame):
         mode = self.plane_mode.get()
         kwargs = {
             "flip": self.flip.get(),
-            "rotate180": self.rotate180.get(),
+            "quarter_turns": self._read_quarter_turns(),
             "pitch": self._read_pitch(),
         }
         if mode in geometry.MAIN_PLANES:

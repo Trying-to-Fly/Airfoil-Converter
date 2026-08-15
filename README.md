@@ -34,8 +34,12 @@ download and double-click, no Python needed.
    - **Leave open** — remove the repeated final point; one open curve, left open
      at the trailing edge.
    - **Split upper/lower** — two files, each running leading edge to trailing edge.
+   - **Close with TE line** — the surface as one open curve, plus a second file
+     holding just the two trailing-edge points, which imports as a straight line
+     closing the gap. For a blunt trailing edge (see *Trailing edge* below).
 4. Optionally enter a **TE thickness** to blunt the trailing edge (see *Trailing
-   edge* below). `0` keeps the section's own trailing edge, and its full chord.
+   edge* below). `0` keeps the section's own trailing edge, and its full chord;
+   tick **Keep chord after the cut** to get both the blunt edge and the chord.
 5. Optionally enter a **target chord** to rescale (blank keeps the source's chord).
 6. Optionally enter an **offset** and pick *Inward* or *Outward* (see *Offset* below).
 7. Choose the **plane**: a main plane (XY / XZ / YZ), a plane through 3 points,
@@ -83,14 +87,28 @@ thickness** cuts the section back to a trailing edge you can actually make.
 The cut is a *vertical* line — a line of constant chordwise station — placed
 where the section stands exactly that thick. The curve comes back with its two
 ends one directly above the other, so a single straight line closes the section
-in CAD. In *Auto-close* that line is drawn for you; in *Leave open* you draw it
-yourself, and in *Split upper/lower* the two halves end level with each other.
+in CAD. *Close with TE line* writes that line as its own two-point curve file,
+`..._airfoil_te.sldcrv`, which imports as a genuine straight segment; *Auto-close*
+instead shuts the loop inside the spline, which bulges slightly across a blunt
+gap; in *Leave open* you draw the line yourself, and in *Split upper/lower* the
+two halves end level with each other.
 
-**The chord ends at the cut.** What the cut takes off is not made up elsewhere:
-the section is not stretched back out to its nominal chord, so a 175 mm airfoil
-given a 1.5 mm trailing edge comes out about 166 mm long, nose to cut. The
-airfoil is simply shorter. Set the thickness to `0` — the default — to keep the
-section's own trailing edge and its full chord.
+**By default the chord ends at the cut.** What the cut takes off is not made up
+elsewhere, so a 175 mm airfoil given a 1.5 mm trailing edge comes out about
+166 mm long, nose to cut — the airfoil is simply shorter. Set the thickness to
+`0`, the default, to keep the section's own trailing edge and its full chord.
+
+**Keep chord after the cut** gets you both. The section is grown back about the
+leading edge until it spans its original chord again, and the cut is made a
+little further aft to allow for that growth, so the finished section carries the
+full chord *and* a trailing edge exactly as thick as you asked: a 275 mm section
+cut to a 0.8 mm trailing edge stays 275 mm long with a 0.8 mm gap, instead of the
+267 mm it would come out at otherwise. Growing it is a true scaling, not a
+chordwise stretch, so the profile is unchanged — but everything grows with it:
+that 275 mm SD7037 comes back about 2.8 % thicker, since that is what it takes to
+make up the 7 mm the cut removed. The chord it returns to is the one the points
+actually span, which for a curve read back in is the chord it reports, not the
+nominal one.
 
 The thickness is in millimetres **of the finished part**, so it is applied after
 any target-chord rescale, and after any offset — the cut lands on the curve that
@@ -149,19 +167,24 @@ directions on it, so they follow a convention: seen from `P2`, looking back
 along the line at the plane, the chord runs toward global +X (or toward +Y when
 the line itself runs along X) and up completes that view. A line along +Z
 therefore reproduces the XY plane's frame exactly. Swapping `P1` and `P2` turns
-the plane over — same plane, opposite up — and **Flip up direction**, the 180°
-flip and the angle of attack all apply as usual.
+the plane over — same plane, opposite up — and **Flip up direction**, the
+in-plane rotation and the angle of attack all apply as usual.
 
-**Flip airfoil (rotate 180° in plane)** works in every mode. It spins the section
-a half-turn about the leading-edge point: nose swaps with tail *and* top swaps
+**Rotate in plane** turns the section by `0°`, `90°`, `180°` or `270°` about the
+leading-edge point, and works in every mode. A turn goes the way a positive
+angle of attack goes — the trailing edge swings toward the *down* side first — so
+`90°` stands the section on its tail, with the nose still at the leading-edge
+point, and `270°` stands it on its back. `180°` swaps nose with tail *and* top
 with bottom, so the shape is unchanged and a cambered section ends up cambered
-the other way. It is not a nose-to-tail mirror.
+the other way; it is not a nose-to-tail mirror. The turns are exact: `90°` swaps
+and negates the plane's two axes rather than taking a sine of anything, so an
+airfoil on a main plane stays exactly on its axes.
 
 **Angle of attack** pitches the section within its plane, about the leading-edge
 point, and applies in every mode. Positive is nose-up: the leading edge stays
 put and the trailing edge swings toward the *down* side of whatever you chose as
 up. It is applied last, so it measures against the final orientation — after any
-flip or 180° rotation. Blank or `0` leaves the section unpitched.
+flip or in-plane rotation. Blank or `0` leaves the section unpitched.
 
 Coordinates are written in millimetres, six decimals, three space-separated
 columns per line — use with millimetre-unit SolidWorks documents.
@@ -170,7 +193,9 @@ columns per line — use with millimetre-unit SolidWorks documents.
 > so *Leave open* leaves a visible gap at the trailing edge — it removes the
 > point that closed the loop. *Auto-close* is the default and gives a closed
 > section; use *Split upper/lower* if your SolidWorks version rejects the
-> coincident first/last points of a closed curve as self-intersecting.
+> coincident first/last points of a closed curve as self-intersecting, and
+> *Close with TE line* when the trailing edge is blunt and the gap should be
+> closed by a straight line rather than by the spline.
 
 ## Building the executable
 
@@ -179,7 +204,7 @@ pip install pyinstaller
 build.bat
 ```
 
-This produces `dist\Airfoil Converter v1.3.exe`, a single self-contained file.
+This produces `dist\Airfoil Converter v1.4.exe`, a single self-contained file.
 If `build.bat` cannot find `pyinstaller`, use `python -m PyInstaller` instead —
 pip may have installed the scripts outside your PATH.
 

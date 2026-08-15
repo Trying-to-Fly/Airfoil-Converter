@@ -220,6 +220,27 @@ def parallel_frame(p1: Vec3, p2: Vec3, main_plane: str) -> Tuple[Vec3, Vec3]:
     return u, cross(m, u)
 
 
+def quarter_turn_frame(u: Vec3, v: Vec3, turns: int) -> Tuple[Vec3, Vec3]:
+    """Turn a frame a whole number of quarter-turns within its own plane.
+
+    A turn goes the way a positive angle of attack goes — the tail swings toward
+    -v first — so one turn stands the section on its tail, two swap nose with
+    tail and top with bottom, and three stand it on its back. The axes are only
+    swapped and negated, never trigonometry, so a quarter turn is exact.
+    """
+    try:
+        turns = int(turns)
+    except (TypeError, ValueError):
+        raise GeometryError("In-plane rotation must be a whole number of quarter turns.") from None
+    x, y = (1, 0), (0, 1)
+    for _ in range(turns % 4):
+        x, y = (x[1], -x[0]), (y[1], -y[0])
+    return (
+        add(scale(u, x[0]), scale(v, x[1])),
+        add(scale(u, y[0]), scale(v, y[1])),
+    )
+
+
 def pitch_frame(u: Vec3, v: Vec3, degrees: float) -> Tuple[Vec3, Vec3]:
     """Rotate a frame within its own plane by an angle of attack, in degrees.
 
@@ -247,7 +268,7 @@ def plane_frame(
     constraint: str = PERPENDICULAR,
     main_plane: str = "XY",
     flip: bool = False,
-    rotate180: bool = False,
+    quarter_turns: int = 0,
     pitch: float = 0.0,
     chord_axis: Optional[str] = None,
     up_axis: Optional[str] = None,
@@ -261,10 +282,11 @@ def plane_frame(
     takes the plane through ``p1`` perpendicular to the line ``p1 -> p2``.
     Mode ``LOADED`` takes the plane a curve file was already drawn on, passed
     in as ``frame``.
-    ``rotate180`` spins the airfoil within its plane, swapping nose with tail
-    and top with bottom. ``flip`` mirrors 'up' alone. ``pitch`` is the angle of
-    attack in degrees, applied last, about the leading edge and relative to the
-    final 'up'.
+    ``quarter_turns`` spins the airfoil within its plane in exact 90° steps,
+    about the leading edge and the way a positive angle of attack goes, so two
+    turns swap nose with tail and top with bottom. ``flip`` mirrors 'up' alone.
+    ``pitch`` is the angle of attack in degrees, applied last, about the leading
+    edge and relative to the final 'up'.
     """
     if mode == LOADED:
         if frame is None:
@@ -294,8 +316,8 @@ def plane_frame(
     else:
         raise GeometryError(f"Unknown plane mode {mode!r}.")
 
-    if rotate180:
-        u, v = negate(u), negate(v)
+    if quarter_turns:
+        u, v = quarter_turn_frame(u, v, quarter_turns)
     if flip:
         v = negate(v)
     return pitch_frame(u, v, pitch)
@@ -511,15 +533,29 @@ def _cut_at(loop: Sequence[Point2], x: float) -> List[Point2]:
     return max(chains, key=len)
 
 
-def blunt_trailing_edge(points: Sequence[Point2], thickness: float) -> List[Point2]:
+def chord_span(points: Sequence[Point2]) -> float:
+    """How far the section reaches chordwise, nose to tail."""
+    xs = [x for x, _ in points]
+    return max(xs) - min(xs)
+
+
+def blunt_trailing_edge(
+    points: Sequence[Point2], thickness: float, keep_chord: bool = False
+) -> List[Point2]:
     """Cut a closed airfoil loop back to a trailing edge of the given thickness.
 
     The cut is the vertical line — a line of constant chordwise station — where
     the section stands exactly ``thickness`` thick, so the curve comes back open,
     its two ends one directly above the other, ready to be closed by a straight
-    line in CAD. The chord ends at that line: the section is not stretched to make
-    up what the cut took off, so the airfoil simply comes out shorter than the
-    chord it was drawn to. A thickness of zero leaves the loop as it stands.
+    line in CAD.
+
+    The cut costs the section the sliver aft of that line, so by default it comes
+    out shorter than the chord it was drawn to. With ``keep_chord`` the section is
+    grown back about the 2D origin until it spans its original chord again: the
+    cut is made a little further aft to allow for that growth, so the finished
+    section carries both the chord it came in with and a trailing edge exactly
+    ``thickness`` thick. Growing it is a true scaling — the profile is unchanged,
+    just very slightly larger. A thickness of zero leaves the loop as it stands.
     """
     if not math.isfinite(thickness):
         raise GeometryError("Trailing-edge thickness must be a finite number.")
@@ -545,17 +581,65 @@ def blunt_trailing_edge(points: Sequence[Point2], thickness: float) -> List[Poin
             f"stands {thickest:g} mm at its thickest — the cut would take the whole airfoil."
         )
 
+    chord = chord_span(loop)
+    nose = min(x for x, _ in loop)
+
+    def gap_at(x: float) -> float:
+        """The trailing edge a cut here leaves, measured on the finished section."""
+        gap = _thickness_at(loop, x)
+        if not keep_chord:
+            return gap
+        span = x - nose
+        return gap * chord / span if span > POINT_TOL else math.inf
+
     # Aft of its thickest station a section only thins, down to nothing at the
-    # tail, so the one place it stands this thick can be closed in on.
+    # tail — and growing a shorter cut back to the chord only thickens it further
+    # — so the one place it stands this thick can be closed in on.
     lo, hi = station, tail
     for _ in range(80):
         mid = 0.5 * (lo + hi)
-        if _thickness_at(loop, mid) > thickness:
+        if gap_at(mid) > thickness:
             lo = mid
         else:
             hi = mid
 
-    return clean_open_curve(_cut_at(loop, 0.5 * (lo + hi)))
+    cut = clean_open_curve(_cut_at(loop, 0.5 * (lo + hi)))
+    if not keep_chord:
+        return cut
+
+    span = chord_span(cut)
+    if span <= POINT_TOL:
+        raise GeometryError("The trailing-edge cut leaves no chord to grow back.")
+    factor = chord / span
+    return [(x * factor, y * factor) for x, y in cut]
+
+
+def trailing_edge_line(points: Sequence[Point2]) -> List[Point2]:
+    """The straight line closing an open section: just its two trailing-edge ends.
+
+    A curve file holding only these two points imports as a straight line, so a
+    blunt trailing edge is closed the way it should be — by a line — rather than
+    by a spline bulging across the gap.
+    """
+    pts = clean_open_curve(points)
+    if len(pts) < 2:
+        raise GeometryError("Not enough points to close the trailing edge.")
+    a, b = pts[0], pts[-1]
+    span = chord_span(pts)
+    if math.hypot(b[0] - a[0], b[1] - a[1]) <= 1e-6 * span:
+        raise GeometryError(
+            "This section ends in a point, so there is no trailing edge to close with a "
+            "line. Set a TE thickness to cut one, or choose another TE handling mode."
+        )
+    # A blunt trailing edge stands square across the chord. Ends that lie well off
+    # that line are not a gap at all — they are a loop that simply never closed.
+    if abs(b[0] - a[0]) > 1e-3 * span:
+        raise GeometryError(
+            "The section's two ends do not stand one above the other, so they do not "
+            "form a trailing-edge gap to close. This mode expects a blunt trailing "
+            "edge — set a TE thickness to cut one."
+        )
+    return [a, b]
 
 
 # ------------------------------------------------------------------ offsetting

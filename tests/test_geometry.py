@@ -111,19 +111,68 @@ def test_axis_frame_is_always_orthonormal():
                 assert g.dot(u, v) == pytest.approx(0.0)
 
 
-# ------------------------------------------------------- 180-degree rotation
+# ---------------------------------------------------------- quarter turns
 
 
-def test_rotate180_negates_both_axes():
-    u, v = g.plane_frame("XY", rotate180=True)
+def test_no_quarter_turns_changes_nothing():
+    assert g.plane_frame("XY", quarter_turns=0) == g.plane_frame("XY")
+
+
+def test_one_quarter_turn_stands_the_section_on_its_tail():
+    """A turn goes the way a positive angle of attack goes: the tail swings to -v."""
+    u, v = g.plane_frame("XY")
+    ru, rv = g.plane_frame("XY", quarter_turns=1)
+    assert ru == approx(g.negate(v))
+    assert rv == approx(u)
+
+
+def test_a_quarter_turn_matches_a_90_degree_pitch():
+    for turns in range(4):
+        turned = g.plane_frame("XZ", quarter_turns=turns)
+        pitched = g.plane_frame("XZ", pitch=90.0 * turns)
+        assert turned == (approx(pitched[0]), approx(pitched[1]))
+
+
+def test_three_quarter_turns_are_one_the_other_way():
+    back = g.plane_frame("YZ", quarter_turns=-1)
+    assert g.plane_frame("YZ", quarter_turns=3) == (approx(back[0]), approx(back[1]))
+
+
+def test_four_quarter_turns_are_identity():
+    assert g.plane_frame("XY", quarter_turns=4) == g.plane_frame("XY")
+
+
+def test_quarter_turns_stay_exact():
+    """Turning by whole quarters only swaps and negates axes — no trigonometry creeps in."""
+    for turns in range(1, 4):
+        for vec in g.plane_frame("XY", quarter_turns=turns):
+            assert sorted(abs(c) for c in vec) == [0.0, 0.0, 1.0]
+
+
+def test_a_quarter_turn_swings_the_tail_toward_the_down_side():
+    u, v = g.plane_frame("XY", quarter_turns=1)
+    section = [(0.0, 0.0), (100.0, 0.0), (50.0, 10.0)]
+    turned = g.to_3d(section, (0, 0, 0), u, v)
+    assert turned[0] == approx((0, 0, 0))
+    assert turned[1] == approx((0, -100, 0))
+    assert turned[2] == approx((10, -50, 0))
+
+
+def test_quarter_turns_reject_a_fractional_count():
+    with pytest.raises(GeometryError, match="whole number of quarter turns"):
+        g.plane_frame("XY", quarter_turns="half")
+
+
+def test_two_quarter_turns_negate_both_axes():
+    u, v = g.plane_frame("XY", quarter_turns=2)
     assert u == approx((-1, 0, 0))
     assert v == approx((0, -1, 0))
 
 
-def test_rotate180_swaps_nose_and_tail_about_the_leading_edge():
+def test_two_quarter_turns_swap_nose_and_tail_about_the_leading_edge():
     """Nose stays put; the body and the camber both swing to the other side."""
     u, v = g.plane_frame("XY")
-    ru, rv = g.plane_frame("XY", rotate180=True)
+    ru, rv = g.plane_frame("XY", quarter_turns=2)
     section = [(0.0, 0.0), (100.0, 0.0), (50.0, 10.0)]
     normal = g.to_3d(section, (0, 0, 0), u, v)
     rotated = g.to_3d(section, (0, 0, 0), ru, rv)
@@ -132,11 +181,11 @@ def test_rotate180_swaps_nose_and_tail_about_the_leading_edge():
     assert normal[2] == approx((50, 10, 0)) and rotated[2] == approx((-50, -10, 0))
 
 
-def test_rotate180_preserves_shape():
-    """A 180-degree rotation is rigid: every pairwise distance survives it."""
+def test_two_quarter_turns_preserve_shape():
+    """A half turn is rigid: every pairwise distance survives it."""
     section = [(0.0, 0.0), (175.0, 0.0), (60.0, 12.0), (40.0, -4.0)]
     u, v = g.plane_frame("XZ")
-    ru, rv = g.plane_frame("XZ", rotate180=True)
+    ru, rv = g.plane_frame("XZ", quarter_turns=2)
     plain = g.to_3d(section, (3, 4, 5), u, v)
     spun = g.to_3d(section, (3, 4, 5), ru, rv)
     for i in range(len(section)):
@@ -146,28 +195,28 @@ def test_rotate180_preserves_shape():
             )
 
 
-def test_rotate180_applied_twice_is_identity():
+def test_two_quarter_turns_applied_twice_is_identity():
     u, v = g.plane_frame("YZ")
-    ru, rv = g.plane_frame("YZ", rotate180=True)
+    ru, rv = g.plane_frame("YZ", quarter_turns=2)
     assert g.negate(ru) == approx(u)
     assert g.negate(rv) == approx(v)
 
 
-def test_rotate180_and_flip_compose_to_a_chord_only_mirror():
+def test_a_half_turn_and_flip_compose_to_a_chord_only_mirror():
     """Rotating then flipping up leaves 'up' alone and reverses only the chord."""
-    u, v = g.plane_frame("XY", rotate180=True, flip=True)
+    u, v = g.plane_frame("XY", quarter_turns=2, flip=True)
     assert u == approx((-1, 0, 0))
     assert v == approx((0, 1, 0))
 
 
-def test_rotate180_works_on_custom_planes():
-    u, v = g.plane_frame("3points", p1=(0, 0, 0), p2=(1, 0, 0), p3=(0, 1, 0), rotate180=True)
+def test_quarter_turns_work_on_custom_planes():
+    u, v = g.plane_frame("3points", p1=(0, 0, 0), p2=(1, 0, 0), p3=(0, 1, 0), quarter_turns=2)
     assert u == approx((-1, 0, 0))
     assert v == approx((0, -1, 0))
 
 
-def test_rotate180_combines_with_explicit_axes():
-    u, v = g.plane_frame("YZ", chord_axis="+Z", up_axis="+Y", rotate180=True)
+def test_quarter_turns_combine_with_explicit_axes():
+    u, v = g.plane_frame("YZ", chord_axis="+Z", up_axis="+Y", quarter_turns=2)
     assert u == approx((0, 0, 1))
     assert v == approx((0, -1, 0))
 
@@ -227,9 +276,9 @@ def test_pitch_preserves_shape():
             )
 
 
-def test_pitch_accumulates_with_rotate180():
-    """rotate180 spins first, so the pitch still measures against the final up."""
-    u, v = g.plane_frame("XY", rotate180=True, pitch=90.0)
+def test_pitch_accumulates_with_quarter_turns():
+    """The quarter turns spin first, so the pitch still measures against the final up."""
+    u, v = g.plane_frame("XY", quarter_turns=2, pitch=90.0)
     assert u == approx((0, 1, 0))
     assert v == approx((-1, 0, 0))
 
@@ -392,7 +441,7 @@ def test_normal_line_chord_faces_plus_x_seen_from_p2():
 def test_normal_line_still_flips_rotates_and_pitches():
     u, v = g.plane_frame(g.NORMAL_LINE, p1=(0, 0, 0), p2=(0, 0, 5), flip=True)
     assert (u, v) == (approx((1, 0, 0)), approx((0, -1, 0)))
-    u, v = g.plane_frame(g.NORMAL_LINE, p1=(0, 0, 0), p2=(0, 0, 5), rotate180=True)
+    u, v = g.plane_frame(g.NORMAL_LINE, p1=(0, 0, 0), p2=(0, 0, 5), quarter_turns=2)
     assert (u, v) == (approx((-1, 0, 0)), approx((0, -1, 0)))
     u, v = g.plane_frame(g.NORMAL_LINE, p1=(0, 0, 0), p2=(0, 0, 5), pitch=90.0)
     assert (u, v) == (approx((0, -1, 0)), approx((1, 0, 0)))
@@ -673,6 +722,77 @@ def test_blunt_te_rejects_a_non_finite_thickness():
         g.blunt_trailing_edge(LOOP, float("inf"))
 
 
+# ------------------------------------------- blunt trailing edge, chord kept
+
+
+@pytest.mark.parametrize("thickness", [0.5, 2.0, 5.0])
+def test_keep_chord_returns_the_full_chord_and_the_asked_for_gap(thickness):
+    cut = g.blunt_trailing_edge(LOOP, thickness, keep_chord=True)
+    (x0, y0), (x1, y1) = cut[0], cut[-1]
+    assert g.chord_span(cut) == pytest.approx(100.0, rel=1e-9)
+    assert x0 == pytest.approx(x1)  # The gap is still a vertical line.
+    assert abs(y0 - y1) == pytest.approx(thickness, rel=1e-6)
+
+
+def test_keep_chord_cuts_further_aft_and_thinner_than_a_plain_cut():
+    """Growing the section back thickens the gap, so the cut allows for that."""
+    plain = g.blunt_trailing_edge(LOOP, 2.0)
+    kept = g.blunt_trailing_edge(LOOP, 2.0, keep_chord=True)
+    # The cut is made at x = 2000/22 on a section that is then grown by 100/x.
+    assert max(x for x, _ in plain) == pytest.approx(90.0)
+    assert abs(kept[0][1] - kept[-1][1]) == pytest.approx(2.0, rel=1e-6)
+    assert len(kept) == len(plain)
+
+
+def test_keep_chord_scales_the_whole_section_rather_than_stretching_it():
+    """A true scaling: the profile is unchanged, just very slightly larger."""
+    kept = g.blunt_trailing_edge(LOOP, 2.0, keep_chord=True)
+    factor = 100.0 / (2000.0 / 22.0)  # chord / the station the cut is made at
+    assert min(x for x, _ in kept) == pytest.approx(0.0)  # The nose stays at the origin.
+    assert max(y for _, y in kept) == pytest.approx(5.0 * factor)
+    assert [x for x, y in kept if y == max(yy for _, yy in kept)] == [
+        pytest.approx(50.0 * factor)
+    ]
+
+
+def test_keep_chord_on_a_section_that_already_ends_blunt():
+    kept = g.blunt_trailing_edge(OPEN_TE, 3.0, keep_chord=True)
+    assert g.chord_span(kept) == pytest.approx(100.0, rel=1e-9)
+    assert abs(kept[0][1] - kept[-1][1]) == pytest.approx(3.0, rel=1e-6)
+
+
+def test_keep_chord_still_rejects_a_cut_thicker_than_the_section():
+    with pytest.raises(GeometryError, match="thicker than the section itself"):
+        g.blunt_trailing_edge(LOOP, 20.0, keep_chord=True)
+
+
+# ------------------------------------------------------- trailing-edge line
+
+
+def test_te_line_is_the_two_ends_of_a_blunt_section():
+    cut = g.blunt_trailing_edge(LOOP, 2.0)
+    line = g.trailing_edge_line(cut)
+    assert line == [cut[0], cut[-1]]
+    assert line[0][0] == pytest.approx(line[1][0])  # Vertical.
+    assert abs(line[0][1] - line[1][1]) == pytest.approx(2.0, rel=1e-9)
+
+
+def test_te_line_closes_a_chord_keeping_cut_too():
+    kept = g.blunt_trailing_edge(LOOP, 0.8, keep_chord=True)
+    line = g.trailing_edge_line(kept)
+    assert abs(line[0][1] - line[1][1]) == pytest.approx(0.8, rel=1e-6)
+
+
+def test_te_line_rejects_a_section_that_ends_in_a_point():
+    with pytest.raises(GeometryError, match="ends in a point"):
+        g.trailing_edge_line(LOOP)
+
+
+def test_te_line_rejects_ends_that_are_not_a_trailing_edge_gap():
+    with pytest.raises(GeometryError, match="do not stand one above the other"):
+        g.trailing_edge_line(g.drop_duplicate(LOOP))
+
+
 # ------------------------------------------------- reading a curve back in 2D
 
 # A section shaped like an airfoil: blunt at x=0, sharp at x=100.
@@ -753,7 +873,7 @@ def test_loaded_plane_mode_keeps_the_curves_own_frame():
 def test_loaded_plane_mode_still_pitches_and_flips():
     u, v = g.plane_frame("XY")
     assert g.plane_frame(g.LOADED, frame=(u, v), flip=True)[1] == approx((0, -1, 0))
-    assert g.plane_frame(g.LOADED, frame=(u, v), rotate180=True)[0] == approx((-1, 0, 0))
+    assert g.plane_frame(g.LOADED, frame=(u, v), quarter_turns=2)[0] == approx((-1, 0, 0))
 
 
 def test_loaded_plane_mode_needs_a_frame():
