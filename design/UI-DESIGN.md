@@ -373,6 +373,14 @@ closed it could not then get it back.
 **The plane readout says `3 points · picked in SolidWorks`** rather than
 naming the plane picked from, for the same reason the tracker rows do.
 
+**The strip scrolls as a page when the screen is shorter than it is**, which
+§2 allows for and calls the exception. It is not: with the pick tracker open
+the strip is about 1225 px and a 1080p screen has about 1000 to give it, so
+the footer — the status line and Export — would sit under the taskbar. The
+window opens at the height the screen's work area actually has, and a
+scrollbar appears beside the strip only while there is something to scroll.
+Nothing inside the strip scrolls on its own.
+
 The fonts are registered from `src/airfoil_converter/assets/fonts`, which
 ships empty: see the README there. `tests/test_ui_text.py` covers every line
 of derived text — the readouts, the tracker rows, the flyout's card — on a

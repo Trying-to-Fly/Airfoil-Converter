@@ -296,19 +296,83 @@ class ConverterApp(ttk.Frame):
         that moves out into a column of its own.
         """
         self.columnconfigure(0, weight=0, minsize=theme.px(STRIP_WIDTH + 24))
-        self.columnconfigure(2, weight=1, minsize=theme.px(FLYOUT_WIDTH))
+        self.columnconfigure(3, weight=1, minsize=theme.px(FLYOUT_WIDTH))
         self.rowconfigure(0, weight=1)
 
-        strip = tk.Frame(self, bg=theme.WINDOW)
-        strip.grid(row=0, column=0, sticky="nsew")
+        # The strip is a page, not a scrolling list: nothing inside it scrolls
+        # on its own. But it is about 1200 px tall with the pick tracker open,
+        # and a 1080p screen is not, so the whole page scrolls when it does not
+        # fit and the scrollbar is not there at all when it does.
+        self._page = tk.Canvas(self, bg=theme.WINDOW, highlightthickness=0, bd=0,
+                               width=theme.px(STRIP_WIDTH + 24))
+        self._page.grid(row=0, column=0, sticky="nsew")
+        self._page_bar = ttk.Scrollbar(self, orient="vertical",
+                                       style="Af.Vertical.TScrollbar",
+                                       command=self._page.yview)
+        self._page.configure(yscrollcommand=self._page_bar.set)
+
+        strip = tk.Frame(self._page, bg=theme.WINDOW)
+        self._page_window = self._page.create_window(
+            (0, 0), window=strip, anchor="nw", width=theme.px(STRIP_WIDTH + 24)
+        )
         self._build_strip(strip)
+        strip.bind("<Configure>", self._fit_page)
+        self._page.bind("<Configure>", self._fit_page)
+        self._page.bind_all("<MouseWheel>", self._on_wheel, add="+")
+        # A canvas asks for a size of its own and knows nothing about what is
+        # in it, so the window would open at Tk's default height. It opens at
+        # the strip's height instead, or the screen's, whichever is less.
+        self.after_idle(self._size_page)
 
         self._flyout_edge = tk.Frame(self, bg=theme.BORDER_SOFT,
                                      width=max(1, theme.px(1)))
-        self._flyout_edge.grid(row=0, column=1, sticky="ns")
+        self._flyout_edge.grid(row=0, column=2, sticky="ns")
         self.flyout = tk.Frame(self, bg=theme.SECONDARY_BG)
-        self.flyout.grid(row=0, column=2, sticky="nsew")
+        self.flyout.grid(row=0, column=3, sticky="nsew")
         self._build_solidworks(self.flyout)
+
+    def _size_page(self) -> None:
+        strip = self._page.nametowidget(self._page.itemcget(self._page_window, "window"))
+        room = _work_area_height(self.winfo_toplevel()) - theme.px(40)
+        self._page.configure(height=min(strip.winfo_reqheight(), room))
+
+    def _relayout(self) -> None:
+        """Say that the strip changed height, because nothing else will.
+
+        The page fixes the strip's height to the canvas item's, so the strip is
+        never resized by its own contents and its ``<Configure>`` never fires —
+        which is exactly what happens when the pick tracker opens.
+        """
+        # A moment later, not now and not at the next idle: Tk works out what
+        # a frame is asking for as it settles, and both of those read the
+        # height the strip had before the tracker opened.
+        if hasattr(self, "_page"):
+            self.after(50, self._fit_page)
+
+    def _fit_page(self, _event: Optional[tk.Event] = None) -> None:
+        """Keep the page as tall as its content, or as tall as the window."""
+        strip = self._page.nametowidget(self._page.itemcget(self._page_window, "window"))
+        wanted = strip.winfo_reqheight()
+        visible = self._page.winfo_height()
+        self._page.itemconfigure(self._page_window, height=max(wanted, visible))
+        self._page.configure(scrollregion=(0, 0, self._page.winfo_width(),
+                                           max(wanted, visible)))
+        if wanted > visible:
+            self._page_bar.grid(row=0, column=1, sticky="ns")
+        else:
+            self._page_bar.grid_remove()
+            self._page.yview_moveto(0)
+
+    def _on_wheel(self, event: tk.Event) -> None:
+        """The wheel scrolls the page, but only while there is a page to scroll."""
+        if not self._page_bar.winfo_ismapped():
+            return
+        over = self.winfo_containing(event.x_root, event.y_root)
+        while over is not None:
+            if over is self.flyout:
+                return  # the tree does its own scrolling
+            over = getattr(over, "master", None)
+        self._page.yview_scroll(-1 if event.delta > 0 else 1, "units")
 
     def _build_strip(self, strip: tk.Misc) -> None:
         strip.columnconfigure(0, weight=1)
@@ -386,6 +450,7 @@ class ConverterApp(ttk.Frame):
         loaded.grid(row=1, column=0, sticky="w", pady=(theme.px(7), 0))
         self.outline = widgets.Outline(loaded)
         self.outline.grid(row=0, column=0, padx=(0, theme.px(8)))
+        self.outline.grid_remove()
         self.loaded_name_label = tk.Label(
             loaded, textvariable=self.loaded_name, bg=theme.WHITE,
             fg=theme.FAINT, font=self.fonts.hint_bold,
@@ -427,7 +492,7 @@ class ConverterApp(ttk.Frame):
         self._row_label(body, 3, "Target chord")
         chord = self._cell(body, 3)
         self.target_field = widgets.Field(
-            chord, self.target_chord, width=84, unit="mm", placeholder="chord",
+            chord, self.target_chord, width=84, unit="mm", placeholder="",
         )
         self.target_field.grid(row=0, column=0)
         self._hint(chord, "blank keeps the source chord").grid(
@@ -989,7 +1054,8 @@ class ConverterApp(ttk.Frame):
             self.loaded_detail.set("")
             self.loaded_name_label.configure(fg=theme.FAINT)
             self.outline.show(None)
-            self.target_field.set_placeholder("chord")
+            self.outline.grid_remove()
+            self.target_field.set_placeholder("")
             return
 
         name, detail = ui_text.source_line(
@@ -998,8 +1064,10 @@ class ConverterApp(ttk.Frame):
         self.loaded_name.set(name)
         self.loaded_detail.set(f"· {detail}")
         self.loaded_name_label.configure(fg=theme.INK)
+        self.outline.grid()
         self.outline.show(data.airfoil)
         self.target_field.set_placeholder(f"{data.chord:g}")
+        self._relayout()
 
     def _load(self, path: str) -> None:
         self.section = None
@@ -1265,6 +1333,7 @@ class ConverterApp(ttk.Frame):
             self.pick_block.grid_remove()
             self.pick_idle.grid()
             self._fill_idle_row()
+        self._relayout()
 
     def _fill_idle_row(self) -> None:
         """The button, and either what a pick would do or what the last one did."""
@@ -1897,6 +1966,23 @@ def _declare_dpi_aware() -> None:
             pass
 
 
+def _work_area_height(root: tk.Tk) -> int:
+    """The screen minus the taskbar, which is what a window can actually use."""
+    if sys.platform == "win32":
+        import ctypes
+        from ctypes import wintypes
+
+        rect = wintypes.RECT()
+        try:
+            if ctypes.windll.user32.SystemParametersInfoW(
+                0x0030, 0, ctypes.byref(rect), 0  # SPI_GETWORKAREA
+            ):
+                return rect.bottom - rect.top
+        except (AttributeError, OSError):
+            pass
+    return root.winfo_screenheight()
+
+
 def _scale_to_dpi(root: tk.Tk) -> float:
     """Grow Tk's fonts to the screen we just admitted to. Returns the scale factor."""
     dpi = root.winfo_fpixels("1i")
@@ -1930,7 +2016,18 @@ def main() -> None:
     scale = _scale_to_dpi(root)
     root.configure(background=theme.WINDOW)
     root.minsize(int((STRIP_WIDTH + 24) * scale), int(480 * scale))
-    ConverterApp(root, scale=scale)
+    app = ConverterApp(root, scale=scale)
+
+    # The strip can be taller than the screen. Open at the height the screen
+    # has rather than at the height the form wants, or the footer — the status
+    # line and Export — opens underneath the taskbar. Twice, because the first
+    # pass is what tells the page how tall its contents are and the second is
+    # what carries that up to the window.
+    root.update_idletasks()
+    app._size_page()
+    root.update_idletasks()
+    room = _work_area_height(root) - int(round(40 * scale))
+    root.geometry(f"{root.winfo_reqwidth()}x{min(root.winfo_reqheight(), room)}")
     root.mainloop()
 
 

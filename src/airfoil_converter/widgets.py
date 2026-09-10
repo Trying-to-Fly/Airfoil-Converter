@@ -189,7 +189,7 @@ class Field(tk.Frame):
     """
 
     def __init__(self, parent: tk.Misc, variable: tk.StringVar, width: int = 84,
-                 unit: str = "", placeholder: str = "", prefix: str = "",
+                 unit: str = "", placeholder: Optional[str] = None, prefix: str = "",
                  mono: bool = True, grow: bool = False, height: int = 26) -> None:
         super().__init__(parent, bg=theme.WHITE, bd=0,
                          highlightthickness=max(1, px(1)),
@@ -230,8 +230,11 @@ class Field(tk.Frame):
         right = 0 if unit else px(8)
         self.entry.pack(side="left", fill="both", expand=True, padx=(left, right))
 
+        # A field that will only know its placeholder later — Target chord
+        # shows the source chord, which arrives with the file — is built with
+        # the label already there and nothing in it.
         self._placeholder = None
-        if placeholder:
+        if placeholder is not None:
             self._placeholder = tk.Label(
                 self, text=placeholder, bg=theme.WHITE, fg=theme.FAINT,
                 font=f.mono if mono else f.label, anchor="w",
@@ -248,12 +251,16 @@ class Field(tk.Frame):
     # -- placeholder
 
     def set_placeholder(self, text: str) -> None:
-        if self._placeholder is not None:
-            self._placeholder.configure(text=text)
+        if self._placeholder is None:
+            return
+        self._placeholder.configure(text=text)
+        if text:
             self._show_placeholder()
+        else:
+            self._placeholder.place_forget()
 
     def _show_placeholder(self) -> None:
-        if self._placeholder is None:
+        if self._placeholder is None or not self._placeholder.cget("text"):
             return
         empty = not self.variable.get() and self.focus_get() is not self.entry
         if empty and self._enabled:
