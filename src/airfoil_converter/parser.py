@@ -123,14 +123,41 @@ def _read_text(path: str) -> List[str]:
         raise AirfoilParseError(f"Could not read {path}: {exc}") from exc
 
 
+# Millimetres per unit, longest suffix first so "mm" is never read as "m".
+UNIT_SCALES = (("mm", 1.0), ("cm", 10.0), ("in", 25.4), ("m", 1000.0))
+
+
+def _as_number(field: str) -> Optional[float]:
+    """A coordinate, with or without a unit suffix, in millimetres.
+
+    A bare number wins outright, so nothing that parsed before parses
+    differently now — that also keeps "inf" and "1e-3" out of the suffix path.
+    Only when the plain read fails is a trailing unit considered, and only one
+    of the units we know; anything else stays a parse failure.
+    """
+    try:
+        return float(field)
+    except ValueError:
+        pass
+
+    lowered = field.lower()
+    for suffix, scale in UNIT_SCALES:
+        if lowered.endswith(suffix):
+            try:
+                return float(field[: -len(suffix)]) * scale
+            except ValueError:
+                return None
+    return None
+
+
 def _as_xyz(line: str) -> Optional[Vec3]:
     fields = line.replace(",", " ").split()
     if len(fields) != 3:
         return None
-    try:
-        return float(fields[0]), float(fields[1]), float(fields[2])
-    except ValueError:
+    values = [_as_number(field) for field in fields]
+    if any(value is None for value in values):
         return None
+    return values[0], values[1], values[2]
 
 
 def is_curve_file(path: str) -> bool:

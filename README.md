@@ -4,6 +4,11 @@ Converts airfoil-plotter CSV exports into SolidWorks *Curve Through XYZ Points*
 files (`.sldcrv` or `.txt`), with plane placement, leading-edge offset, optional
 chord rescale, and a constant-distance surface offset.
 
+With SolidWorks 2026 or newer open, it puts those curves straight into the part
+and keeps them there: change a setting, press **Export** again, and the same
+feature refreshes in place, so a loft built on it rebuilds without a single
+reference being re-picked. See *Driving SolidWorks* below.
+
 It also reads curve files back in, so a section you already have — one this app
 wrote, or one exported from SolidWorks — can be re-placed, rescaled, pitched, or
 offset without going back to the CSV.
@@ -186,8 +191,10 @@ put and the trailing edge swings toward the *down* side of whatever you chose as
 up. It is applied last, so it measures against the final orientation — after any
 flip or in-plane rotation. Blank or `0` leaves the section unpitched.
 
-Coordinates are written in millimetres, six decimals, three space-separated
-columns per line — use with millimetre-unit SolidWorks documents.
+Coordinates are written as three tab-separated columns per line, six decimals,
+with `mm` on every value. The suffix is what makes the document's own unit
+setting irrelevant: SolidWorks holds curve points in metres whatever the file
+says, so a 175 mm chord arrives as 175 mm in an inch document too.
 
 > **Trailing edge note:** a *Curve Through XYZ Points* is always an open spline,
 > so *Leave open* leaves a visible gap at the trailing edge — it removes the
@@ -197,14 +204,105 @@ columns per line — use with millimetre-unit SolidWorks documents.
 > *Close with TE line* when the trailing edge is blunt and the gap should be
 > closed by a straight line rather than by the spline.
 
+## Driving SolidWorks
+
+With a part open in SolidWorks 2026 or newer, the **SolidWorks** panel down the
+right-hand side lists the curves in that part and what the app knows about each.
+Press **Export** and the curves go straight in: any that are not there yet are
+imported and named, and any that are there have their points replaced. The
+document is rebuilt once, at the end.
+
+The point of replacing rather than re-importing is that the feature keeps its
+identity. Loft two ribs together, change a chord, press Export, and the loft
+rebuilds. Nothing is re-picked.
+
+**It needs `pywin32`.** Without it the app behaves exactly as it did before and
+the panel says so. The prebuilt executable already has it.
+
+```
+pip install pywin32
+```
+
+To see what the app can see, without opening the app:
+
+```
+python -m airfoil_converter.swcom
+```
+
+That prints every SolidWorks it can reach, its version, the open documents and
+their curve features. It is the first thing to run when the panel says something
+unexpected.
+
+### Names
+
+A curve's name comes from the source file and what the curve *is*, never from
+the settings that shaped it: `sd7037-il_airfoil`, `sd7037-il_airfoil_te`,
+`sd7037-il_camber`. That is deliberate. A name carrying the offset would change
+the moment you changed the offset, and the next export would insert a *second*
+curve while your loft went on pointing at the first.
+
+Several ribs cut from one aerofoil get a number: `sd7037-il_airfoil`,
+`sd7037-il_airfoil_2`, and so on. The number is handed out once, when the record
+is created, and never moves afterwards. Press **New curve** to start a fresh one
+while keeping every field, which is how the next rib along gets made.
+
+### The blunt trailing edge comes back as one curve
+
+*Close with TE line* deliberately writes two curves: the surface, left open, and
+the straight line closing the gap. It has to. A *Curve Through XYZ Points* is one
+spline through all its points, so folding the two trailing-edge corners into the
+surface curve would make the spline run smoothly through them, rounding both
+corners and bowing the flat face outward.
+
+A loft wants one thing to pick, though, so after the two curves are in the part
+the app joins them with a **Composite Curve**, named `..._airfoil_joined`. That
+joins them rather than refitting them, so the corners stay sharp. Loft the joined
+curve, not either half.
+
+It is made once. A composite is derived from its inputs, so every later export
+just reloads the two curves underneath and the joined one follows. The camber is
+never part of it and stays its own curve, and *Auto-close* and *Split
+upper/lower* have nothing to join, so nothing is made for them.
+
+Joining creates a feature, so the **Insert new curves into the open part**
+checkbox governs it too.
+
+### What it remembers
+
+SolidWorks stores points and nothing else. The chord, the plane, the angle of
+attack, the trailing edge, the source file: none of that survives into the part,
+and none of it can be read back out. So the app keeps it beside the part, in
+`<part>.airfoils.json`. Click a curve in the panel and its settings come back to
+the form.
+
+A part that has never been saved has nowhere to keep that file, so its settings
+last only until the app closes. The panel says so.
+
+### Things it will not do
+
+- **It never deletes a feature.** A wrong delete destroys work; a wrong insert
+  only clutters. Change the trailing-edge mode from *Close with TE line* to
+  *Auto-close* and the app warns that the `_te` curve is now unused, then leaves
+  it in the tree for you to remove.
+- **An inserted curve is only a curve.** Adding it to a loft or a surface is
+  still yours to do, and the status line says so each time.
+- **It follows the active document only.** Curves go into the part in front of
+  you, and nowhere else.
+
+### The files stay live
+
+The exported `.sldcrv` files are no longer output you can throw away. A refresh
+re-reads them by path, so moving or deleting them breaks the link. Keep them
+where they land.
+
 ## Building the executable
 
 ```
-pip install pyinstaller
+pip install pyinstaller pywin32
 build.bat
 ```
 
-This produces `dist\Airfoil Converter v1.4.exe`, a single self-contained file.
+This produces `dist\Airfoil Converter v1.5.exe`, a single self-contained file.
 If `build.bat` cannot find `pyinstaller`, use `python -m PyInstaller` instead —
 pip may have installed the scripts outside your PATH.
 
@@ -222,6 +320,10 @@ src/airfoil_converter/
   parser.py     # CSV -> metadata + point sections; curve file -> XYZ points
   geometry.py   # plane frames, 2D<->3D transform, trailing-edge handling, offsetting
   writer.py     # .sldcrv / .txt output
+  export.py     # the form as data, and the curves it produces
+  store.py      # what the app remembers about a part's curves
+  swcom.py      # the only module that talks to SolidWorks
+  swlink.py     # insert, refresh, rebuild -- in that order
   gui.py        # tkinter window
 tests/
 main.py         # entry point

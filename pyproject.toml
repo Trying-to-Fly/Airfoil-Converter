@@ -4,13 +4,20 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "airfoil-converter"
-version = "1.4.0"
-description = "Convert airfoil-plotter CSV exports into SolidWorks Curve Through XYZ Points files"
+version = "1.5.0"
+description = "Convert airfoil-plotter CSV exports into SolidWorks curves, and drive them into an open part"
 requires-python = ">=3.9"
 dependencies = []
 
 [project.optional-dependencies]
-dev = ["pytest>=7", "pyinstaller>=6"]
+# The SolidWorks link. Optional on purpose: without it the app still writes
+# curve files, and the tests still run on a machine with no Windows at all.
+live = ["pywin32>=306; sys_platform == 'win32'"]
+dev = [
+    "pytest>=7",
+    "pyinstaller>=6",
+    "pywin32>=306; sys_platform == 'win32'",
+]
 
 [project.gui-scripts]
 airfoil-converter = "airfoil_converter.gui:main"

@@ -160,3 +160,43 @@ def test_a_curve_file_is_told_by_content_not_extension(tmp_path):
     """The app writes .txt curves, and a plotter CSV may well be named .txt too."""
     assert is_curve_file(write(tmp_path, "curve.txt", CURVE))
     assert not is_curve_file(write(tmp_path, "plotter.txt", MINIMAL))
+
+
+def test_a_file_this_app_wrote_reads_back(tmp_path):
+    """The writer's own output is valid input, or 'As loaded' would break."""
+    from airfoil_converter import writer
+
+    points = [(175.0, 0.0, 0.0), (90.0, 12.0, 0.0), (0.0, 0.0, 0.0), (90.0, -6.0, 0.0)]
+    path = str(tmp_path / "written.sldcrv")
+    writer.write_curve(path, points)
+
+    assert is_curve_file(path)
+    assert parse_curve(path) == points
+
+
+def test_units_are_read_back_as_millimetres(tmp_path):
+    text = "1cm\t2m\t3in\n0mm 0mm 0mm\n1 2 3\n"
+    points = parse_curve(write(tmp_path, "mixed.sldcrv", text))
+    assert points[0][0] == pytest.approx(10.0)
+    assert points[0][1] == pytest.approx(2000.0)
+    assert points[0][2] == pytest.approx(76.2)
+    assert points[1] == (0.0, 0.0, 0.0)
+    assert points[2] == (1.0, 2.0, 3.0)
+
+
+def test_a_legacy_space_separated_file_still_reads(tmp_path):
+    """Curve files written before 1.5 carry bare numbers and single spaces."""
+    legacy = "175.000000 0.000000 0.000000\n90.000000 12.000000 0.000000\n0.000000 0.000000 0.000000\n"
+    path = write(tmp_path, "legacy.sldcrv", legacy)
+    assert is_curve_file(path)
+    assert parse_curve(path)[0] == (175.0, 0.0, 0.0)
+
+
+def test_a_bare_number_never_takes_the_unit_path(tmp_path):
+    """'1e-3' ends in no unit, and 'inf' must not be read as 'f' inches."""
+    from airfoil_converter.parser import _as_number
+
+    assert _as_number("1e-3") == pytest.approx(0.001)
+    assert _as_number("1E3") == pytest.approx(1000.0)
+    assert _as_number("nan") != _as_number("nan")  # still a float nan, not None
+    assert _as_number("zzz") is None

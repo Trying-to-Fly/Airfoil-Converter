@@ -1,31 +1,27 @@
-import os
-
 import pytest
 
 from airfoil_converter import writer
 
 
-def test_format_points_uses_six_decimals_and_spaces():
+def test_format_points_uses_tabs_six_decimals_and_a_unit():
     text = writer.format_points([(175.0, 0.0, 75.0), (1.5, -2.25, 0.0)])
-    assert text == "175.000000 0.000000 75.000000\n1.500000 -2.250000 0.000000\n"
+    assert text == (
+        "175.000000mm\t0.000000mm\t75.000000mm\r\n"
+        "1.500000mm\t-2.250000mm\t0.000000mm\r\n"
+    )
 
 
-def test_output_path_naming():
-    path = writer.output_path(os.sep + "out", "sd7037-il", "airfoil", ".sldcrv")
-    assert os.path.basename(path) == "sd7037-il_airfoil.sldcrv"
-    assert os.path.basename(
-        writer.output_path(os.sep + "out", "sd7037-il", "airfoil_upper", ".txt")
-    ) == "sd7037-il_airfoil_upper.txt"
+def test_format_value_strips_a_signed_zero_that_only_appears_when_rounded():
+    # -1e-9 is not equal to zero, so a pre-format test would miss it and leave
+    # "-0.000000mm" — enough to make a section differ from its own mirror.
+    assert writer.format_value(-1e-9) == "0.000000mm"
+    assert writer.format_value(-0.0) == "0.000000mm"
+    assert writer.format_value(-0.5) == "-0.500000mm"
 
 
-def test_output_path_sanitizes_the_stem():
-    path = writer.output_path(os.sep + "out", "bad:name*", "camber", ".txt")
-    assert os.path.basename(path) == "bad_name__camber.txt"
-
-
-def test_output_path_rejects_other_extensions():
-    with pytest.raises(ValueError, match="Unsupported extension"):
-        writer.output_path(os.sep + "out", "x", "airfoil", ".sldprt")
+def test_sanitize_strips_characters_a_name_cannot_hold():
+    assert writer.sanitize("bad:name*") == "bad_name_"
+    assert writer.sanitize("  .  ") == "airfoil"
 
 
 def test_write_curve_round_trip(tmp_path):
@@ -33,9 +29,48 @@ def test_write_curve_round_trip(tmp_path):
     count = writer.write_curve(path, [(0.0, 0.0, 0.0), (1.0, 2.0, 3.0)])
     assert count == 2
     with open(path, "rb") as handle:
-        assert handle.read() == b"0.000000 0.000000 0.000000\r\n1.000000 2.000000 3.000000\r\n"
+        assert handle.read() == (
+            b"0.000000mm\t0.000000mm\t0.000000mm\r\n"
+            b"1.000000mm\t2.000000mm\t3.000000mm\r\n"
+        )
 
 
 def test_write_curve_refuses_empty(tmp_path):
     with pytest.raises(ValueError, match="empty curve"):
         writer.write_curve(str(tmp_path / "empty.txt"), [])
+
+
+def test_curve_bytes_are_what_the_hash_covers():
+    points = [(1.0, 2.0, 3.0)]
+    data = writer.curve_bytes(points)
+    assert data == writer.format_points(points).encode("ascii")
+    assert writer.sha256_hex(data) == writer.sha256_hex(writer.curve_bytes(points))
+
+
+def test_write_curve_if_changed_writes_once(tmp_path, monkeypatch):
+    path = str(tmp_path / "curve.sldcrv")
+    points = [(0.0, 0.0, 0.0), (1.0, 2.0, 3.0)]
+
+    changed, first = writer.write_curve_if_changed(path, points)
+    assert changed is True
+
+    # SolidWorks re-reads this file on every refresh, so an unchanged export
+    # must not touch it at all — not even to rewrite identical bytes.
+    def fail(*args):
+        raise AssertionError("os.replace was called for identical content")
+
+    monkeypatch.setattr(writer.os, "replace", fail)
+    changed, again = writer.write_curve_if_changed(path, points)
+    assert changed is False
+    assert again == first
+
+
+def test_write_curve_if_changed_rewrites_and_leaves_no_temp_file(tmp_path):
+    path = tmp_path / "curve.sldcrv"
+    writer.write_curve_if_changed(str(path), [(0.0, 0.0, 0.0)])
+    changed, digest = writer.write_curve_if_changed(str(path), [(9.0, 0.0, 0.0)])
+
+    assert changed is True
+    assert digest == writer.sha256_hex(writer.curve_bytes([(9.0, 0.0, 0.0)]))
+    assert path.read_bytes().startswith(b"9.000000mm")
+    assert [p.name for p in tmp_path.iterdir()] == ["curve.sldcrv"]
