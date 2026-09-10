@@ -336,3 +336,44 @@ design/
 The `.dc.html` files reference `./support.js`, which only exists inside the
 canvas editor; a browser ignores the missing script and renders the page as
 is.
+
+## 11. As built
+
+The window in `gui.py` is this document. What follows is only where the built
+window differs from the spec above, and why — so that a reader comparing it
+against `renders/` is not left wondering.
+
+**Tk cannot do three of the things §3 to §5 ask for.** There is no corner
+radius on a Tk widget, so every rectangle is square rather than 2 px round;
+there is no letter-spacing, so panel headers are uppercase and bold rather
+than tracked out; and a font has two weights rather than four, so 500 and 600
+both land on bold or on normal, whichever is nearer. Everything else — the
+colours, the heights, the borders, the 118 px label column, the 460 px strip
+and the 360 px flyout — is exactly as given, which is why most of the controls
+are drawn by hand in `widgets.py` rather than themed.
+
+**A done step in the pick tracker shows what was read, not what it was
+called.** §7 asks for `Top Plane · reference plane`. Nothing in the branch
+learns an object's name: `swcom` reads geometry off whatever is selected and
+hands back a normal, two ends, or a point. So a finished row reads
+`normal 0, 0, 1`, `175 mm line` or `12.5, 0, 40` — the value that is about to
+go into the fields, which is checkable against the model. Giving the rows
+their names means teaching `swcom` to ask for one, which is a change to the
+link and not to the window.
+
+**The axis names stay ASCII.** §4 says the axis names carry a Unicode minus,
+`−X`. The branch writes `-X`, and the dropdown shows the value the export
+uses; a readout that spelled it differently from the control above it would be
+worse than a hyphen.
+
+**The Curves button stays live when the link is down.** §6 disables it. The
+flyout is also where the reason is written out in full, and a user who had
+closed it could not then get it back.
+
+**The plane readout says `3 points · picked in SolidWorks`** rather than
+naming the plane picked from, for the same reason the tracker rows do.
+
+The fonts are registered from `src/airfoil_converter/assets/fonts`, which
+ships empty: see the README there. `tests/test_ui_text.py` covers every line
+of derived text — the readouts, the tracker rows, the flyout's card — on a
+machine with no display.

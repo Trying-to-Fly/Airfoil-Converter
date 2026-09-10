@@ -9,7 +9,7 @@ import uuid
 from tkinter import filedialog, font as tkfont, messagebox, ttk
 from typing import Any, Dict, List, Optional
 
-from . import geometry, parser, pick, store, swcom, swlink, writer
+from . import geometry, parser, pick, store, swcom, swlink, theme, ui_text, widgets, writer
 from .export import (
     MODE_2POINTS,
     MODE_3POINTS,
@@ -31,8 +31,31 @@ from .geometry import GeometryError
 from .parser import AIRFOIL, AirfoilData, AirfoilParseError, parse_csv
 from . import __version__
 
-OK_COLOR = "#1a7f37"
-ERROR_COLOR = "#b42318"
+OK_COLOR = theme.OK
+ERROR_COLOR = theme.ERROR
+
+# The window is a portrait strip beside SolidWorks, with the curve list in a
+# flyout docked to its right. Both numbers are §2 of design/UI-DESIGN.md, at
+# 100 % scaling; everything drawn is multiplied by the screen's scale.
+STRIP_WIDTH = 460
+FLYOUT_WIDTH = 360
+
+# The four trailing-edge modes, said shortly enough to fit four segments across
+# the strip. The values are still export.TE_MODES; only the labels are short.
+TE_LABELS = {
+    TE_MODES[0]: "Auto-close",
+    TE_MODES[1]: "Leave open",
+    TE_MODES[2]: "Split",
+    TE_MODES[3]: "TE line",
+}
+
+PLANE_MODES = ("XY", "XZ", "YZ", MODE_3POINTS, MODE_2POINTS, MODE_NORMAL, MODE_LOADED)
+PLANE_LABELS = {
+    MODE_3POINTS: "3 points",
+    MODE_2POINTS: "2 points",
+    MODE_NORMAL: "Normal",
+    MODE_LOADED: "Loaded",
+}
 
 # Tabbing or arrowing through the leading-edge fields is not an edit.
 NAVIGATION_KEYS = frozenset(
@@ -145,12 +168,13 @@ def _take_selection(session):
 
 class ConverterApp(ttk.Frame):
     def __init__(self, master: tk.Misc, scale: float = 1.0) -> None:
-        super().__init__(master, padding=int(round(12 * scale)))
+        super().__init__(master, padding=0)
         self.scale = scale
+        self.fonts = theme.setup(master, scale)
+        master.configure(background=theme.WINDOW)
         self.grid(sticky="nsew")
         master.columnconfigure(0, weight=1)
         master.rowconfigure(0, weight=1)
-        self.columnconfigure(0, weight=1)
 
         self.data: Optional[AirfoilData] = None
         self.section: Optional[geometry.FlatSection] = None  # Set by a curve file only.
@@ -186,6 +210,30 @@ class ConverterApp(ttk.Frame):
         self.insert_missing = tk.BooleanVar(value=True)
         self.pick_text = tk.StringVar(value="")
 
+        # Derived text. Every one of these is a panel's state in one line, so
+        # the strip can be read from its headers without going through the
+        # fields; ui_text works them out, and this is only where they are put.
+        self.loaded_name = tk.StringVar(value="No file loaded.")
+        self.loaded_detail = tk.StringVar(value="")
+        self.plane_readout = tk.StringVar(value="")
+        self.placement_readout = tk.StringVar(value="")
+        self.sw_headline = tk.StringVar(value="looking for SolidWorks")
+        self.sw_detail = tk.StringVar(value="")
+        self.pick_title = tk.StringVar(value="")
+        self.tree_count = tk.StringVar(value="")
+        self.card_title = tk.StringVar(value="Export will make a new curve.")
+        self.card_state = tk.StringVar(value="")
+        self.card_settings = tk.StringVar(value="")
+
+        # Was the plane last set by a pick? Only the readout cares, but it is
+        # the difference between "3 points" and "3 points · picked in SolidWorks".
+        self._picked_plane = False
+        # Was the leading edge filled by a pick rather than typed? Same idea.
+        self._le_picked = False
+        # "", "done" or "stopped": what the idle pick row has to say for itself.
+        self._pick_outcome = ""
+        self._flyout_open = True
+
         # The link to SolidWorks. None until the first look, and dropped again
         # whenever a call fails, so a reopened session is picked up on its own.
         self._worker: Optional[swcom.Worker] = None
@@ -197,6 +245,7 @@ class ConverterApp(ttk.Frame):
         self._sidecar: Optional[store.Sidecar] = None
         self._sidecar_path = ""
         self._editing: str = ""          # the export id being edited, or ""
+        self._last_states: List[store.CurveState] = []
         self._restoring = False
         self._quiet_ticks = 0
 
@@ -217,379 +266,613 @@ class ConverterApp(ttk.Frame):
             for var in row:
                 var.trace_add("write", lambda *_: self._sync_leading_edge())
         self.chord_axis.trace_add("write", lambda *_: self._on_chord_axis_changed())
+        for var in (self.up_axis, self.constraint, self.main_plane):
+            var.trace_add("write", lambda *_: self._refresh_plane_readout())
         self._on_plane_mode_changed()
-        self._show_pick_buttons()
+        self._show_pick()
+        self._refresh_link_labels()
 
         self._start_link()
         master.bind("<FocusIn>", self._on_window_focused, add="+")
 
     # ---------------------------------------------------------------- layout
+    #
+    # The window is design/UI-DESIGN.md §6, top to bottom: six panels in a
+    # 460 px strip, a footer pinned under them, and the curve list in a flyout
+    # docked to the right. Every control comes from :mod:`widgets` and every
+    # colour and size from :mod:`theme`, so nothing below picks a number.
 
     def _px(self, pixels: int) -> int:
-        """A pixel count, grown to the screen's DPI. Fonts scale themselves; these do not."""
-        return int(round(pixels * self.scale))
+        """A pixel count, grown to the screen's DPI. The same number as theme.px."""
+        return theme.px(pixels)
 
     def _build(self) -> None:
-        """The form on the left, the live view of the part on the right.
+        """A portrait strip, and the part's curves in a flyout beside it.
 
-        Side by side rather than stacked: the panel is read *while* filling the
-        form in — click a curve, read the fields — and the window is already
-        six sections tall.
+        The strip holds every field at once, because this is a form that is
+        filled in once per rib and read while SolidWorks is on screen next to
+        it — scrolling to find a field is worse than a tall window. The curve
+        list is the one thing that grows without limit, so it is the one thing
+        that moves out into a column of its own.
         """
-        self.columnconfigure(0, weight=1)
+        self.columnconfigure(0, weight=0, minsize=theme.px(STRIP_WIDTH + 24))
+        self.columnconfigure(2, weight=1, minsize=theme.px(FLYOUT_WIDTH))
         self.rowconfigure(0, weight=1)
 
-        form = ttk.Frame(self)
-        form.grid(row=0, column=0, sticky="nsew")
-        form.columnconfigure(0, weight=1)
-        self._build_form(form)
+        strip = tk.Frame(self, bg=theme.WINDOW)
+        strip.grid(row=0, column=0, sticky="nsew")
+        self._build_strip(strip)
 
-        self._build_solidworks(self)
+        self._flyout_edge = tk.Frame(self, bg=theme.BORDER_SOFT,
+                                     width=max(1, theme.px(1)))
+        self._flyout_edge.grid(row=0, column=1, sticky="ns")
+        self.flyout = tk.Frame(self, bg=theme.SECONDARY_BG)
+        self.flyout.grid(row=0, column=2, sticky="nsew")
+        self._build_solidworks(self.flyout)
 
-    def _build_form(self, parent: tk.Misc) -> None:
+    def _build_strip(self, strip: tk.Misc) -> None:
+        strip.columnconfigure(0, weight=1)
+        strip.rowconfigure(0, weight=1)
+        body = tk.Frame(strip, bg=theme.WINDOW)
+        body.grid(row=0, column=0, sticky="nsew", padx=theme.px(12), pady=theme.px(12))
+        body.columnconfigure(0, weight=1, minsize=theme.px(STRIP_WIDTH))
+
         row = 0
-        pad = self._px(8)
-
-        source = ttk.LabelFrame(parent, text="Source", padding=pad)
-        source.grid(row=row, column=0, sticky="ew", pady=(0, 8))
-        source.columnconfigure(1, weight=1)
-        ttk.Label(source, text="CSV or curve:").grid(row=0, column=0, sticky="w")
-        ttk.Entry(source, textvariable=self.csv_path).grid(row=0, column=1, sticky="ew", padx=6)
-        ttk.Button(source, text="Browse", command=self._browse_csv).grid(row=0, column=2)
-        ttk.Label(source, textvariable=self.loaded_text, foreground="#555").grid(
-            row=1, column=0, columnspan=3, sticky="w", pady=(4, 0)
-        )
-        row += 1
-
-        export = ttk.LabelFrame(parent, text="Export", padding=pad)
-        export.grid(row=row, column=0, sticky="ew", pady=(0, 8))
-        export.columnconfigure(3, weight=1)
-        ttk.Checkbutton(export, text="Airfoil surface", variable=self.export_airfoil).grid(
-            row=0, column=0, sticky="w"
-        )
-        self.camber_check = ttk.Checkbutton(
-            export, text="Camber line", variable=self.export_camber
-        )
-        self.camber_check.grid(row=0, column=1, sticky="w", padx=(12, 0))
-
-        ttk.Label(export, text="TE handling:").grid(row=1, column=0, sticky="w", pady=(6, 0))
-        ttk.Combobox(
-            export,
-            textvariable=self.te_mode,
-            values=TE_MODES,
-            state="readonly",
-            width=18,
-        ).grid(row=1, column=1, columnspan=2, sticky="w", pady=(6, 0))
-        ttk.Label(
-            export,
-            text="(TE line = the surface open, plus a\ntwo-point curve closing the gap)",
-            foreground="#555",
-            justify="left",
-        ).grid(row=1, column=3, sticky="w", padx=(6, 0), pady=(6, 0))
-
-        ttk.Label(export, text="TE thickness (mm):").grid(row=2, column=0, sticky="w", pady=(6, 0))
-        ttk.Entry(export, textvariable=self.te_thickness, width=12).grid(
-            row=2, column=1, sticky="w", pady=(6, 0)
-        )
-        ttk.Checkbutton(
-            export, text="Keep chord after the cut", variable=self.keep_chord
-        ).grid(row=2, column=2, columnspan=2, sticky="w", padx=(12, 0), pady=(6, 0))
-        ttk.Label(
-            export,
-            text="(0 = keep the section's own trailing edge, and the full chord. Otherwise it is\n"
-            "cut back to a vertical line where it stands this thick — so it comes out shorter,\n"
-            "unless 'Keep chord' scales it back up to the full chord with the gap still exact.)",
-            foreground="#555",
-            justify="left",
-        ).grid(row=3, column=0, columnspan=4, sticky="w", pady=(2, 0))
-
-        ttk.Label(export, text="Target chord (mm):").grid(row=4, column=0, sticky="w", pady=(6, 0))
-        ttk.Entry(export, textvariable=self.target_chord, width=12).grid(
-            row=4, column=1, sticky="w", pady=(6, 0)
-        )
-        ttk.Label(export, text="(blank = keep CSV chord)", foreground="#555").grid(
-            row=4, column=2, sticky="w", padx=(6, 0), pady=(6, 0)
-        )
-
-        ttk.Label(export, text="Offset (mm):").grid(row=5, column=0, sticky="w", pady=(6, 0))
-        ttk.Entry(export, textvariable=self.offset, width=12).grid(
-            row=5, column=1, sticky="w", pady=(6, 0)
-        )
-        ttk.Combobox(
-            export,
-            textvariable=self.offset_dir,
-            values=OFFSET_DIRECTIONS,
-            state="readonly",
-            width=9,
-        ).grid(row=5, column=2, sticky="w", padx=(6, 0), pady=(6, 0))
-        ttk.Label(
-            export,
-            text="(blank = none. Offsets the surface at a constant distance, like\n"
-            "SolidWorks Offset Entities — the camber line is left alone.)",
-            foreground="#555",
-            justify="left",
-        ).grid(row=6, column=0, columnspan=4, sticky="w", pady=(2, 0))
-        row += 1
-
-        plane = ttk.LabelFrame(parent, text="Plane", padding=pad)
-        plane.grid(row=row, column=0, sticky="ew", pady=(0, 8))
-        radios = ttk.Frame(plane)
-        radios.grid(row=0, column=0, columnspan=8, sticky="w")
-        for i, (label, value) in enumerate(
-            [
-                ("XY", "XY"),
-                ("XZ", "XZ"),
-                ("YZ", "YZ"),
-                ("3 points", MODE_3POINTS),
-                ("2 points + constraint", MODE_2POINTS),
-            ]
+        for build in (
+            self._build_source, self._build_shape, self._build_plane,
+            self._build_placement, self._build_output, self._build_sw_bar,
         ):
-            ttk.Radiobutton(
-                radios,
-                text=label,
-                value=value,
-                variable=self.plane_mode,
-                command=self._on_plane_mode_changed,
-            ).grid(row=0, column=i, sticky="w", padx=(0, 10))
-        ttk.Radiobutton(
-            radios,
-            text="Normal to line",
-            value=MODE_NORMAL,
-            variable=self.plane_mode,
-            command=self._on_plane_mode_changed,
-        ).grid(row=1, column=0, columnspan=3, sticky="w", pady=(2, 0))
-        ttk.Label(
-            radios, text="(the plane through P1 perpendicular to the line P1 → P2)",
-            foreground="#555",
-        ).grid(row=1, column=3, columnspan=3, sticky="w", pady=(2, 0))
-        self.loaded_radio = ttk.Radiobutton(
-            radios,
-            text="As loaded",
-            value=MODE_LOADED,
-            variable=self.plane_mode,
-            command=self._on_plane_mode_changed,
-            state="disabled",
+            build(body).grid(row=row, column=0, sticky="ew", pady=(0, theme.px(8)))
+            row += 1
+
+        # The footer sits at the bottom of the window however tall it is: this
+        # empty row takes whatever height is going spare.
+        body.rowconfigure(row, weight=1)
+        tk.Frame(body, bg=theme.WINDOW).grid(row=row, column=0, sticky="nsew")
+        self._build_footer(body).grid(row=row + 1, column=0, sticky="ew")
+
+    # -- the pieces every panel is made of
+
+    def _row_label(self, parent: tk.Misc, row: int, text: str) -> tk.Label:
+        label = tk.Label(parent, text=text, bg=theme.WHITE, fg=theme.LABEL,
+                         font=self.fonts.label, anchor="w")
+        label.grid(row=row, column=0, sticky="w", pady=(0, theme.px(6)))
+        return label
+
+    def _cell(self, parent: tk.Misc, row: int, column: int = 1, **grid) -> tk.Frame:
+        """A white strip of a panel body to line controls up in."""
+        frame = tk.Frame(parent, bg=theme.WHITE)
+        grid.setdefault("sticky", "w")
+        grid.setdefault("pady", (0, theme.px(6)))
+        frame.grid(row=row, column=column, **grid)
+        return frame
+
+    def _hint(self, parent: tk.Misc, text: str) -> tk.Label:
+        return tk.Label(parent, text=text, bg=theme.WHITE, fg=theme.MUTED,
+                        font=self.fonts.hint)
+
+    def _combo(self, parent: tk.Misc, variable: tk.StringVar, values, width: int,
+               mono: bool = True):
+        """A dropdown of an exact width. ttk measures in characters; §5 does not."""
+        holder = tk.Frame(parent, bg=theme.WHITE, width=theme.px(width),
+                          height=theme.px(26))
+        # The box inside is packed, and pack has a propagation flag of its own.
+        holder.grid_propagate(False)
+        holder.pack_propagate(False)
+        box = ttk.Combobox(
+            holder, textvariable=variable, values=values, state="readonly",
+            style="Mono.TCombobox" if mono else "Af.TCombobox",
         )
-        self.loaded_radio.grid(row=2, column=0, columnspan=3, sticky="w", pady=(2, 0))
-        ttk.Label(
-            radios, text="(keeps a loaded curve on its own plane, where it stands)",
-            foreground="#555",
-        ).grid(row=2, column=3, columnspan=3, sticky="w")
+        box.pack(fill="both", expand=True)
+        return holder, box
+
+    # -- Source
+
+    def _build_source(self, parent: tk.Misc) -> widgets.Panel:
+        panel = widgets.Panel(parent, "Source")
+        panel.readout_label.configure(text="CSV or curve file")
+        body = panel.body
+        body.columnconfigure(0, weight=1)
+
+        top = tk.Frame(body, bg=theme.WHITE)
+        top.grid(row=0, column=0, sticky="ew")
+        top.columnconfigure(0, weight=1)
+        widgets.Field(top, self.csv_path, grow=True).grid(row=0, column=0, sticky="ew")
+        widgets.Button(top, "Browse", command=self._browse_csv, icon="folder").grid(
+            row=0, column=1, padx=(theme.px(8), 0)
+        )
+
+        loaded = tk.Frame(body, bg=theme.WHITE)
+        loaded.grid(row=1, column=0, sticky="w", pady=(theme.px(7), 0))
+        self.outline = widgets.Outline(loaded)
+        self.outline.grid(row=0, column=0, padx=(0, theme.px(8)))
+        self.loaded_name_label = tk.Label(
+            loaded, textvariable=self.loaded_name, bg=theme.WHITE,
+            fg=theme.FAINT, font=self.fonts.hint_bold,
+        )
+        self.loaded_name_label.grid(row=0, column=1, sticky="w")
+        tk.Label(loaded, textvariable=self.loaded_detail, bg=theme.WHITE,
+                 fg=theme.LABEL, font=self.fonts.hint).grid(
+            row=0, column=2, sticky="w", padx=(theme.px(4), 0)
+        )
+        return panel
+
+    # -- Shape
+
+    def _build_shape(self, parent: tk.Misc) -> widgets.Panel:
+        panel = widgets.Panel(parent, "Shape")
+        panel.readout_label.configure(text="mm of the finished part")
+        body = panel.body
+        body.columnconfigure(0, minsize=theme.px(118))
+        body.columnconfigure(1, weight=1)
+
+        self._row_label(body, 0, "Curves")
+        curves = self._cell(body, 0)
+        widgets.Check(curves, self.export_airfoil, "Airfoil surface").grid(row=0, column=0)
+        self.camber_check = widgets.Check(curves, self.export_camber, "Camber line")
+        self.camber_check.grid(row=0, column=1, padx=(theme.px(12), 0))
+
+        self._row_label(body, 1, "Trailing edge")
+        widgets.Segmented(body, self.te_mode, TE_MODES, labels=TE_LABELS).grid(
+            row=1, column=1, sticky="ew", pady=(0, theme.px(6))
+        )
+
+        self._row_label(body, 2, "TE thickness")
+        te = self._cell(body, 2)
+        widgets.Field(te, self.te_thickness, width=84, unit="mm").grid(row=0, column=0)
+        widgets.Check(te, self.keep_chord, "Keep chord after the cut").grid(
+            row=0, column=1, padx=(theme.px(8), 0)
+        )
+
+        self._row_label(body, 3, "Target chord")
+        chord = self._cell(body, 3)
+        self.target_field = widgets.Field(
+            chord, self.target_chord, width=84, unit="mm", placeholder="chord",
+        )
+        self.target_field.grid(row=0, column=0)
+        self._hint(chord, "blank keeps the source chord").grid(
+            row=0, column=1, padx=(theme.px(8), 0)
+        )
+
+        self._row_label(body, 4, "Offset")
+        offset = self._cell(body, 4, pady=0)
+        widgets.Field(offset, self.offset, width=84, unit="mm", placeholder="none").grid(
+            row=0, column=0
+        )
+        widgets.Segmented(
+            offset, self.offset_dir, OFFSET_DIRECTIONS, width=140,
+        ).grid(row=0, column=1, padx=(theme.px(8), 0))
+        return panel
+
+    # -- Plane
+
+    def _build_plane(self, parent: tk.Misc) -> widgets.Panel:
+        panel = widgets.Panel(parent, "Plane", self.plane_readout)
+        body = panel.body
+        body.columnconfigure(0, minsize=theme.px(118))
+        body.columnconfigure(1, weight=1)
+
+        self.plane_seg = widgets.Segmented(
+            body, self.plane_mode, PLANE_MODES, labels=PLANE_LABELS,
+            command=self._on_plane_mode_changed, height=24,
+        )
+        self.plane_seg.grid(row=0, column=0, columnspan=2, sticky="ew",
+                            pady=(0, theme.px(6)))
+        self.plane_seg.set_option_enabled(MODE_LOADED, False)
+
+        # The X / Y / Z header and the three point rows share one column
+        # geometry, so the header stands over the fields it names.
+        header = tk.Frame(body, bg=theme.WHITE)
+        header.grid(row=1, column=1, sticky="w")
+        points = tk.Frame(body, bg=theme.WHITE)
+        points.grid(row=2, column=1, sticky="w", pady=(0, theme.px(6)))
+        for frame in (header, points):
+            frame.columnconfigure(0, minsize=theme.px(22))
+            for column in range(1, 4):
+                frame.columnconfigure(column, minsize=theme.px(82 + 8))
+        for column, axis in enumerate("XYZ"):
+            tk.Label(header, text=axis, bg=theme.WHITE, fg=theme.READOUT,
+                     font=self.fonts.tiny).grid(row=0, column=1 + column,
+                                                padx=(theme.px(8), 0))
+        self._row_label(body, 2, "Points")
 
         for pi, name in enumerate(("P1", "P2", "P3")):
-            ttk.Label(plane, text=name).grid(row=1 + pi, column=0, sticky="w", pady=(4, 0))
-            entries = []
-            for ci, axis in enumerate("XYZ"):
-                ttk.Label(plane, text=axis).grid(
-                    row=1 + pi, column=1 + ci * 2, sticky="e", padx=(6, 2), pady=(4, 0)
-                )
-                entry = ttk.Entry(plane, textvariable=self.p_vars[pi][ci], width=9)
-                entry.grid(row=1 + pi, column=2 + ci * 2, sticky="w", pady=(4, 0))
-                entries.append(entry)
-            self.p_entries.append(entries)
+            tk.Label(points, text=name, bg=theme.WHITE, fg=theme.LABEL,
+                     font=self.fonts.mono_small).grid(row=pi, column=0, sticky="w")
+            row_fields = []
+            for ci in range(3):
+                field = widgets.Field(points, self.p_vars[pi][ci], width=82)
+                field.grid(row=pi, column=1 + ci, padx=(theme.px(8), 0),
+                           pady=(0, theme.px(4)))
+                row_fields.append(field)
+            self.p_entries.append(row_fields)
 
-        ttk.Label(plane, text="Constraint:").grid(row=4, column=0, sticky="w", pady=(6, 0))
-        self.constraint_box = ttk.Combobox(
-            plane,
-            textvariable=self.constraint,
-            values=(geometry.PERPENDICULAR, geometry.PARALLEL),
-            state="readonly",
-            width=14,
+        self.constraint_label = self._row_label(body, 3, "Constraint")
+        constraint = self._cell(body, 3)
+        holder, self.constraint_box = self._combo(
+            constraint, self.constraint, (geometry.PERPENDICULAR, geometry.PARALLEL),
+            128, mono=False,
         )
-        self.constraint_box.grid(row=4, column=1, columnspan=3, sticky="w", pady=(6, 0))
-        ttk.Label(plane, text="to").grid(row=4, column=4, sticky="e", pady=(6, 0))
-        self.main_plane_box = ttk.Combobox(
-            plane,
-            textvariable=self.main_plane,
-            values=geometry.MAIN_PLANES,
-            state="readonly",
-            width=5,
+        holder.grid(row=0, column=0)
+        tk.Label(constraint, text="to", bg=theme.WHITE, fg=theme.LABEL,
+                 font=self.fonts.label).grid(row=0, column=1, padx=theme.px(8))
+        holder, self.main_plane_box = self._combo(
+            constraint, self.main_plane, geometry.MAIN_PLANES, 62,
         )
-        self.main_plane_box.grid(row=4, column=5, sticky="w", padx=(4, 0), pady=(6, 0))
+        holder.grid(row=0, column=2)
 
-        ttk.Label(plane, text="Chord runs along:").grid(row=5, column=0, sticky="w", pady=(6, 0))
-        self.chord_axis_box = ttk.Combobox(
-            plane,
-            textvariable=self.chord_axis,
-            values=geometry.chord_axis_options("XY"),
-            state="readonly",
-            width=5,
-        )
-        self.chord_axis_box.grid(row=5, column=1, columnspan=2, sticky="w", pady=(6, 0))
-        ttk.Label(plane, text="Up direction:").grid(row=5, column=3, sticky="e", pady=(6, 0))
-        self.up_axis_box = ttk.Combobox(
-            plane,
-            textvariable=self.up_axis,
-            values=geometry.up_axis_options("XY", "+X"),
-            state="readonly",
-            width=5,
-        )
-        self.up_axis_box.grid(row=5, column=4, columnspan=2, sticky="w", padx=(4, 0), pady=(6, 0))
-        ttk.Label(
-            plane, text="(trailing edge → leading edge: the nose points this way)",
-            foreground="#555",
-        ).grid(row=6, column=0, columnspan=6, sticky="w")
+        widgets.Rule(body, theme.TRACK).grid(row=4, column=0, columnspan=2,
+                                             sticky="ew", pady=(theme.px(2), theme.px(8)))
 
-        self.flip_check = ttk.Checkbutton(plane, text="Flip up direction", variable=self.flip)
-        self.flip_check.grid(row=7, column=0, columnspan=3, sticky="w", pady=(6, 0))
-        ttk.Label(plane, text="Rotate in plane:").grid(row=8, column=0, sticky="w", pady=(6, 0))
-        ttk.Combobox(
-            plane,
-            textvariable=self.rotation,
-            values=ROTATIONS,
-            state="readonly",
-            width=6,
-        ).grid(row=8, column=1, columnspan=2, sticky="w", pady=(6, 0))
-        ttk.Label(
-            plane,
-            text="(quarter turns about the leading edge, the way a\n+ angle of attack turns)",
-            foreground="#555",
-            justify="left",
-        ).grid(row=8, column=3, columnspan=3, sticky="w", padx=(6, 0), pady=(6, 0))
-
-        ttk.Label(plane, text="Angle of attack (°):").grid(row=9, column=0, sticky="w", pady=(6, 0))
-        ttk.Entry(plane, textvariable=self.pitch, width=9).grid(
-            row=9, column=1, columnspan=2, sticky="w", pady=(6, 0)
+        self.chord_label = self._row_label(body, 5, "Chord runs along")
+        axes = self._cell(body, 5)
+        holder, self.chord_axis_box = self._combo(
+            axes, self.chord_axis, geometry.chord_axis_options("XY"), 64,
         )
-        ttk.Label(
-            plane, text="(+ pitches the nose up, about the leading edge)", foreground="#555"
-        ).grid(row=9, column=3, columnspan=3, sticky="w", padx=(6, 0), pady=(6, 0))
+        holder.grid(row=0, column=0)
+        # Off a main plane the chord is the line P1 → P2 and no dropdown can
+        # say so; this stands in for the one that would lie about it.
+        self.chord_from_points = widgets.Field(
+            axes, tk.StringVar(value="P1 → P2"), width=92,
+        )
+        self.chord_from_points.set_enabled(False)
+        self.up_label = tk.Label(axes, text="Up", bg=theme.WHITE, fg=theme.LABEL,
+                                 font=self.fonts.label)
+        self.up_label.grid(row=0, column=2, padx=(theme.px(8), theme.px(8)))
+        holder, self.up_axis_box = self._combo(
+            axes, self.up_axis, geometry.up_axis_options("XY", "+X"), 64,
+        )
+        holder.grid(row=0, column=3)
+        self.flip_check = widgets.Check(axes, self.flip, "Flip up")
+        self.flip_check.grid(row=0, column=4, padx=(theme.px(10), 0))
 
-        picking = ttk.Frame(plane)
-        picking.grid(row=10, column=0, columnspan=6, sticky="ew", pady=(10, 0))
-        self.pick_button = ttk.Button(
-            picking, text="Pick from SolidWorks", command=self._start_plane_pick
+        self._row_label(body, 6, "Rotate in plane")
+        widgets.Segmented(body, self.rotation, ROTATIONS, width=168, mono=True).grid(
+            row=6, column=1, sticky="w", pady=(0, theme.px(6))
+        )
+
+        self._row_label(body, 7, "Angle of attack")
+        pitch = self._cell(body, 7, pady=0)
+        widgets.Field(pitch, self.pitch, width=84, unit="°").grid(row=0, column=0)
+        self._hint(pitch, "+ pitches the nose up").grid(row=0, column=1,
+                                                        padx=(theme.px(8), 0))
+
+        widgets.Rule(body, theme.TRACK).grid(row=8, column=0, columnspan=2,
+                                             sticky="ew", pady=theme.px(8))
+        self._build_tracker(body).grid(row=9, column=0, columnspan=2, sticky="ew")
+        return panel
+
+    # -- the pick tracker (§7)
+
+    def _build_tracker(self, parent: tk.Misc) -> tk.Frame:
+        """Idle it is one button and a line; picking it is a row per step.
+
+        Both live here and are shown one at a time, because the whole point of
+        the block is that a click that landed looks different from one that
+        did nothing.
+        """
+        area = tk.Frame(parent, bg=theme.WHITE)
+        area.columnconfigure(0, weight=1)
+
+        idle = tk.Frame(area, bg=theme.WHITE)
+        idle.grid(row=0, column=0, sticky="ew")
+        idle.columnconfigure(1, weight=1)
+        self.pick_button = widgets.Button(
+            idle, "Pick from SolidWorks", command=self._start_plane_pick, icon="cursor",
         )
         self.pick_button.grid(row=0, column=0, sticky="w")
-        self.pick_skip = ttk.Button(picking, text="Skip", command=self._skip_pick)
-        self.pick_skip.grid(row=0, column=1, padx=(6, 0))
-        self.pick_done = ttk.Button(picking, text="Use what I picked", command=self._finish_pick)
-        self.pick_done.grid(row=0, column=2, padx=(6, 0))
-        self.pick_cancel = ttk.Button(picking, text="Cancel", command=self._cancel_pick)
-        self.pick_cancel.grid(row=0, column=3, padx=(6, 0))
-        self.pick_label = ttk.Label(
-            plane, textvariable=self.pick_text, foreground="#555", wraplength=self._px(520)
+        self.pick_outcome_glyph = widgets.StepGlyph(idle, bg=theme.WHITE)
+        self.pick_idle_text = tk.Label(
+            idle, text="", bg=theme.WHITE, fg=theme.MUTED, font=self.fonts.hint,
+            justify="left", anchor="w", wraplength=theme.px(230),
         )
-        self.pick_label.grid(row=11, column=0, columnspan=6, sticky="w", pady=(4, 0))
-        row += 1
+        self.pick_idle_text.grid(row=0, column=2, sticky="w", padx=(theme.px(8), 0))
+        self.pick_idle = idle
 
-        placement = ttk.LabelFrame(parent, text="Placement", padding=pad)
-        placement.grid(row=row, column=0, sticky="ew", pady=(0, 8))
-        ttk.Label(placement, text="Leading edge at:").grid(row=0, column=0, sticky="w")
-        self.le_entries: List[ttk.Entry] = []
+        block = widgets.Box(area, bg=theme.TRACKER_BG, border=theme.TRACKER_BORDER)
+        block.columnconfigure(0, weight=1)
+        inner = tk.Frame(block, bg=theme.TRACKER_BG)
+        inner.pack(fill="both", expand=True, padx=theme.px(10), pady=theme.px(8))
+        inner.columnconfigure(0, weight=1)
+
+        title = tk.Frame(inner, bg=theme.TRACKER_BG)
+        title.grid(row=0, column=0, sticky="ew")
+        title.columnconfigure(2, weight=1)
+        tk.Label(title, text="PICKING FROM SOLIDWORKS", bg=theme.TRACKER_BG,
+                 fg=theme.ACCENT, font=self.fonts.header).grid(row=0, column=0, sticky="w")
+        tk.Label(title, textvariable=self.pick_title, bg=theme.TRACKER_BG,
+                 fg=theme.MUTED, font=self.fonts.tiny).grid(
+            row=0, column=1, sticky="w", padx=(theme.px(8), 0)
+        )
+        self.pick_cancel = widgets.Button(title, "Cancel", command=self._cancel_pick,
+                                          height=22, bg=theme.TRACKER_BG)
+        self.pick_cancel.grid(row=0, column=3, sticky="e")
+
+        self.pick_rows = tk.Frame(inner, bg=theme.TRACKER_BG)
+        self.pick_rows.grid(row=1, column=0, sticky="ew", pady=(theme.px(6), 0))
+        self.pick_rows.columnconfigure(2, weight=1)
+
+        footer = tk.Frame(inner, bg=theme.TRACKER_BG)
+        footer.grid(row=2, column=0, sticky="ew", pady=(theme.px(6), 0))
+        footer.columnconfigure(0, weight=1)
+        tk.Label(
+            footer,
+            text="Each click clears itself in SolidWorks — that is how one "
+                 "click is told from the last.",
+            bg=theme.TRACKER_BG, fg=theme.MUTED, font=self.fonts.readout,
+            justify="left", anchor="w", wraplength=theme.px(250),
+        ).grid(row=0, column=0, sticky="w")
+        self.pick_done = widgets.Button(footer, "Use what I picked",
+                                        command=self._finish_pick, height=22,
+                                        bg=theme.TRACKER_BG)
+        self.pick_done.grid(row=0, column=1, sticky="e", padx=(theme.px(8), 0))
+
+        # The Skip button belongs to whichever row is active, so it is made
+        # once here and moved rather than rebuilt with the rows.
+        self.pick_skip = widgets.Button(self.pick_rows, "Skip", command=self._skip_pick,
+                                        height=22, bg=theme.TRACKER_BG)
+        self.pick_block = block
+        self._tracker_widgets: List[tk.Widget] = []
+        return area
+
+    # -- Placement
+
+    def _build_placement(self, parent: tk.Misc) -> widgets.Panel:
+        panel = widgets.Panel(parent, "Placement", self.placement_readout)
+        body = panel.body
+        body.columnconfigure(0, minsize=theme.px(118))
+        body.columnconfigure(1, weight=1)
+
+        self._row_label(body, 0, "Leading edge at")
+        cell = self._cell(body, 0, sticky="ew", pady=0)
+        for column in range(3):
+            cell.columnconfigure(column, weight=1, uniform="le")
+        self.le_entries: List[widgets.Field] = []
         for ci, axis in enumerate("XYZ"):
-            ttk.Label(placement, text=axis).grid(row=0, column=1 + ci * 2, sticky="e", padx=(6, 2))
-            entry = ttk.Entry(placement, textvariable=self.le_vars[ci], width=9)
-            entry.grid(row=0, column=2 + ci * 2, sticky="w")
-            entry.bind("<Key>", self._on_le_typed)
-            self.le_entries.append(entry)
-        self.le_pick_button = ttk.Button(placement, text="Pick", command=self._start_point_pick)
-        self.le_pick_button.grid(row=0, column=7, sticky="w", padx=(10, 0))
-        self.le_hint = ttk.Label(placement, text="", foreground="#555")
-        self.le_hint.grid(row=1, column=0, columnspan=8, sticky="w", pady=(4, 0))
-        row += 1
+            field = widgets.Field(cell, self.le_vars[ci], prefix=axis, grow=True)
+            field.grid(row=0, column=ci, sticky="ew", padx=(0 if ci == 0 else theme.px(6), 0))
+            field.entry.bind("<Key>", self._on_le_typed)
+            self.le_entries.append(field)
+        self.le_pick_button = widgets.Button(cell, "Pick", command=self._start_point_pick,
+                                             icon="cursor")
+        self.le_pick_button.grid(row=0, column=3, padx=(theme.px(8), 0))
+        return panel
 
-        out = ttk.LabelFrame(parent, text="Output", padding=pad)
-        out.grid(row=row, column=0, sticky="ew", pady=(0, 8))
-        out.columnconfigure(1, weight=1)
-        fmt = ttk.Frame(out)
-        fmt.grid(row=0, column=0, columnspan=3, sticky="w")
-        ttk.Label(fmt, text="Format:").grid(row=0, column=0, sticky="w")
-        for i, ext in enumerate(writer.EXTENSIONS):
-            ttk.Radiobutton(fmt, text=ext, value=ext, variable=self.extension).grid(
-                row=0, column=1 + i, sticky="w", padx=(10, 0)
-            )
-        ttk.Label(out, text="Output folder:").grid(row=1, column=0, sticky="w", pady=(6, 0))
-        ttk.Entry(out, textvariable=self.out_folder).grid(
-            row=1, column=1, sticky="ew", padx=6, pady=(6, 0)
-        )
-        ttk.Button(out, text="Browse", command=self._browse_folder).grid(
-            row=1, column=2, pady=(6, 0)
-        )
-        row += 1
+    # -- Output
 
-        self.export_button = ttk.Button(parent, text="Export", command=self._export)
-        self.export_button.grid(row=row, column=0, pady=(0, 8))
-        row += 1
+    def _build_output(self, parent: tk.Misc) -> widgets.Panel:
+        panel = widgets.Panel(parent, "Output")
+        panel.readout_label.configure(text="Curve Through XYZ Points")
+        body = panel.body
+        body.columnconfigure(0, minsize=theme.px(118))
+        body.columnconfigure(1, weight=1)
 
-        self.status_label = ttk.Label(
-            parent, textvariable=self.status, wraplength=self._px(520)
+        self._row_label(body, 0, "Format")
+        widgets.Segmented(body, self.extension, writer.EXTENSIONS, width=150,
+                          mono=True).grid(row=0, column=1, sticky="w",
+                                          pady=(0, theme.px(6)))
+
+        self._row_label(body, 1, "Folder")
+        folder = self._cell(body, 1, sticky="ew", pady=0)
+        folder.columnconfigure(0, weight=1)
+        widgets.Field(folder, self.out_folder, grow=True).grid(row=0, column=0, sticky="ew")
+        widgets.Button(folder, "Browse", command=self._browse_folder,
+                       icon="folder").grid(row=0, column=1, padx=(theme.px(8), 0))
+        return panel
+
+    # -- the SolidWorks bar, whose header is the connection itself
+
+    def _build_sw_bar(self, parent: tk.Misc) -> widgets.Panel:
+        panel = widgets.Panel(parent, "SolidWorks")
+        slot = panel.header_slot()
+        self.sw_dot = widgets.Dot(slot, theme.FAINT, bg=theme.HEADER_BG)
+        self.sw_dot.grid(row=0, column=0, padx=(0, theme.px(6)))
+        tk.Label(slot, textvariable=self.sw_headline, bg=theme.HEADER_BG,
+                 fg=theme.READOUT, font=self.fonts.readout).grid(row=0, column=1)
+        self.curves_button = widgets.Button(
+            slot, "Hide curves", command=self._toggle_flyout, icon="sidebar",
+            height=20, bg=theme.HEADER_BG,
         )
-        self.status_label.grid(row=row, column=0, sticky="w")
+        self.curves_button.grid(row=0, column=2, padx=(theme.px(8), 0))
+
+        body = panel.body
+        body.columnconfigure(1, weight=1)
+        widgets.Icon(body, "info", theme.MUTED, 14).grid(row=0, column=0, sticky="nw")
+        self.editing_label = tk.Label(
+            body, textvariable=self.editing_text, bg=theme.WHITE, fg=theme.INK,
+            font=self.fonts.hint, justify="left", anchor="w",
+            wraplength=theme.px(STRIP_WIDTH - 60),
+        )
+        self.editing_label.grid(row=0, column=1, sticky="w", padx=(theme.px(8), 0))
+        widgets.Check(body, self.insert_missing,
+                      "Insert new curves into the open part").grid(
+            row=1, column=0, columnspan=2, sticky="w", pady=(theme.px(7), 0)
+        )
+        return panel
+
+    # -- the footer: what just happened, and the one button that does anything
+
+    def _build_footer(self, parent: tk.Misc) -> tk.Frame:
+        footer = tk.Frame(parent, bg=theme.WINDOW)
+        footer.columnconfigure(1, weight=1)
+        self.status_dot = widgets.Dot(footer, theme.OK, size=8, bg=theme.WINDOW)
+        self.status_dot.grid(row=0, column=0, padx=(0, theme.px(8)))
+        self.status_label = tk.Label(
+            footer, textvariable=self.status, bg=theme.WINDOW, fg=theme.OK,
+            font=self.fonts.label, anchor="w", justify="left",
+            wraplength=theme.px(STRIP_WIDTH - 120),
+        )
+        self.status_label.grid(row=0, column=1, sticky="w")
+        self.export_button = widgets.Button(footer, "Export", command=self._export,
+                                            primary=True, height=32, bg=theme.WINDOW)
+        self.export_button.grid(row=0, column=2, sticky="e", padx=(theme.px(8), 0))
+        return footer
+
+    # -- the flyout (§8): everything in it already existed; only the box is new
 
     def _build_solidworks(self, parent: tk.Misc) -> None:
-        pad = self._px(8)
-        panel = ttk.LabelFrame(parent, text="SolidWorks", padding=pad)
-        panel.grid(row=0, column=1, sticky="ns", padx=(pad, 0))
-        panel.rowconfigure(1, weight=1)
+        parent.columnconfigure(0, weight=1)
+        parent.rowconfigure(3, weight=1)
+        pad = theme.px(12)
 
-        self.sw_status_label = ttk.Label(
-            panel, textvariable=self.sw_status, wraplength=self._px(280), foreground="#555"
+        head = tk.Frame(parent, bg=theme.SECONDARY_BG)
+        head.grid(row=0, column=0, sticky="ew", padx=pad, pady=(pad, 0))
+        head.columnconfigure(0, weight=1)
+        tk.Label(head, text="SOLIDWORKS · CURVES IN THE PART", bg=theme.SECONDARY_BG,
+                 fg=theme.HEADER_TEXT, font=self.fonts.header).grid(row=0, column=0,
+                                                                    sticky="w")
+        widgets.Button(head, "Hide", command=self._toggle_flyout, height=20,
+                       bg=theme.SECONDARY_BG).grid(row=0, column=1, sticky="e")
+
+        status = tk.Frame(parent, bg=theme.SECONDARY_BG)
+        status.grid(row=1, column=0, sticky="ew", padx=pad, pady=(theme.px(10), 0))
+        status.columnconfigure(0, weight=1)
+        tk.Label(status, textvariable=self.sw_headline, bg=theme.SECONDARY_BG,
+                 fg=theme.INK, font=self.fonts.label_bold, anchor="w",
+                 wraplength=theme.px(FLYOUT_WIDTH - 24)).grid(row=0, column=0, sticky="w")
+        self.sw_status_label = tk.Label(
+            status, textvariable=self.sw_detail, bg=theme.SECONDARY_BG,
+            fg=theme.MUTED, font=self.fonts.readout, anchor="w", justify="left",
+            wraplength=theme.px(FLYOUT_WIDTH - 24),
         )
-        self.sw_status_label.grid(row=0, column=0, columnspan=2, sticky="w", pady=(0, 6))
+        self.sw_status_label.grid(row=1, column=0, sticky="w", pady=(theme.px(2), 0))
 
+        tools = tk.Frame(parent, bg=theme.SECONDARY_BG)
+        tools.grid(row=2, column=0, sticky="ew", padx=pad, pady=(theme.px(8), theme.px(8)))
+        tools.columnconfigure(2, weight=1)
+        widgets.Button(tools, "Refresh", command=self._refresh_panel, icon="refresh",
+                       height=24, bg=theme.SECONDARY_BG).grid(row=0, column=0)
+        widgets.Button(tools, "New curve", command=self._new_curve, icon="plus",
+                       height=24, bg=theme.SECONDARY_BG).grid(row=0, column=1,
+                                                              padx=(theme.px(6), 0))
+        tk.Label(tools, textvariable=self.tree_count, bg=theme.SECONDARY_BG,
+                 fg=theme.MUTED, font=self.fonts.readout).grid(row=0, column=2, sticky="e")
+
+        holder = widgets.Box(parent, bg=theme.WHITE)
+        holder.grid(row=3, column=0, sticky="nsew", padx=pad)
+        holder.columnconfigure(0, weight=1)
+        holder.rowconfigure(0, weight=1)
         self.curve_tree = ttk.Treeview(
-            panel, columns=("state",), height=10, selectmode="browse"
+            holder, columns=("state",), height=10, selectmode="browse",
+            style="Af.Treeview",
         )
-        self.curve_tree.heading("#0", text="Curve")
-        self.curve_tree.heading("state", text="State")
-        self.curve_tree.column("#0", width=self._px(170), stretch=False)
-        self.curve_tree.column("state", width=self._px(90), stretch=False)
-        self.curve_tree.grid(row=1, column=0, sticky="nsew")
+        self.curve_tree.heading("#0", text="CURVE")
+        self.curve_tree.heading("state", text="STATE")
+        self.curve_tree.column("#0", width=theme.px(FLYOUT_WIDTH - 150), stretch=True)
+        self.curve_tree.column("state", width=theme.px(84), stretch=False)
+        self.curve_tree.grid(row=0, column=0, sticky="nsew")
         self.curve_tree.bind("<<TreeviewSelect>>", self._on_curve_selected)
 
-        scroll = ttk.Scrollbar(panel, orient="vertical", command=self.curve_tree.yview)
-        scroll.grid(row=1, column=1, sticky="ns")
+        scroll = ttk.Scrollbar(holder, orient="vertical", style="Af.Vertical.TScrollbar",
+                               command=self.curve_tree.yview)
+        scroll.grid(row=0, column=1, sticky="ns")
         self.curve_tree.configure(yscrollcommand=scroll.set)
 
         self.curve_tree.tag_configure("linked", foreground=OK_COLOR)
         self.curve_tree.tag_configure("attention", foreground=ERROR_COLOR)
-        self.curve_tree.tag_configure("untracked", foreground="#777")
+        self.curve_tree.tag_configure("untracked", foreground=theme.UNTRACKED)
+        self.curve_tree.tag_configure("record", font=self.fonts.mono_bold)
 
-        buttons = ttk.Frame(panel)
-        buttons.grid(row=2, column=0, columnspan=2, sticky="ew", pady=(6, 0))
-        ttk.Button(buttons, text="New curve", command=self._new_curve).grid(row=0, column=0)
-        ttk.Button(buttons, text="Refresh", command=self._refresh_panel).grid(
-            row=0, column=1, padx=(6, 0)
+        self._build_card(parent).grid(row=4, column=0, sticky="ew", padx=pad,
+                                      pady=(theme.px(8), pad))
+
+    def _build_card(self, parent: tk.Misc) -> tk.Frame:
+        """What the selected record is, and what Export will therefore do."""
+        card = widgets.Box(parent, bg=theme.WHITE)
+        inner = tk.Frame(card, bg=theme.WHITE)
+        inner.pack(fill="both", expand=True, padx=theme.px(10), pady=theme.px(8))
+        inner.columnconfigure(0, weight=1)
+
+        top = tk.Frame(inner, bg=theme.WHITE)
+        top.grid(row=0, column=0, sticky="ew")
+        top.columnconfigure(0, weight=1)
+        tk.Label(top, textvariable=self.card_title, bg=theme.WHITE, fg=theme.INK,
+                 font=self.fonts.label_bold, anchor="w").grid(row=0, column=0, sticky="w")
+        self.card_state_label = tk.Label(top, textvariable=self.card_state,
+                                         bg=theme.WHITE, fg=theme.OK,
+                                         font=self.fonts.readout)
+        self.card_state_label.grid(row=0, column=1, sticky="e")
+
+        tk.Label(inner, textvariable=self.card_settings, bg=theme.WHITE,
+                 fg=theme.MUTED, font=self.fonts.readout, anchor="w", justify="left",
+                 wraplength=theme.px(FLYOUT_WIDTH - 44)).grid(
+            row=1, column=0, sticky="w", pady=(theme.px(4), 0)
         )
-
-        ttk.Checkbutton(
-            panel,
-            text="Insert new curves into the open part",
-            variable=self.insert_missing,
-        ).grid(row=3, column=0, columnspan=2, sticky="w", pady=(6, 0))
-
-        self.editing_label = ttk.Label(
-            panel, textvariable=self.editing_text, wraplength=self._px(280)
+        self.card_hint = tk.Label(
+            inner, text="", bg=theme.WHITE, fg=theme.MUTED, font=self.fonts.readout,
+            anchor="w", justify="left", wraplength=theme.px(FLYOUT_WIDTH - 44),
         )
-        self.editing_label.grid(row=4, column=0, columnspan=2, sticky="w", pady=(6, 0))
+        self.card_hint.grid(row=2, column=0, sticky="w", pady=(theme.px(4), 0))
+        return card
+
+    def _toggle_flyout(self) -> None:
+        """Show or hide the curve list, growing the window rather than the strip.
+
+        The strip is a fixed width and must not reflow when the list appears:
+        on an ultrawide the whole point is that the list opens into space that
+        was not being used.
+        """
+        self._flyout_open = not self._flyout_open
+        root = self.winfo_toplevel()
+        root.update_idletasks()
+        width, height = root.winfo_width(), root.winfo_height()
+        delta = theme.px(FLYOUT_WIDTH) + max(1, theme.px(1))
+        if self._flyout_open:
+            self._flyout_edge.grid()
+            self.flyout.grid()
+            root.geometry(f"{width + delta}x{height}")
+        else:
+            self._flyout_edge.grid_remove()
+            self.flyout.grid_remove()
+            root.geometry(f"{max(width - delta, theme.px(STRIP_WIDTH + 24))}x{height}")
+        self.curves_button.set_text("Hide curves" if self._flyout_open else "Curves")
 
     # ----------------------------------------------------------- interaction
 
     def _set_status(self, message: str, ok: bool = True) -> None:
         self.status.set(message)
-        self.status_label.configure(foreground=OK_COLOR if ok else ERROR_COLOR)
+        color = OK_COLOR if ok else ERROR_COLOR
+        self.status_label.configure(foreground=color)
+        self.status_dot.set_color(color)
 
     def _on_le_typed(self, event: tk.Event) -> None:
         """Stop auto-filling the leading edge once the user edits it themselves."""
         if event.keysym in NAVIGATION_KEYS:
             return
         self._le_manual = True
-        self.le_hint.configure(text="")
+        self._le_picked = False
+        self._refresh_placement_readout()
+
+    def _refresh_plane_readout(self) -> None:
+        """The Plane panel's header line, whenever anything it names moves."""
+        self.plane_readout.set(ui_text.plane_readout(
+            self.plane_mode.get(), self.chord_axis.get(), self.up_axis.get(),
+            self.constraint.get(), self.main_plane.get(), self._picked_plane,
+        ))
+
+    def _refresh_placement_readout(self) -> None:
+        """Where the 2D origin lands: the old ``le_hint``, in the panel header."""
+        self.placement_readout.set(ui_text.placement_readout(
+            self.plane_mode.get(), self._le_manual, self._le_picked
+        ))
 
     def _on_plane_mode_changed(self) -> None:
         mode = self.plane_mode.get()
-        custom = mode in (MODE_3POINTS, MODE_2POINTS, MODE_NORMAL)
         on_main_plane = mode in geometry.MAIN_PLANES
         needed = 3 if mode == MODE_3POINTS else (2 if mode in (MODE_2POINTS, MODE_NORMAL) else 0)
-        for pi, entries in enumerate(self.p_entries):
-            state = "normal" if pi < needed else "disabled"
-            for entry in entries:
-                entry.configure(state=state)
+        for pi, fields in enumerate(self.p_entries):
+            for field in fields:
+                field.set_enabled(pi < needed)
+                # The ink border says "a pick put this here", and a change of
+                # mode is the user saying they are past that.
+                field.set_marked(False)
 
         constraint_state = "readonly" if mode == MODE_2POINTS else "disabled"
         self.constraint_box.configure(state=constraint_state)
         self.main_plane_box.configure(state=constraint_state)
+        self.constraint_label.configure(
+            fg=theme.LABEL if mode == MODE_2POINTS else theme.FAINT
+        )
 
         # On main planes the axis pickers set 'up' outright, so the flip checkbox
         # would only be a confusing second way to say the same thing. Off them —
@@ -599,19 +882,27 @@ class ConverterApp(ttk.Frame):
         self.chord_axis_box.configure(state=axis_state)
         self.up_axis_box.configure(state=axis_state)
         self.flip_check.configure(state="disabled" if on_main_plane else "normal")
+        self.chord_label.configure(fg=theme.LABEL if on_main_plane else theme.FAINT)
+        self.up_label.configure(fg=theme.LABEL if on_main_plane else theme.FAINT)
+        # Off a main plane the chord is the line P1 → P2; the dropdown that
+        # cannot say that steps aside for the field that can.
+        if on_main_plane:
+            self.chord_from_points.grid_remove()
+            self.chord_axis_box.master.grid()
+        else:
+            self.chord_axis_box.master.grid_remove()
+            self.chord_from_points.grid(row=0, column=0)
         if on_main_plane:
             self.flip.set(False)
             self._reset_axes(mode)
+        if mode != MODE_3POINTS:
+            self._picked_plane = False
 
         self._le_manual = False
+        self._le_picked = False
         self._sync_leading_edge()
-        if mode == MODE_LOADED:
-            hint = "Defaults to the curve's own leading edge — it exports back in place."
-        elif custom:
-            hint = "Defaults to P1 — the 2D origin lands here."
-        else:
-            hint = "Defaults to (0, 0, 0) — the 2D origin lands here."
-        self.le_hint.configure(text=hint)
+        self._refresh_plane_readout()
+        self._refresh_placement_readout()
 
     def _reset_axes(self, main_plane: str) -> None:
         """Restore the plane's conventional chord/up axes and refresh both dropdowns."""
@@ -686,6 +977,30 @@ class ConverterApp(ttk.Frame):
             sections={AIRFOIL: section.points},
         )
 
+    def _show_loaded(self, data: Optional[AirfoilData], curve: bool) -> None:
+        """The Source panel's second line: the section, drawn and named.
+
+        A path proves a file was chosen. The outline proves an aerofoil was
+        read out of it, which is the thing that actually goes wrong — a CSV
+        with the wrong columns parses into a shape nobody would loft.
+        """
+        if data is None:
+            self.loaded_name.set("No file loaded.")
+            self.loaded_detail.set("")
+            self.loaded_name_label.configure(fg=theme.FAINT)
+            self.outline.show(None)
+            self.target_field.set_placeholder("chord")
+            return
+
+        name, detail = ui_text.source_line(
+            data.name, data.chord, len(data.airfoil), bool(data.camber), curve
+        )
+        self.loaded_name.set(name)
+        self.loaded_detail.set(f"· {detail}")
+        self.loaded_name_label.configure(fg=theme.INK)
+        self.outline.show(data.airfoil)
+        self.target_field.set_placeholder(f"{data.chord:g}")
+
     def _load(self, path: str) -> None:
         self.section = None
         try:
@@ -694,7 +1009,8 @@ class ConverterApp(ttk.Frame):
         except (AirfoilParseError, GeometryError) as exc:
             self.data = None
             self.loaded_text.set("No file loaded.")
-            self.loaded_radio.configure(state="disabled")
+            self._show_loaded(None, curve=False)
+            self.plane_seg.set_option_enabled(MODE_LOADED, False)
             self._set_status(str(exc), ok=False)
             return
 
@@ -710,9 +1026,10 @@ class ConverterApp(ttk.Frame):
         elif not has_camber:
             summary += " (no camber line)"
         self.loaded_text.set(summary)
+        self._show_loaded(data, curve)
 
         # A curve already stands somewhere, so keeping it there is the sane default.
-        self.loaded_radio.configure(state="normal" if curve else "disabled")
+        self.plane_seg.set_option_enabled(MODE_LOADED, bool(curve))
         if curve:
             self.plane_mode.set(MODE_LOADED)
         elif self.plane_mode.get() == MODE_LOADED:
@@ -757,6 +1074,7 @@ class ConverterApp(ttk.Frame):
                 "SolidWorks link off: pywin32 is not installed, so curves are "
                 "written to files only."
             )
+            self._refresh_link_labels()
             return
         self._worker = swcom.Worker()
         self.after(200, self._tick)
@@ -799,6 +1117,7 @@ class ConverterApp(ttk.Frame):
         if self._pick_ticks * self.PICK_MS > self.PICK_GIVES_UP_AFTER * 1000:
             self._end_pick("Pick stopped: nothing was clicked.")
             return
+        self._update_pick_title()
         self._ask("pick", _take_selection)
 
     def _refresh_panel(self) -> None:
@@ -839,8 +1158,9 @@ class ConverterApp(ttk.Frame):
         self._pick_ticks = 0
         self._pick_answers = 0
         self._quiet_ticks = 0
+        self._pick_outcome = ""
         self.pick_text.set(self._pick.says)
-        self._show_pick_buttons()
+        self._show_pick()
 
     def _cancel_pick(self) -> None:
         self._end_pick("Pick cancelled. Nothing on the form was changed.")
@@ -851,7 +1171,8 @@ class ConverterApp(ttk.Frame):
             return
         self._pick = None
         self.pick_text.set(message)
-        self._show_pick_buttons()
+        self._pick_outcome = "stopped" if message else ""
+        self._show_pick()
 
     def _skip_pick(self) -> None:
         if self._pick is None or not self._pick.skip():
@@ -880,7 +1201,7 @@ class ConverterApp(ttk.Frame):
         if session is None:
             return
         self.pick_text.set(session.says)
-        self._show_pick_buttons()
+        self._show_pick()
         if session.finished:
             self._apply_pick(session)
 
@@ -891,9 +1212,11 @@ class ConverterApp(ttk.Frame):
             self._end_pick(f"Pick stopped: {exc}")
             return
         self._pick = None
+        self._picked_plane = placement.plane_mode == MODE_3POINTS
         self._apply_placement(placement)
         self.pick_text.set(_picked_summary(session))
-        self._show_pick_buttons()
+        self._pick_outcome = "done"
+        self._show_pick()
 
     def _apply_placement(self, placement) -> None:
         """Put a resolved pick on the form.
@@ -910,22 +1233,100 @@ class ConverterApp(ttk.Frame):
             for pi, point in enumerate(placement.points):
                 for ci, value in enumerate(point):
                     self.p_vars[pi][ci].set(f"{value:g}")
+                    self.p_entries[pi][ci].set_marked(True)
         if placement.leading_edge is not None:
             for ci, value in enumerate(placement.leading_edge):
                 self.le_vars[ci].set(f"{value:g}")
+                self.le_entries[ci].set_marked(True)
             self._le_manual = True
-            self.le_hint.configure(text="")
+            self._le_picked = True
+            self._refresh_placement_readout()
+        self._refresh_plane_readout()
 
-    def _show_pick_buttons(self) -> None:
+    # ------------------------------------------------------- the pick tracker
+    #
+    # One row per step, per §7. The rows are rebuilt rather than updated in
+    # place: there are three of them at most, and a row's shape changes with
+    # its state.
+
+    def _show_pick(self) -> None:
+        """Draw pick mode as it stands: idle, mid-pick, or just finished."""
         picking = self._pick is not None
         ready = self._can_push()
         start = "disabled" if picking or not ready else "normal"
         self.pick_button.configure(state=start)
         self.le_pick_button.configure(state=start)
-        self.pick_cancel.configure(state="normal" if picking else "disabled")
-        self.pick_done.configure(state="normal" if picking else "disabled")
-        skippable = picking and self._pick is not None and self._pick.skippable
-        self.pick_skip.configure(state="normal" if skippable else "disabled")
+
+        if picking:
+            self.pick_idle.grid_remove()
+            self.pick_block.grid(row=0, column=0, sticky="ew")
+            self._fill_tracker()
+        else:
+            self.pick_block.grid_remove()
+            self.pick_idle.grid()
+            self._fill_idle_row()
+
+    def _fill_idle_row(self) -> None:
+        """The button, and either what a pick would do or what the last one did."""
+        message = self.pick_text.get()
+        if self._pick_outcome == "done" and message:
+            self.pick_outcome_glyph.set_state("done")
+            self.pick_outcome_glyph.grid(row=0, column=1, padx=(theme.px(8), 0))
+            self.pick_idle_text.configure(text=message, fg=theme.INK)
+        elif self._pick_outcome == "stopped" and message:
+            self.pick_outcome_glyph.grid_remove()
+            self.pick_idle_text.configure(text=message, fg=theme.MUTED)
+        else:
+            self.pick_outcome_glyph.grid_remove()
+            self.pick_idle_text.configure(
+                text="Fills P1–P3 from a plane, a line and a point you click "
+                     "in the part.",
+                fg=theme.MUTED,
+            )
+
+    def _fill_tracker(self) -> None:
+        session = self._pick
+        if session is None:
+            return
+        for widget in self._tracker_widgets:
+            widget.destroy()
+        self._tracker_widgets = []
+        self.pick_skip.grid_remove()
+        self._update_pick_title()
+
+        for row, step in enumerate(ui_text.tracker_rows(session)):
+            glyph = widgets.StepGlyph(self.pick_rows)
+            glyph.set_state(step.state)
+            glyph.grid(row=row, column=0, sticky="w", pady=(0, theme.px(4)))
+
+            faint = step.state == "pending"
+            name = tk.Label(
+                self.pick_rows, text=step.name, bg=theme.TRACKER_BG,
+                fg=theme.FAINT if faint else theme.INK,
+                font=self.fonts.label_bold if step.state == "active" else self.fonts.label,
+                anchor="w",
+            )
+            name.grid(row=row, column=1, sticky="w", padx=(theme.px(8), 0))
+
+            detail = tk.Label(
+                self.pick_rows, text=step.detail, bg=theme.TRACKER_BG,
+                fg=theme.ERROR if step.error else (theme.FAINT if faint else theme.MUTED),
+                font=self.fonts.mono_tiny if step.state == "done" else self.fonts.hint,
+                anchor="w", justify="left", wraplength=theme.px(210),
+            )
+            detail.grid(row=row, column=2, sticky="w", padx=(theme.px(8), 0))
+            self._tracker_widgets.extend((glyph, name, detail))
+
+            if step.state == "active" and step.skippable:
+                self.pick_skip.grid(row=row, column=3, sticky="e", padx=(theme.px(8), 0))
+
+    def _update_pick_title(self) -> None:
+        """``step 2 of 3 · 1:12 left`` — the pick's own timeout, made visible."""
+        session = self._pick
+        if session is None:
+            return
+        left = self.PICK_GIVES_UP_AFTER - self._pick_ticks * self.PICK_MS / 1000.0
+        self.pick_title.set(ui_text.tracker_title(session, left))
 
     def _no_pick_reason(self) -> str:
         if not swcom.is_available():
@@ -954,8 +1355,9 @@ class ConverterApp(ttk.Frame):
                 return
             self._snapshot = None
             self.sw_status.set(self._link_message(error))
+            self._refresh_link_labels()
             self._fill_tree()
-            self._show_pick_buttons()
+            self._show_pick()
             return
 
         if kind == "pick":
@@ -985,7 +1387,7 @@ class ConverterApp(ttk.Frame):
         return f"SolidWorks could not be reached: {error}"
 
     def _describe_link(self) -> None:
-        self._show_pick_buttons()
+        self._show_pick()
         snapshot = self._snapshot or {}
         label = snapshot.get("version", "SolidWorks")
         if snapshot.get("newer_than_tested"):
@@ -1002,6 +1404,26 @@ class ConverterApp(ttk.Frame):
             )
         else:
             self.sw_status.set(f"{label} — {title}")
+        self._refresh_link_labels()
+
+    def _refresh_link_labels(self) -> None:
+        """The bar's dot and readout, and the flyout's two lines under it.
+
+        ``sw_status`` stays the one sentence it always was and is still what
+        the flyout falls back to; what is new is that the *state* of the link
+        is a colour on a dot, which is readable without reading.
+        """
+        headline, state = ui_text.link_headline(swcom.is_available(), self._snapshot)
+        self.sw_headline.set(headline)
+        self.sw_dot.set_color(
+            {"ok": theme.OK, "bad": theme.ERROR}.get(state, theme.FAINT)
+        )
+        self.sw_detail.set(
+            ui_text.link_detail(self._snapshot, self._sidecar_path, self.sw_status.get())
+        )
+        # The design disables the Curves button when the link is down. It is
+        # left live here: the flyout is also where the reason is written out in
+        # full, and a user who had closed it could otherwise not get it back.
 
     # ------------------------------------------------------- remembered work
 
@@ -1046,7 +1468,8 @@ class ConverterApp(ttk.Frame):
 
         by_export: Dict[str, List[store.CurveState]] = {}
         strays: List[store.CurveState] = []
-        for state in self._states():
+        self._last_states = self._states()
+        for state in self._last_states:
             if state.export_id:
                 by_export.setdefault(state.export_id, []).append(state)
             else:
@@ -1057,7 +1480,7 @@ class ConverterApp(ttk.Frame):
             worst = "linked" if all(not s.needs_attention for s in states) else "attention"
             node = self.curve_tree.insert(
                 "", "end", iid=export_id, text=_record_label(record, export_id), open=True,
-                values=(_record_place(record),), tags=(worst,),
+                values=(_record_place(record),), tags=(worst, "record"),
             )
             for position, state in enumerate(states):
                 self.curve_tree.insert(
@@ -1069,7 +1492,7 @@ class ConverterApp(ttk.Frame):
         if strays:
             node = self.curve_tree.insert(
                 "", "end", iid="__strays__", text="In the part, not tracked",
-                open=True, values=("",), tags=("untracked",),
+                open=True, values=("",), tags=("untracked", "record"),
             )
             for position, state in enumerate(strays):
                 self.curve_tree.insert(
@@ -1080,11 +1503,54 @@ class ConverterApp(ttk.Frame):
         if keep and self.curve_tree.exists(keep):
             self.curve_tree.selection_set(keep)
 
+        rows = len(by_export) + len(strays) + sum(len(v) for v in by_export.values())
+        rows += 1 if strays else 0
+        self.tree_count.set(f"{rows} row{'' if rows == 1 else 's'}")
+        self._describe_selection()
+
+    def _describe_selection(self) -> None:
+        """The card under the tree: what is selected, and what Export will do.
+
+        It answers the question the tree cannot: a row says a curve is linked,
+        the card says which settings produced it, so a rib can be recognised
+        before it is opened.
+        """
+        record = None
+        selected = self.curve_tree.selection()
+        if selected and self._sidecar is not None:
+            export_id = selected[0].split("/")[0]
+            if export_id != "__strays__":
+                record = self._sidecar.find(export_id)
+
+        if record is None:
+            self.card_title.set("Export will make a new curve.")
+            self.card_state.set("")
+            self.card_settings.set("")
+            self.card_hint.configure(
+                text="Click a record to load its settings into the form."
+            )
+            return
+
+        self.card_title.set(_record_label(record, record.export_id))
+        states = [s for s in self._last_states if s.export_id == record.export_id]
+        text, ok = ui_text.curves_linked(states)
+        self.card_state.set(text)
+        self.card_state_label.configure(fg=theme.OK if ok else theme.ERROR)
+        try:
+            self.card_settings.set(ui_text.record_summary(record.spec))
+        except Exception:  # noqa: BLE001 - a record written by a later version
+            self.card_settings.set("")
+        self.card_hint.configure(
+            text="Click a record to load its settings into the form. Export "
+                 "then updates it in place."
+        )
+
     # --------------------------------------------------------- quick switch
 
     def _on_curve_selected(self, _event: tk.Event) -> None:
         if self._restoring:
             return
+        self._describe_selection()
         selected = self.curve_tree.selection()
         if not selected:
             return
@@ -1179,6 +1645,7 @@ class ConverterApp(ttk.Frame):
         self._describe_editing()
         for item in self.curve_tree.selection():
             self.curve_tree.selection_remove(item)
+        self._describe_selection()
 
     def _select_editing(self) -> None:
         if self._editing and self.curve_tree.exists(self._editing):
@@ -1455,10 +1922,14 @@ def _scale_to_dpi(root: tk.Tk) -> float:
 
 def main() -> None:
     _declare_dpi_aware()
+    # Windows will not use a font file it has not been told about, and Tk asks
+    # it for its families the moment a window exists, so this goes first.
+    theme.register_bundled_fonts()
     root = tk.Tk()
     root.title("Airfoil Converter")
     scale = _scale_to_dpi(root)
-    root.minsize(int(560 * scale), int(200 * scale))
+    root.configure(background=theme.WINDOW)
+    root.minsize(int((STRIP_WIDTH + 24) * scale), int(480 * scale))
     ConverterApp(root, scale=scale)
     root.mainloop()
 

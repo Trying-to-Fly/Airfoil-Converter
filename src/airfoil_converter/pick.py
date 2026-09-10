@@ -108,6 +108,21 @@ class Pick:
         return self._at >= len(self._steps)
 
     @property
+    def steps(self) -> Tuple[Step, ...]:
+        """Every step of this pick, so a tracker can draw the ones not reached yet."""
+        return self._steps
+
+    @property
+    def index(self) -> int:
+        """How many steps are behind us, which is also the active step's position."""
+        return self._at
+
+    @property
+    def refusal(self) -> str:
+        """The last click that could not be used, or empty. Shown in red, not grey."""
+        return self._note
+
+    @property
     def step(self) -> Optional[Step]:
         return None if self.finished else self._steps[self._at]
 

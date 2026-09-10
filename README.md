@@ -209,8 +209,10 @@ says, so a 175 mm chord arrives as 175 mm in an inch document too.
 
 ## Driving SolidWorks
 
-With a part open in SolidWorks 2026 or newer, the **SolidWorks** panel down the
+With a part open in SolidWorks 2026 or newer, the **curves flyout** down the
 right-hand side lists the curves in that part and what the app knows about each.
+It is opened and closed from **Curves** in the window's SolidWorks bar, and the
+window grows and shrinks sideways with it, so the form itself never moves.
 Press **Export** and the curves go straight in: any that are not there yet are
 imported and named, and any that are there have their points replaced. The
 document is rebuilt once, at the end.
@@ -369,7 +371,10 @@ src/airfoil_converter/
   store.py      # what the app remembers about a part's curves
   swcom.py      # the only module that talks to SolidWorks
   swlink.py     # insert, refresh, rebuild -- in that order
-  gui.py        # tkinter window
+  gui.py        # tkinter window: the panels, the handlers, the poll
+  theme.py      # every colour, size and face the window uses
+  widgets.py    # the controls the design asks for, drawn by hand
+  ui_text.py    # the readouts and tracker rows, worked out without a window
 tests/
 main.py         # entry point
 ```
