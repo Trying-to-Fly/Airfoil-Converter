@@ -152,9 +152,13 @@ def test_the_diagnostic_reports_a_missing_pywin32_rather_than_crashing(monkeypat
 
 
 IDENTITY = [1, 0, 0, 0, 1, 0, 0, 0, 1, 0, 0, 0, 1]
-# A quarter turn about Z, then 10 along X: the shape a sketch on an offset
-# plane hands back.
-TURNED = [0, -1, 0, 1, 0, 0, 0, 0, 1, 10, 0, 0, 1]
+# A quarter turn about Z, then 10 along X. Stored by columns, so the first
+# three values are where local X ends up and the next three where local Y does.
+TURNED = [0, 1, 0, -1, 0, 0, 0, 0, 1, 10, 0, 0, 1]
+# What SolidWorks 2026 really reported for the Top and Right planes, with the
+# normals they are known to have.
+TOP_PLANE = [1, 0, 0, 0, 0, -1, 0, 1, 0, 0, 0, 0, 1]
+RIGHT_PLANE = [0, 0, -1, 0, 1, 0, 1, 0, 0, 0, 0, 0, 1]
 
 
 def test_an_identity_transform_leaves_a_point_where_it_was():
@@ -166,6 +170,19 @@ def test_a_transform_turns_and_then_moves():
     somewhere plausible but wrong, which is the whole risk of a pick."""
     assert swcom.transform_point(TURNED, (1.0, 0.0, 0.0)) == (10.0, 1.0, 0.0)
     assert swcom.transform_point(TURNED, (0.0, 1.0, 0.0)) == (9.0, 0.0, 0.0)
+
+
+@pytest.mark.parametrize(
+    "data,normal",
+    [(IDENTITY, (0.0, 0.0, 1.0)), (TOP_PLANE, (0.0, 1.0, 0.0)), (RIGHT_PLANE, (1.0, 0.0, 0.0))],
+)
+def test_the_rotation_is_stored_by_columns_not_rows(data, normal):
+    """The three reference planes, as SolidWorks 2026 actually reported them.
+
+    Reading the rotation as rows transposes it, which is silent on the Front
+    plane because its transform is the identity, and turns the other two
+    normals round. That is exactly what the first probe found."""
+    assert swcom.transform_point(data, (0.0, 0.0, 1.0)) == normal
 
 
 def test_the_translation_alone_places_the_sketch_origin():

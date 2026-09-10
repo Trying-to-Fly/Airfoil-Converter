@@ -328,9 +328,9 @@ class Refused:
 Picked = Union[PickedPoint, PickedLine, PickedPlane, Refused]
 
 # Only ever used to put a noun in a refusal, never to decide how to read
-# something — that is done by asking the object itself, below. So a number that
-# turns out to be wrong costs one imprecise word in one message, and nothing
-# else. swSelectType_e.
+# something — that is done by asking the object itself, below. So a number
+# missing or wrong here costs one imprecise word in one message, and nothing
+# else. swSelectType_e; 1, 2, 3, 4, 24 and 25 are what the probe reported.
 SELECTION_NAMES = {
     1: "an edge",
     2: "a face",
@@ -339,9 +339,8 @@ SELECTION_NAMES = {
     5: "an axis",
     6: "a reference point",
     9: "a sketch",
-    10: "a sketch line",
-    11: "a sketch point",
-    20: "a whole feature",
+    24: "a sketch curve",
+    25: "a sketch point",
 }
 
 
@@ -351,15 +350,22 @@ def transform_point(data: Sequence[float], point: Vec3) -> Vec3:
     ``IMathTransform.ArrayData`` is sixteen doubles: nine of rotation, three of
     translation, then a scale. Sketch geometry reports itself in the sketch's
     own coordinates, and this is what carries it back into the model's.
+
+    **The rotation is stored by columns.** The first three values are where the
+    local X axis ends up, the next three the local Y, the next three the local
+    Z. Reading them as rows instead transposes the rotation, which is silent on
+    the Front plane because its transform is the identity, and wrong on every
+    other plane: the probe reported the Top plane's normal as -Y and the Right
+    plane's as -X before this was turned the right way round.
     """
     r = [float(v) for v in data[:9]]
     tx, ty, tz = (float(v) for v in data[9:12])
     s = float(data[12]) if len(data) > 12 else 1.0
     x, y, z = point
     return (
-        s * (r[0] * x + r[1] * y + r[2] * z) + tx,
-        s * (r[3] * x + r[4] * y + r[5] * z) + ty,
-        s * (r[6] * x + r[7] * y + r[8] * z) + tz,
+        s * (r[0] * x + r[3] * y + r[6] * z) + tx,
+        s * (r[1] * x + r[4] * y + r[7] * z) + ty,
+        s * (r[2] * x + r[5] * y + r[8] * z) + tz,
     )
 
 
@@ -402,6 +408,9 @@ def _interpret(manager: Any, index: int) -> Picked:
 def _as_plane(manager: Any, index: int, obj: Any) -> Optional[PickedPlane]:
     surface = _try(obj, "GetSurface")
     if surface is not None and _try(surface, "IsPlane"):
+        # PlaneParams runs normal first, then a root point on the plane. Probed
+        # against the six faces of a box: the first three always come back a
+        # unit vector along an axis, the last three a corner of the box.
         params = _try(surface, "PlaneParams")
         if params is not None and len(params) >= 6:
             normal = (float(params[0]), float(params[1]), float(params[2]))
@@ -424,23 +433,22 @@ def _as_plane(manager: Any, index: int, obj: Any) -> Optional[PickedPlane]:
 
 
 def _as_line(manager: Any, index: int, obj: Any) -> Optional[PickedLine]:
+    # An edge and a sketch segment both answer GetCurve, and that is what keeps
+    # arcs and splines out: only a straight one says IsLine. They part company
+    # over their ends — an edge has vertices, a sketch segment has points — so
+    # both are tried, and the sketch is not reached by falling off the edge.
     curve = _try(obj, "GetCurve")
-    if curve is not None:
-        if not _try(curve, "IsLine"):
-            return None
-        start = _try(_try(obj, "GetStartVertex"), "GetPoint")
-        end = _try(_try(obj, "GetEndVertex"), "GetPoint")
-        if start is None or end is None:
-            return None
+    if curve is None or not _try(curve, "IsLine"):
+        return None
+
+    start = _try(_try(obj, "GetStartVertex"), "GetPoint")
+    end = _try(_try(obj, "GetEndVertex"), "GetPoint")
+    if start is not None and end is not None:
         return PickedLine(start=_in_mm(start), end=_in_mm(end))
 
-    start_point = _try(obj, "GetStartPoint2")
-    end_point = _try(obj, "GetEndPoint2")
-    if start_point is None or end_point is None:
-        return None
     to_model = _sketch_transform(manager, index, obj)
-    start = _sketch_coords(start_point, to_model)
-    end = _sketch_coords(end_point, to_model)
+    start = _sketch_coords(_try(obj, "GetStartPoint2"), to_model)
+    end = _sketch_coords(_try(obj, "GetEndPoint2"), to_model)
     if start is None or end is None:
         return None
     return PickedLine(start=start, end=end)
