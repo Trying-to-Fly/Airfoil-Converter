@@ -325,6 +325,22 @@ the form.
 A part that has never been saved has nowhere to keep that file, so its settings
 last only until the app closes. The panel says so.
 
+### Making a second rib
+
+**New curve** stops editing the rib you were editing and starts one that does
+not exist yet. Because it changes nothing on the form — that is the point of it,
+the second rib is the first one moved along the span — the new curve is listed
+at the top of the flyout straight away, selected, with `not exported yet` under
+it. That row is the answer to "am I about to update this rib or make another
+one".
+
+Its **Name** is editable in the card below the list, and it is the name Export
+carries into SolidWorks: type `rib_tip` and the features come out
+`rib_tip_airfoil`, `rib_tip_camber`. Left alone it follows the source file, as
+it always did. A rib that has been exported keeps the name it was made with —
+the field greys out — because renaming it would leave its old curves behind in
+the part.
+
 ### Things it will not do
 
 - **It never deletes a feature.** A wrong delete destroys work; a wrong insert

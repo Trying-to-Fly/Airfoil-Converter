@@ -40,6 +40,10 @@ ERROR_COLOR = theme.ERROR
 STRIP_WIDTH = 460
 FLYOUT_WIDTH = 360
 
+# The row standing for a curve that has not been exported yet. It is not an
+# export id and never reaches the sidecar; it only ever names a tree row.
+NEW_CURVE = "__new__"
+
 # The four trailing-edge modes, said shortly enough to fit four segments across
 # the strip. The values are still export.TE_MODES; only the labels are short.
 TE_LABELS = {
@@ -221,10 +225,13 @@ class ConverterApp(ttk.Frame):
         self.sw_detail = tk.StringVar(value="")
         self.pick_title = tk.StringVar(value="")
         self.tree_count = tk.StringVar(value="")
+        self.curve_name = tk.StringVar()
         self.card_title = tk.StringVar(value="Export will make a new curve.")
         self.card_state = tk.StringVar(value="")
         self.card_settings = tk.StringVar(value="")
 
+        # Has the name been typed in, or is it still following the source file?
+        self._name_typed = False
         # Was the plane last set by a pick? Only the readout cares, but it is
         # the difference between "3 points" and "3 points · picked in SolidWorks".
         self._picked_plane = False
@@ -268,9 +275,13 @@ class ConverterApp(ttk.Frame):
         self.chord_axis.trace_add("write", lambda *_: self._on_chord_axis_changed())
         for var in (self.up_axis, self.constraint, self.main_plane):
             var.trace_add("write", lambda *_: self._refresh_plane_readout())
+        self.curve_name.trace_add("write", lambda *_: self._on_name_changed())
         self._on_plane_mode_changed()
         self._show_pick()
         self._refresh_link_labels()
+        # The list starts with the curve about to be made in it, so that what
+        # Export is aimed at is never a thing the user has to remember.
+        self._fill_tree()
 
         self._start_link()
         master.bind("<FocusIn>", self._on_window_focused, add="+")
@@ -837,6 +848,8 @@ class ConverterApp(ttk.Frame):
         self.curve_tree.tag_configure("attention", foreground=ERROR_COLOR)
         self.curve_tree.tag_configure("untracked", foreground=theme.UNTRACKED)
         self.curve_tree.tag_configure("record", font=self.fonts.mono_bold)
+        self.curve_tree.tag_configure("pending", foreground=theme.ACCENT)
+        self.curve_tree.tag_configure("pending_child", foreground=theme.FAINT)
 
         self._build_card(parent).grid(row=4, column=0, sticky="ew", padx=pad,
                                       pady=(theme.px(8), pad))
@@ -858,16 +871,26 @@ class ConverterApp(ttk.Frame):
                                          font=self.fonts.readout)
         self.card_state_label.grid(row=0, column=1, sticky="e")
 
+        name = tk.Frame(inner, bg=theme.WHITE)
+        name.grid(row=1, column=0, sticky="ew", pady=(theme.px(6), 0))
+        name.columnconfigure(1, weight=1)
+        self.card_name_label = tk.Label(name, text="Name", bg=theme.WHITE,
+                                        fg=theme.LABEL, font=self.fonts.label)
+        self.card_name_label.grid(row=0, column=0, sticky="w", padx=(0, theme.px(8)))
+        self.card_name_field = widgets.Field(name, self.curve_name, grow=True)
+        self.card_name_field.grid(row=0, column=1, sticky="ew")
+        self.card_name_field.entry.bind("<Key>", self._on_name_typed)
+
         tk.Label(inner, textvariable=self.card_settings, bg=theme.WHITE,
                  fg=theme.MUTED, font=self.fonts.readout, anchor="w", justify="left",
                  wraplength=theme.px(FLYOUT_WIDTH - 44)).grid(
-            row=1, column=0, sticky="w", pady=(theme.px(4), 0)
+            row=2, column=0, sticky="w", pady=(theme.px(6), 0)
         )
         self.card_hint = tk.Label(
             inner, text="", bg=theme.WHITE, fg=theme.MUTED, font=self.fonts.readout,
             anchor="w", justify="left", wraplength=theme.px(FLYOUT_WIDTH - 44),
         )
-        self.card_hint.grid(row=2, column=0, sticky="w", pady=(theme.px(4), 0))
+        self.card_hint.grid(row=3, column=0, sticky="w", pady=(theme.px(4), 0))
         return card
 
     def _toggle_flyout(self) -> None:
@@ -1095,6 +1118,11 @@ class ConverterApp(ttk.Frame):
             summary += " (no camber line)"
         self.loaded_text.set(summary)
         self._show_loaded(data, curve)
+
+        # A new curve is named after the file it came from until someone says
+        # otherwise; a remembered one keeps the name it was exported with.
+        if not self._editing and not self._name_typed:
+            self.curve_name.set(self._source_stem())
 
         # A curve already stands somewhere, so keeping it there is the sane default.
         self.plane_seg.set_option_enabled(MODE_LOADED, bool(curve))
@@ -1569,13 +1597,54 @@ class ConverterApp(ttk.Frame):
                     text=state.feature, values=(store.ORPHAN,), tags=("untracked",),
                 )
 
+        # A curve that has not been exported yet has no feature and no record,
+        # so nothing above would list it. It is listed anyway, at the top and
+        # selected, because the whole danger of "New curve" is that it looks
+        # exactly like still editing the last one.
+        if not self._editing:
+            self.curve_tree.insert(
+                "", 0, iid=NEW_CURVE, text=self._stem() or "New curve", open=True,
+                values=(self._le_place(),), tags=("pending", "record"),
+            )
+            self.curve_tree.insert(
+                NEW_CURVE, "end", iid=f"{NEW_CURVE}/0", text="not exported yet",
+                values=("new",), tags=("pending_child",),
+            )
+            keep = keep if keep and keep != NEW_CURVE else NEW_CURVE
+
         if keep and self.curve_tree.exists(keep):
             self.curve_tree.selection_set(keep)
 
         rows = len(by_export) + len(strays) + sum(len(v) for v in by_export.values())
         rows += 1 if strays else 0
+        rows += 2 if not self._editing else 0
         self.tree_count.set(f"{rows} row{'' if rows == 1 else 's'}")
         self._describe_selection()
+
+    def _le_place(self) -> str:
+        """Where the form says the leading edge is, in the tree's own spelling."""
+        return ", ".join(var.get() for var in self.le_vars)
+
+    def _stem(self) -> str:
+        """The name the next export will carry into SolidWorks.
+
+        Typed in, or the source file's own name when nothing has been typed.
+        It is sanitized at the point it becomes a feature name, by
+        :func:`export.feature_name`, so what is typed here is left alone.
+        """
+        return self.curve_name.get().strip() or self._source_stem()
+
+    def _on_name_typed(self, event: tk.Event) -> None:
+        """Once a name is typed it stops following the source file."""
+        if event.keysym in NAVIGATION_KEYS:
+            return
+        self._name_typed = True
+
+    def _on_name_changed(self) -> None:
+        """Keep the pending row's label on the name as it is typed."""
+        if self.curve_tree.exists(NEW_CURVE):
+            self.curve_tree.item(NEW_CURVE, text=self._stem() or "New curve")
+        self._describe_editing()
 
     def _describe_selection(self) -> None:
         """The card under the tree: what is selected, and what Export will do.
@@ -1588,15 +1657,28 @@ class ConverterApp(ttk.Frame):
         selected = self.curve_tree.selection()
         if selected and self._sidecar is not None:
             export_id = selected[0].split("/")[0]
-            if export_id != "__strays__":
+            if export_id not in ("__strays__", NEW_CURVE):
                 record = self._sidecar.find(export_id)
 
+        # The name is only editable on a curve that does not exist yet.
+        # Renaming one that does would leave its old features behind in the
+        # part, and that is what Export's own warning is for, not a text field.
+        self.card_name_field.set_enabled(record is None)
+        self.card_name_label.configure(
+            fg=theme.LABEL if record is None else theme.FAINT
+        )
+
         if record is None:
-            self.card_title.set("Export will make a new curve.")
-            self.card_state.set("")
-            self.card_settings.set("")
+            self.card_title.set("New curve")
+            self.card_state.set("not exported yet")
+            self.card_state_label.configure(fg=theme.MUTED)
+            try:
+                self.card_settings.set(ui_text.record_summary(self._spec()))
+            except Exception:  # noqa: BLE001 - a half-typed field is not a card
+                self.card_settings.set("")
             self.card_hint.configure(
-                text="Click a record to load its settings into the form."
+                text="Export will make it, and name its curves after this. "
+                     "Click a record above to go back to editing that one."
             )
             return
 
@@ -1624,7 +1706,7 @@ class ConverterApp(ttk.Frame):
         if not selected:
             return
         export_id = selected[0].split("/")[0]
-        if export_id == "__strays__" or self._sidecar is None:
+        if export_id in ("__strays__", NEW_CURVE) or self._sidecar is None:
             return
         record = self._sidecar.find(export_id)
         if record is None or record.export_id == self._editing:
@@ -1701,29 +1783,54 @@ class ConverterApp(ttk.Frame):
 
             if record.output_folder:
                 self.out_folder.set(record.output_folder)
+            self.curve_name.set(record.stem)
+            self._name_typed = False
         finally:
             self._restoring = False
 
         self._editing = record.export_id
         self._describe_editing()
+        # The row for a curve that was about to be made has to go: from here
+        # Export updates this record instead of making anything.
+        self._fill_tree()
         self._select_editing()
 
     def _new_curve(self) -> None:
-        """Keep every field, drop the identity: the way a second rib is made."""
+        """Keep every field, drop the identity: the way a second rib is made.
+
+        The form does not change, which is exactly why this has to be visible
+        somewhere: the danger of pressing this is believing you are still
+        editing the rib you were editing a moment ago, or the other way round.
+        So a row for the curve appears at the top of the list, selected, and
+        the name it will take is editable in the card underneath.
+        """
         self._editing = ""
+        self._name_typed = False
+        self.curve_name.set(self._source_stem())
         self._describe_editing()
-        for item in self.curve_tree.selection():
-            self.curve_tree.selection_remove(item)
-        self._describe_selection()
+        self._fill_tree()
+        self._select_editing()
+        self._set_status(
+            f"New curve: Export will make {self._stem() or 'a new curve'} rather "
+            "than update the last one."
+        )
+
+    def _source_stem(self) -> str:
+        return os.path.splitext(os.path.basename(self.csv_path.get()))[0]
 
     def _select_editing(self) -> None:
-        if self._editing and self.curve_tree.exists(self._editing):
-            self.curve_tree.selection_set(self._editing)
+        wanted = self._editing or NEW_CURVE
+        if self.curve_tree.exists(wanted):
+            self.curve_tree.selection_set(wanted)
 
     def _describe_editing(self) -> None:
         """Say which of the two things Export is about to do."""
         if not self._editing or self._sidecar is None:
-            self.editing_text.set("Export will make a new curve.")
+            name = self._stem()
+            self.editing_text.set(
+                f"Export will make a new curve, {name}." if name
+                else "Export will make a new curve."
+            )
             return
         record = self._sidecar.find(self._editing)
         names = ", ".join(record.feature_names()) if record else self._editing
@@ -1753,7 +1860,9 @@ class ConverterApp(ttk.Frame):
             raise InputError(f"Output folder does not exist: {folder}")
 
         record = self._sidecar.find(self._editing) if (self._sidecar and self._editing) else None
-        stem = os.path.splitext(os.path.basename(self.csv_path.get()))[0]
+        # A record keeps the name it was made with; a new curve takes the one
+        # in the card, which starts as the source file's own name.
+        stem = record.stem if record else self._stem()
         index = record.name_index if record else self._next_index(stem)
 
         spec = self._spec()
