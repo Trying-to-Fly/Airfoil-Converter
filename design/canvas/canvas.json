@@ -1,0 +1,122 @@
+{
+  "artboards": [
+    {
+      "file": "Main.dc.html",
+      "title": "D · Workbench",
+      "x": 0,
+      "y": 0,
+      "w": 820,
+      "h": 1190,
+      "page": "page-1"
+    },
+    {
+      "file": "PickStates.dc.html",
+      "title": "D · Pick feedback",
+      "x": 920,
+      "y": 0,
+      "w": 460,
+      "h": 1400,
+      "page": "page-1"
+    },
+    {
+      "file": "FontOptions.dc.html",
+      "title": "D · Font options",
+      "page": "page-2",
+      "x": 0,
+      "y": 1560,
+      "w": 1460,
+      "h": 1560
+    },
+    {
+      "file": "AccentOptions.dc.html",
+      "title": "D · Accent options",
+      "x": 0,
+      "y": 0,
+      "w": 980,
+      "h": 1400,
+      "page": "page-2"
+    },
+    {
+      "file": "PropertySheet.dc.html",
+      "title": "A · Property sheet",
+      "x": 1080,
+      "y": 0,
+      "w": 460,
+      "h": 900,
+      "page": "page-2"
+    },
+    {
+      "file": "GuidedSteps.dc.html",
+      "title": "B · Guided steps",
+      "x": 1640,
+      "y": 0,
+      "w": 460,
+      "h": 1200,
+      "page": "page-2"
+    }
+  ],
+  "annotations": [
+    {
+      "id": "note-d",
+      "x": 0,
+      "y": -190,
+      "w": 820,
+      "text": "D · Workbench — Graphite, Libre Franklin + JetBrains Mono\nThe strip stays 460 wide. The SolidWorks section in it is now a two-line bar: what Export will do next, the insert checkbox, and a Curves button. Pressing it docks a 360-wide flyout to the right of the window, full height, so a long list of ribs gets the whole column rather than a five-row box at the bottom. Hide collapses it back; on an ultrawide the window simply grows sideways.\nThe flyout holds the part, where its settings are kept, Refresh / New curve, the curve tree, and a card for the selected record with its settings in one line.",
+      "page": "page-1"
+    },
+    {
+      "id": "note-pick",
+      "x": 920,
+      "y": -190,
+      "w": 460,
+      "text": "D · Pick feedback — the three states of Pick from SolidWorks\nThe branch shows one sentence and four buttons, so a successful plane click looks the same as nothing. Here every step has its own row: a tick and what was read, a ring for the step awaiting a click (a refusal shows in red on that row), a hollow ring for what is still to come. Skip sits on the optional step; Cancel and Use what I picked stay in the corners.\nAfterwards the picked values are tinted and tagged, and the header readout says where the plane came from.",
+      "page": "page-1"
+    },
+    {
+      "id": "note-fonts",
+      "w": 1460,
+      "text": "Settled: option 4, Libre Franklin + JetBrains Mono, was chosen. D · Font options — six professional pairings, in Graphite\nEach cell is the same set of controls; only the type changes, and the mono face for numbers changes with it. Sizes are nudged half a pixel where a face runs small or wide, so the comparison is fair.\n1 IBM Plex is corporate engineering. 2 Source Sans is the neutral compact one. 3 Fira is the sturdier developer-tool feel. 4 Libre Franklin has the industrial drawing-sheet heritage. 5 Red Hat is modern enterprise. 6 Noto is the plain workhorse.\nNot shown: Segoe UI, the Windows system face — it needs no download and is what the current tkinter app already uses; on this canvas it would render as your Mac's system font, so it is not a fair sample here.",
+      "page": "page-2",
+      "x": 0,
+      "y": 1370
+    },
+    {
+      "id": "note-accent",
+      "x": 0,
+      "y": -190,
+      "w": 980,
+      "text": "Settled: Graphite was chosen. D · Accent options — four starting points, most colour to least\nThe same controls in each: checkboxes, the pick tracker's active step, the primary button. Everything else stays white and grey; the state greens and reds are unchanged.\n1 Windows blue is the OS accent and looks native. 2 Navy is still blue but dark and conservative. 3 Steel is a grey with a hint of blue. 4 Graphite drops the accent entirely — black controls, colour only for state.\nCorner radius differs too (4 · 2 · 3 · 2 px), as a second lever to carry forward.",
+      "page": "page-2"
+    },
+    {
+      "id": "note-a",
+      "x": 1080,
+      "y": -190,
+      "w": 460,
+      "text": "A · Property sheet\nEvery field on screen at once, no scrolling, native Windows look. Reads like a CAD property manager, so it sits comfortably next to SolidWorks.\nTrade-off: dense. The long hints become tooltips, so a first-time user gets less hand-holding.\nDrawn before the solidworks-link branch; D carries the new panel and pick controls.",
+      "page": "page-2"
+    },
+    {
+      "id": "note-b",
+      "x": 1640,
+      "y": -190,
+      "w": 460,
+      "text": "B · Guided steps\nOne stage open at a time; finished stages collapse to a one-line summary you can re-open. Hides fields that don't apply (P1–P3 on a main plane).\nTrade-off: more clicks, and the whole state is never visible at once. Power users will want A or D.\nDrawn before the solidworks-link branch; D carries the new panel and pick controls.",
+      "page": "page-2"
+    }
+  ],
+  "launch": {
+    "view": "canvas",
+    "page": "page-1"
+  },
+  "pages": [
+    {
+      "id": "page-1",
+      "name": "Current"
+    },
+    {
+      "id": "page-2",
+      "name": "Settled and earlier"
+    }
+  ]
+}

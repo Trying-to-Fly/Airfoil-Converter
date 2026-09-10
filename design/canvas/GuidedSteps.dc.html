@@ -1,0 +1,150 @@
+<!doctype html>
+<html>
+<head>
+  <meta charset="utf-8">
+  <script src="./support.js"></script>
+</head>
+<body>
+<x-dc>
+<helmet>
+  <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=IBM+Plex+Sans:wght@400;500;600&family=IBM+Plex+Mono:wght@400;500&display=swap">
+  <style>
+    body { margin: 0; background: #f7f4ee; }
+    a { color: #b25a1c; } a:hover { color: #8f4614; }
+  </style>
+</helmet>
+<div style="width: 460px; height: 1200px; box-sizing: border-box; background: #f7f4ee; color: #26231e; font-family: 'IBM Plex Sans', 'Segoe UI', system-ui, sans-serif; font-size: 13px; line-height: 1.35; display: flex; flex-direction: column; gap: 10px; padding: 16px;">
+
+  <div style="display: flex; align-items: baseline; justify-content: space-between; padding: 0 2px 4px 2px;">
+    <span style="font-size: 12px; font-weight: 600; letter-spacing: 0.06em; text-transform: uppercase; color: #7a746a;">Airfoil Converter</span>
+    <span style="font-size: 11.5px; color: #a39c90; font-family: 'IBM Plex Mono', ui-monospace, monospace;">v1.4</span>
+  </div>
+
+  <div style="display: flex; align-items: flex-start; gap: 12px; padding: 12px 14px; background: #ffffff; border: 1px solid #e4dfd5; border-radius: 8px;">
+    <span style="width: 24px; height: 24px; flex-shrink: 0; border-radius: 50%; background: #b25a1c; color: #ffffff; display: inline-flex; align-items: center; justify-content: center;"><svg width="13" height="13" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M3.5 8.5l3 3 6-7"></path></svg></span>
+    <div style="display: flex; flex-direction: column; gap: 3px; flex-grow: 1; min-width: 0;">
+      <div style="display: flex; align-items: center; justify-content: space-between; gap: 8px;">
+        <span style="font-weight: 600; font-size: 13.5px;">Source</span>
+        <span style="font-size: 12px; color: #b25a1c; font-weight: 500;">Change</span>
+      </div>
+      <div style="display: flex; align-items: center; gap: 10px;">
+        <span style="font-family: 'IBM Plex Mono', ui-monospace, monospace; font-size: 12px; color: #26231e;">sd7037-il.csv</span>
+        <svg width="120" height="16" viewBox="-3 -16 181 22" fill="none" stroke="#b25a1c" stroke-width="1.6" stroke-linejoin="round"><path d="M175.00,-0.00 L174.43,-0.07 L172.74,-0.32 L170.01,-0.76 L166.32,-1.42 L161.79,-2.27 L156.49,-3.26 L150.53,-4.36 L143.96,-5.50 L136.85,-6.63 L129.26,-7.72 L121.26,-8.77 L112.94,-9.75 L104.40,-10.65 L95.71,-11.44 L86.99,-12.10 L78.30,-12.62 L69.76,-12.97 L61.43,-13.13 L53.39,-13.10 L45.72,-12.88 L38.48,-12.45 L31.74,-11.82 L25.55,-11.00 L19.97,-10.00 L15.03,-8.84 L10.76,-7.53 L7.18,-6.10 L4.31,-4.61 L2.16,-3.10 L0.73,-1.64 L0.04,-0.32 L0.22,0.69 L1.41,1.47 L3.57,2.15 L6.65,2.70 L10.63,3.11 L15.48,3.38 L21.15,3.53 L27.59,3.56 L34.74,3.48 L42.52,3.31 L50.85,3.07 L59.62,2.78 L68.75,2.44 L78.13,2.08 L87.63,1.71 L97.16,1.33 L106.60,0.96 L115.84,0.61 L124.78,0.29 L133.31,0.02 L141.32,-0.18 L148.69,-0.32 L155.32,-0.39 L161.12,-0.38 L166.00,-0.32 L169.88,-0.23 L172.71,-0.12 L174.42,-0.04 L175.00,-0.00"></path></svg>
+      </div>
+      <span style="font-size: 12px; color: #7a746a;">SD7037-092-88 · chord 175 mm · 61 points · camber line present</span>
+    </div>
+  </div>
+
+  <div style="display: flex; align-items: flex-start; gap: 12px; padding: 12px 14px; background: #ffffff; border: 1px solid #e4dfd5; border-radius: 8px;">
+    <span style="width: 24px; height: 24px; flex-shrink: 0; border-radius: 50%; background: #b25a1c; color: #ffffff; display: inline-flex; align-items: center; justify-content: center;"><svg width="13" height="13" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M3.5 8.5l3 3 6-7"></path></svg></span>
+    <div style="display: flex; flex-direction: column; gap: 3px; flex-grow: 1; min-width: 0;">
+      <div style="display: flex; align-items: center; justify-content: space-between; gap: 8px;">
+        <span style="font-weight: 600; font-size: 13.5px;">Shape</span>
+        <span style="font-size: 12px; color: #b25a1c; font-weight: 500;">Edit</span>
+      </div>
+      <span style="font-size: 12px; color: #7a746a;">Surface + camber · Auto-close · TE 0 mm · no offset</span>
+    </div>
+  </div>
+
+  <div style="display: flex; flex-direction: column; gap: 14px; padding: 14px 14px 16px 14px; background: #ffffff; border: 1.5px solid #b25a1c; border-radius: 8px;">
+    <div style="display: flex; align-items: center; gap: 12px;">
+      <span style="width: 24px; height: 24px; flex-shrink: 0; border-radius: 50%; box-sizing: border-box; border: 1.5px solid #b25a1c; color: #b25a1c; display: inline-flex; align-items: center; justify-content: center; font-weight: 600; font-size: 12px;">3</span>
+      <span style="font-weight: 600; font-size: 13.5px;">Plane</span>
+      <span style="font-size: 12px; color: #7a746a;">Where does the section lie?</span>
+    </div>
+
+    <div style="display: flex; flex-direction: column; gap: 8px;">
+      <div style="display: flex; gap: 6px;">
+        <div style="flex-grow: 1; height: 40px; box-sizing: border-box; border: 1.5px solid #b25a1c; border-radius: 6px; background: #fbeee4; color: #8f4614; display: flex; align-items: center; justify-content: center; font-weight: 600; font-size: 14px; font-family: 'IBM Plex Mono', ui-monospace, monospace;">XY</div>
+        <div style="flex-grow: 1; height: 40px; box-sizing: border-box; border: 1px solid #ddd6ca; border-radius: 6px; background: #ffffff; color: #26231e; display: flex; align-items: center; justify-content: center; font-size: 14px; font-family: 'IBM Plex Mono', ui-monospace, monospace;">XZ</div>
+        <div style="flex-grow: 1; height: 40px; box-sizing: border-box; border: 1px solid #ddd6ca; border-radius: 6px; background: #ffffff; color: #26231e; display: flex; align-items: center; justify-content: center; font-size: 14px; font-family: 'IBM Plex Mono', ui-monospace, monospace;">YZ</div>
+      </div>
+      <div style="display: flex; flex-direction: column; gap: 0;">
+        <div style="display: flex; align-items: center; gap: 10px; padding: 8px 4px; border-bottom: 1px solid #efeae1;">
+          <span style="width: 16px; height: 16px; box-sizing: border-box; border: 1.5px solid #b8b0a3; border-radius: 50%; background: #ffffff; flex-shrink: 0;"></span>
+          <span style="width: 148px; flex-shrink: 0;">3 points</span>
+          <span style="font-size: 12px; color: #7a746a;">the plane through P1, P2, P3</span>
+        </div>
+        <div style="display: flex; align-items: center; gap: 10px; padding: 8px 4px; border-bottom: 1px solid #efeae1;">
+          <span style="width: 16px; height: 16px; box-sizing: border-box; border: 1.5px solid #b8b0a3; border-radius: 50%; background: #ffffff; flex-shrink: 0;"></span>
+          <span style="width: 148px; flex-shrink: 0;">2 points + constraint</span>
+          <span style="font-size: 12px; color: #7a746a;">perpendicular or parallel to a main plane</span>
+        </div>
+        <div style="display: flex; align-items: center; gap: 10px; padding: 8px 4px; border-bottom: 1px solid #efeae1;">
+          <span style="width: 16px; height: 16px; box-sizing: border-box; border: 1.5px solid #b8b0a3; border-radius: 50%; background: #ffffff; flex-shrink: 0;"></span>
+          <span style="width: 148px; flex-shrink: 0;">Normal to line</span>
+          <span style="font-size: 12px; color: #7a746a;">through P1, ⊥ to P1 → P2</span>
+        </div>
+        <div style="display: flex; align-items: center; gap: 10px; padding: 8px 4px; color: #b8b0a3;">
+          <span style="width: 16px; height: 16px; box-sizing: border-box; border: 1.5px solid #ddd6ca; border-radius: 50%; background: #f3efe8; flex-shrink: 0;"></span>
+          <span style="width: 148px; flex-shrink: 0;">As loaded</span>
+          <span style="font-size: 12px;">needs a curve file</span>
+        </div>
+      </div>
+    </div>
+
+    <div style="height: 1px; background: #efeae1;"></div>
+
+    <div style="display: flex; flex-direction: column; gap: 10px;">
+      <span style="font-size: 12px; font-weight: 600; letter-spacing: 0.04em; text-transform: uppercase; color: #7a746a;">Point the airfoil</span>
+      <div style="display: flex; gap: 12px;">
+        <div style="display: flex; flex-direction: column; gap: 4px; flex-grow: 1;">
+          <span style="font-size: 12px; color: #4f4a42;">Chord runs along</span>
+          <div style="height: 34px; box-sizing: border-box; border: 1px solid #ddd6ca; border-radius: 6px; background: #ffffff; padding: 0 8px 0 10px; display: flex; align-items: center; justify-content: space-between; font-family: 'IBM Plex Mono', ui-monospace, monospace; font-size: 13px;"><span>−X</span><svg width="12" height="12" viewBox="0 0 16 16" fill="none" stroke="#7a746a" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><path d="M4 6l4 4 4-4"></path></svg></div>
+        </div>
+        <div style="display: flex; flex-direction: column; gap: 4px; flex-grow: 1;">
+          <span style="font-size: 12px; color: #4f4a42;">Up direction</span>
+          <div style="height: 34px; box-sizing: border-box; border: 1px solid #ddd6ca; border-radius: 6px; background: #ffffff; padding: 0 8px 0 10px; display: flex; align-items: center; justify-content: space-between; font-family: 'IBM Plex Mono', ui-monospace, monospace; font-size: 13px;"><span>+Y</span><svg width="12" height="12" viewBox="0 0 16 16" fill="none" stroke="#7a746a" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><path d="M4 6l4 4 4-4"></path></svg></div>
+        </div>
+      </div>
+      <span style="font-size: 12px; color: #7a746a;">The nose points along the chord axis; the body extends the other way.</span>
+
+      <div style="display: flex; flex-direction: column; gap: 4px;">
+        <span style="font-size: 12px; color: #4f4a42;">Rotate in plane</span>
+        <div style="display: flex; box-sizing: border-box; border: 1px solid #ddd6ca; border-radius: 6px; background: #ffffff; padding: 3px; gap: 3px;">
+          <div style="flex-grow: 1; height: 28px; border-radius: 4px; background: #fbeee4; color: #8f4614; display: flex; align-items: center; justify-content: center; font-family: 'IBM Plex Mono', ui-monospace, monospace; font-size: 12.5px; font-weight: 500;">0°</div>
+          <div style="flex-grow: 1; height: 28px; border-radius: 4px; display: flex; align-items: center; justify-content: center; font-family: 'IBM Plex Mono', ui-monospace, monospace; font-size: 12.5px; color: #4f4a42;">90°</div>
+          <div style="flex-grow: 1; height: 28px; border-radius: 4px; display: flex; align-items: center; justify-content: center; font-family: 'IBM Plex Mono', ui-monospace, monospace; font-size: 12.5px; color: #4f4a42;">180°</div>
+          <div style="flex-grow: 1; height: 28px; border-radius: 4px; display: flex; align-items: center; justify-content: center; font-family: 'IBM Plex Mono', ui-monospace, monospace; font-size: 12.5px; color: #4f4a42;">270°</div>
+        </div>
+      </div>
+
+      <div style="display: flex; align-items: flex-end; gap: 12px;">
+        <div style="display: flex; flex-direction: column; gap: 4px; width: 140px;">
+          <span style="font-size: 12px; color: #4f4a42;">Angle of attack</span>
+          <div style="height: 34px; box-sizing: border-box; border: 1px solid #ddd6ca; border-radius: 6px; background: #ffffff; padding: 0 10px; display: flex; align-items: center; justify-content: space-between; font-family: 'IBM Plex Mono', ui-monospace, monospace; font-size: 13px;"><span>0</span><span style="color: #a39c90; font-family: 'IBM Plex Sans', system-ui, sans-serif; font-size: 12px;">deg</span></div>
+        </div>
+        <span style="font-size: 12px; color: #7a746a; padding-bottom: 9px;">+ pitches the nose up, about the leading edge</span>
+      </div>
+    </div>
+
+    <div style="display: flex; justify-content: flex-end;">
+      <div style="height: 34px; box-sizing: border-box; border: 1px solid #b25a1c; border-radius: 6px; background: #ffffff; color: #b25a1c; padding: 0 14px; display: flex; align-items: center; gap: 6px; font-weight: 600; font-size: 13px;">Next: Place<svg width="14" height="14" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M6 4l4 4-4 4"></path></svg></div>
+    </div>
+  </div>
+
+  <div style="display: flex; align-items: flex-start; gap: 12px; padding: 12px 14px; background: #fbf9f5; border: 1px solid #e9e4da; border-radius: 8px;">
+    <span style="width: 24px; height: 24px; flex-shrink: 0; border-radius: 50%; background: #e9e4da; color: #7a746a; display: inline-flex; align-items: center; justify-content: center; font-weight: 600; font-size: 12px;">4</span>
+    <div style="display: flex; flex-direction: column; gap: 3px; flex-grow: 1;">
+      <span style="font-weight: 600; font-size: 13.5px; color: #4f4a42;">Place</span>
+      <span style="font-size: 12px; color: #a39c90;">Leading edge at the origin (0, 0, 0)</span>
+    </div>
+  </div>
+
+  <div style="display: flex; align-items: flex-start; gap: 12px; padding: 12px 14px; background: #fbf9f5; border: 1px solid #e9e4da; border-radius: 8px;">
+    <span style="width: 24px; height: 24px; flex-shrink: 0; border-radius: 50%; background: #e9e4da; color: #7a746a; display: inline-flex; align-items: center; justify-content: center; font-weight: 600; font-size: 12px;">5</span>
+    <div style="display: flex; flex-direction: column; gap: 3px; flex-grow: 1;">
+      <span style="font-weight: 600; font-size: 13.5px; color: #4f4a42;">Output</span>
+      <span style="font-size: 12px; color: #a39c90;">.sldcrv · saved next to the source</span>
+    </div>
+  </div>
+
+  <div style="margin-top: auto; display: flex; flex-direction: column; gap: 10px; padding-top: 12px; border-top: 1px solid #e4dfd5;">
+    <div style="display: flex; align-items: center; gap: 8px; font-size: 12.5px; color: #1a7f37;"><span style="width: 8px; height: 8px; border-radius: 50%; background: #1a7f37;"></span>CSV loaded. Set the plane and export.</div>
+    <div style="height: 44px; box-sizing: border-box; border-radius: 8px; background: #b25a1c; color: #ffffff; display: flex; align-items: center; justify-content: center; font-weight: 600; font-size: 14px;">Export 2 curves</div>
+  </div>
+
+</div>
+</x-dc>
+</body>
+</html>
