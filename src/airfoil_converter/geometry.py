@@ -220,6 +220,41 @@ def parallel_frame(p1: Vec3, p2: Vec3, main_plane: str) -> Tuple[Vec3, Vec3]:
     return u, cross(m, u)
 
 
+def picked_points(normal: Vec3, nose: Vec3, chord: Vec3) -> Tuple[Vec3, Vec3, Vec3]:
+    """P1, P2, P3 for a plane and a chord direction picked off a model.
+
+    A picked plane gives a normal, and a picked line gives a direction. Together
+    they are exactly a 3-point plane, so a pick needs no plane mode of its own:
+    it writes three points into the fields that are already there.
+
+    The line need not lie in the plane — only its projection onto the plane can
+    be a chord, so that is what is used. ``chord`` runs nose to tail, the way
+    ``three_point_frame`` reads P1 -> P2.
+
+    Feeding the result back through :func:`three_point_frame` returns the
+    projected chord unchanged and ``cross(normal, chord)`` as 'up', so the
+    reconstructed plane is the picked one to full precision. That makes
+    (chord, up, normal) right-handed, the same convention
+    :func:`normal_line_frame` follows, which on some planes is upside down
+    relative to the plane's conventional frame. Flipping 'up' is the cure, and
+    the checkbox for it is live in 3-point mode.
+    """
+    n = normalize(normal, "plane normal")
+    flat = sub(chord, scale(n, dot(chord, n)))
+    span = length(flat)
+    if span <= DIR_TOL:
+        raise GeometryError(
+            "The line is perpendicular to the plane, so it leaves no direction "
+            "on the plane to run the chord along."
+        )
+    # Only the directions matter to the frame, but these three points are about
+    # to be shown to someone. Keeping the line's own length puts P2 where the
+    # end of it really is, and P3 the same distance to the up side, rather than
+    # leaving a millimetre-long chord on the form to be puzzled over.
+    u = scale(flat, 1.0 / span)
+    return nose, add(nose, flat), add(nose, scale(cross(n, u), span))
+
+
 def quarter_turn_frame(u: Vec3, v: Vec3, turns: int) -> Tuple[Vec3, Vec3]:
     """Turn a frame a whole number of quarter-turns within its own plane.
 

@@ -50,9 +50,12 @@ download and double-click, no Python needed.
 7. Choose the **plane**: a main plane (XY / XZ / YZ), a plane through 3 points,
    a plane through 2 points constrained perpendicular or parallel to a main
    plane, a plane **normal to a line** — through `P1`, perpendicular to the
-   line `P1 -> P2` — or, for a loaded curve, **As loaded**, its own plane.
+   line `P1 -> P2` — or, for a loaded curve, **As loaded**, its own plane. With
+   the part open you can click the plane in SolidWorks instead of typing it; see
+   *Picking the plane out of the model* below.
 8. Point the airfoil where you want it (see *Orientation* below).
-9. Set where the **leading edge** lands. This is where the 2D origin is placed.
+9. Set where the **leading edge** lands, by typing it or by clicking a sketch
+   point in SolidWorks. This is where the 2D origin is placed.
    It defaults to the origin for main planes, to `P1` for custom planes, and to
    the curve's own leading edge for a loaded curve, until you type in it yourself.
 10. **Export.** Output goes next to the source file by default.
@@ -231,7 +234,49 @@ python -m airfoil_converter.swcom
 
 That prints every SolidWorks it can reach, its version, the open documents and
 their curve features. It is the first thing to run when the panel says something
-unexpected.
+unexpected. Add `--selection` and it describes whatever is clicked in SolidWorks
+instead, which is the first thing to run when a pick refuses something.
+
+### Picking the plane out of the model
+
+The coordinates are already in the part, so they need not be typed twice. Press
+**Pick from SolidWorks** under the plane settings and click, in SolidWorks:
+
+1. **A plane** — a reference plane, or any flat face. This is the plane the
+   section is placed on.
+2. **A line** — a straight edge, or a sketch line. The chord runs along it.
+   Press **Skip** to leave the chord to the normal-to-line convention.
+3. **The leading edge** — a sketch point, or a corner. Press **Skip** to leave
+   the leading edge where it is.
+
+The form then switches to **3 points** and fills `P1`, `P2` and `P3` in for
+you: `P1` is the leading edge, `P2` the far end of the line, `P3` one chord
+length to the up side. Nothing new is stored — a picked plane is an ordinary
+3-point plane, so the settings save, reload and export exactly as a typed one
+does.
+
+Skipping the line leaves nothing to fix the chord *on* the plane, so the form
+falls back to **Normal to line**, whose convention is described under
+*Orientation* above.
+
+There is a second **Pick** button beside the leading edge, for moving a section
+without touching its plane.
+
+Two things worth knowing:
+
+- **The chord runs nose to tail, and a line has two ends.** The end nearer the
+  leading edge you picked becomes the nose. Skip the leading edge and the line
+  keeps its own direction, which is a coin toss — press **Flip up direction**,
+  or swap `P1` and `P2` by hand, if the section comes out backwards.
+- **Up follows SolidWorks, not the app's own main planes.** A picked plane is
+  oriented the way a sketch on that plane is, which on some planes is the
+  opposite of the `XY` / `XZ` / `YZ` convention. **Flip up direction** is the
+  cure and stays live in 3-point mode.
+
+Picking clears the selection in SolidWorks each time it reads it. That is what
+tells one click from the last one still being selected, and it is why a click
+visibly deselects itself. **Cancel** leaves every field exactly as it was, and a
+pick nobody finishes gives up after a minute and a half.
 
 ### Names
 

@@ -9,7 +9,7 @@ import uuid
 from tkinter import filedialog, font as tkfont, messagebox, ttk
 from typing import Any, Dict, List, Optional
 
-from . import geometry, parser, store, swcom, swlink, writer
+from . import geometry, parser, pick, store, swcom, swlink, writer
 from .export import (
     MODE_2POINTS,
     MODE_3POINTS,
@@ -120,6 +120,29 @@ def _read_snapshot(session) -> dict:
     }
 
 
+def _picked_summary(session) -> str:
+    """What a finished pick actually read, in one sentence."""
+    got = [
+        name
+        for name, value in (
+            ("the plane", session.plane),
+            ("the chord", session.line),
+            ("the leading edge", session.point),
+        )
+        if value is not None
+    ]
+    if not got:
+        return "Nothing was picked, so the form is unchanged."
+    if len(got) > 1:
+        got = [", ".join(got[:-1]) + " and " + got[-1]]
+    return f"Read {got[0]} from SolidWorks."
+
+
+def _take_selection(session):
+    """What the user just clicked, taken so the next poll starts empty."""
+    return session.take_selection()
+
+
 class ConverterApp(ttk.Frame):
     def __init__(self, master: tk.Misc, scale: float = 1.0) -> None:
         super().__init__(master, padding=int(round(12 * scale)))
@@ -161,6 +184,7 @@ class ConverterApp(ttk.Frame):
         self.sw_status = tk.StringVar(value="Looking for SolidWorks...")
         self.editing_text = tk.StringVar(value="Export will make a new curve.")
         self.insert_missing = tk.BooleanVar(value=True)
+        self.pick_text = tk.StringVar(value="")
 
         # The link to SolidWorks. None until the first look, and dropped again
         # whenever a call fails, so a reopened session is picked up on its own.
@@ -176,6 +200,11 @@ class ConverterApp(ttk.Frame):
         self._restoring = False
         self._quiet_ticks = 0
 
+        # Pick mode: None unless the user is clicking things in SolidWorks.
+        self._pick: Optional[pick.Pick] = None
+        self._pick_ticks = 0
+        self._pick_answers = 0
+
         self.p_vars: List[List[tk.StringVar]] = [
             [tk.StringVar(value="0") for _ in range(3)] for _ in range(3)
         ]
@@ -189,6 +218,7 @@ class ConverterApp(ttk.Frame):
                 var.trace_add("write", lambda *_: self._sync_leading_edge())
         self.chord_axis.trace_add("write", lambda *_: self._on_chord_axis_changed())
         self._on_plane_mode_changed()
+        self._show_pick_buttons()
 
         self._start_link()
         master.bind("<FocusIn>", self._on_window_focused, add="+")
@@ -424,6 +454,23 @@ class ConverterApp(ttk.Frame):
         ttk.Label(
             plane, text="(+ pitches the nose up, about the leading edge)", foreground="#555"
         ).grid(row=9, column=3, columnspan=3, sticky="w", padx=(6, 0), pady=(6, 0))
+
+        picking = ttk.Frame(plane)
+        picking.grid(row=10, column=0, columnspan=6, sticky="ew", pady=(10, 0))
+        self.pick_button = ttk.Button(
+            picking, text="Pick from SolidWorks", command=self._start_plane_pick
+        )
+        self.pick_button.grid(row=0, column=0, sticky="w")
+        self.pick_skip = ttk.Button(picking, text="Skip", command=self._skip_pick)
+        self.pick_skip.grid(row=0, column=1, padx=(6, 0))
+        self.pick_done = ttk.Button(picking, text="Use what I picked", command=self._finish_pick)
+        self.pick_done.grid(row=0, column=2, padx=(6, 0))
+        self.pick_cancel = ttk.Button(picking, text="Cancel", command=self._cancel_pick)
+        self.pick_cancel.grid(row=0, column=3, padx=(6, 0))
+        self.pick_label = ttk.Label(
+            plane, textvariable=self.pick_text, foreground="#555", wraplength=self._px(520)
+        )
+        self.pick_label.grid(row=11, column=0, columnspan=6, sticky="w", pady=(4, 0))
         row += 1
 
         placement = ttk.LabelFrame(parent, text="Placement", padding=pad)
@@ -436,8 +483,10 @@ class ConverterApp(ttk.Frame):
             entry.grid(row=0, column=2 + ci * 2, sticky="w")
             entry.bind("<Key>", self._on_le_typed)
             self.le_entries.append(entry)
+        self.le_pick_button = ttk.Button(placement, text="Pick", command=self._start_point_pick)
+        self.le_pick_button.grid(row=0, column=7, sticky="w", padx=(10, 0))
         self.le_hint = ttk.Label(placement, text="", foreground="#555")
-        self.le_hint.grid(row=1, column=0, columnspan=7, sticky="w", pady=(4, 0))
+        self.le_hint.grid(row=1, column=0, columnspan=8, sticky="w", pady=(4, 0))
         row += 1
 
         out = ttk.LabelFrame(parent, text="Output", padding=pad)
@@ -695,6 +744,13 @@ class ConverterApp(ttk.Frame):
     POLL_MS = 1000
     SLOW_EVERY = 5  # a full walk this many quiet ticks apart, to catch renames
 
+    # A pick is a click being waited for, not a panel being kept fresh, so it
+    # polls fast — and only while it is armed, which is why the panel's own
+    # rate is left alone. A pick nobody finishes gives up rather than polling
+    # SolidWorks for the rest of the afternoon.
+    PICK_MS = 200
+    PICK_GIVES_UP_AFTER = 90.0  # seconds
+
     def _start_link(self) -> None:
         if not swcom.is_available():
             self.sw_status.set(
@@ -711,15 +767,18 @@ class ConverterApp(ttk.Frame):
             self._collect_push()
             self._collect()
             if self._worker is not None and self._pending is None and self._pending_push is None:
-                self._quiet_ticks += 1
-                if self._quiet_ticks >= self.SLOW_EVERY:
-                    self._quiet_ticks = 0
-                    self._ask_for_snapshot()
+                if self._pick is not None:
+                    self._ask_for_pick()
                 else:
-                    self._ask_for_key()
+                    self._quiet_ticks += 1
+                    if self._quiet_ticks >= self.SLOW_EVERY:
+                        self._quiet_ticks = 0
+                        self._ask_for_snapshot()
+                    else:
+                        self._ask_for_key()
         except Exception:  # noqa: BLE001 - a tick must never kill the timer
             pass
-        self.after(self.POLL_MS, self._tick)
+        self.after(self.PICK_MS if self._pick is not None else self.POLL_MS, self._tick)
 
     def _ask(self, kind: str, work) -> None:
         if self._worker is None or self._pending is not None:
@@ -733,6 +792,14 @@ class ConverterApp(ttk.Frame):
 
     def _ask_for_snapshot(self) -> None:
         self._ask("snapshot", _read_snapshot)
+
+    def _ask_for_pick(self) -> None:
+        """The only question worth asking while the user is off clicking."""
+        self._pick_ticks += 1
+        if self._pick_ticks * self.PICK_MS > self.PICK_GIVES_UP_AFTER * 1000:
+            self._end_pick("Pick stopped: nothing was clicked.")
+            return
+        self._ask("pick", _take_selection)
 
     def _refresh_panel(self) -> None:
         """The Refresh button, and every path that needs the truth now.
@@ -749,6 +816,129 @@ class ConverterApp(ttk.Frame):
         """Coming back from SolidWorks is when a rename is freshest."""
         self._refresh_panel()
 
+    # ------------------------------------------------- picking in SolidWorks
+    #
+    # The app is polling, not being told. So a pick clears the selection every
+    # time it reads it, which is what makes one click distinguishable from the
+    # same thing still being selected a fifth of a second later — and shows the
+    # user their click landed. The first answer of a pick is thrown away for
+    # the same reason: it is whatever happened to be selected when the button
+    # was pressed, not a click.
+
+    def _start_plane_pick(self) -> None:
+        self._begin_pick(pick.PLANE_PICK)
+
+    def _start_point_pick(self) -> None:
+        self._begin_pick(pick.POINT_PICK)
+
+    def _begin_pick(self, steps) -> None:
+        if not self._can_push():
+            self._set_status(self._no_pick_reason(), ok=False)
+            return
+        self._pick = pick.Pick(steps)
+        self._pick_ticks = 0
+        self._pick_answers = 0
+        self._quiet_ticks = 0
+        self.pick_text.set(self._pick.says)
+        self._show_pick_buttons()
+
+    def _cancel_pick(self) -> None:
+        self._end_pick("Pick cancelled. Nothing on the form was changed.")
+
+    def _end_pick(self, message: str = "") -> None:
+        """Leave pick mode without applying anything."""
+        if self._pick is None:
+            return
+        self._pick = None
+        self.pick_text.set(message)
+        self._show_pick_buttons()
+
+    def _skip_pick(self) -> None:
+        if self._pick is None or not self._pick.skip():
+            return
+        self._after_pick_step()
+
+    def _finish_pick(self) -> None:
+        if self._pick is None:
+            return
+        self._pick.stop()
+        self._after_pick_step()
+
+    def _took_pick(self, picked) -> None:
+        if self._pick is None:
+            return
+        self._pick_answers += 1
+        if self._pick_answers == 1:
+            return  # whatever was already selected when the pick began
+        if picked is None:
+            return  # nothing clicked yet, which is most polls
+        self._pick.accept(picked)
+        self._after_pick_step()
+
+    def _after_pick_step(self) -> None:
+        session = self._pick
+        if session is None:
+            return
+        self.pick_text.set(session.says)
+        self._show_pick_buttons()
+        if session.finished:
+            self._apply_pick(session)
+
+    def _apply_pick(self, session) -> None:
+        try:
+            placement = session.resolve()
+        except GeometryError as exc:
+            self._end_pick(f"Pick stopped: {exc}")
+            return
+        self._pick = None
+        self._apply_placement(placement)
+        self.pick_text.set(_picked_summary(session))
+        self._show_pick_buttons()
+
+    def _apply_placement(self, placement) -> None:
+        """Put a resolved pick on the form.
+
+        The order is the whole method. Setting the plane mode clears the
+        hand-typed leading-edge flag and re-syncs the leading edge from P1, so
+        the points have to be written after the mode and the leading edge after
+        the points — the same order :meth:`_apply_record` follows, and for the
+        same reason.
+        """
+        if placement.plane_mode is not None:
+            self.plane_mode.set(placement.plane_mode)
+            self._on_plane_mode_changed()
+            for pi, point in enumerate(placement.points):
+                for ci, value in enumerate(point):
+                    self.p_vars[pi][ci].set(f"{value:g}")
+        if placement.leading_edge is not None:
+            for ci, value in enumerate(placement.leading_edge):
+                self.le_vars[ci].set(f"{value:g}")
+            self._le_manual = True
+            self.le_hint.configure(text="")
+
+    def _show_pick_buttons(self) -> None:
+        picking = self._pick is not None
+        ready = self._can_push()
+        start = "disabled" if picking or not ready else "normal"
+        self.pick_button.configure(state=start)
+        self.le_pick_button.configure(state=start)
+        self.pick_cancel.configure(state="normal" if picking else "disabled")
+        self.pick_done.configure(state="normal" if picking else "disabled")
+        skippable = picking and self._pick is not None and self._pick.skippable
+        self.pick_skip.configure(state="normal" if skippable else "disabled")
+
+    def _no_pick_reason(self) -> str:
+        if not swcom.is_available():
+            return "pywin32 is not installed, so nothing can be picked in SolidWorks."
+        snapshot = self._snapshot
+        if snapshot is None:
+            return "SolidWorks is not reachable, so there is nothing to pick in."
+        if not snapshot.get("title"):
+            return "No document is open in SolidWorks, so there is nothing to pick in."
+        if not snapshot.get("is_part"):
+            return f"{snapshot['title']} is not a part, so there is nothing to pick in it."
+        return "Nothing can be picked just now."
+
     def _collect(self) -> None:
         if self._pending is None:
             return
@@ -759,9 +949,17 @@ class ConverterApp(ttk.Frame):
         kind, self._pending, self._pending_kind = self._pending_kind, None, ""
 
         if error is not None:
+            if kind == "pick":
+                self._end_pick(f"Pick stopped: {error}")
+                return
             self._snapshot = None
             self.sw_status.set(self._link_message(error))
             self._fill_tree()
+            self._show_pick_buttons()
+            return
+
+        if kind == "pick":
+            self._took_pick(value)
             return
 
         if kind == "key":
@@ -787,6 +985,7 @@ class ConverterApp(ttk.Frame):
         return f"SolidWorks could not be reached: {error}"
 
     def _describe_link(self) -> None:
+        self._show_pick_buttons()
         snapshot = self._snapshot or {}
         label = snapshot.get("version", "SolidWorks")
         if snapshot.get("newer_than_tested"):
@@ -995,6 +1194,7 @@ class ConverterApp(ttk.Frame):
         self.editing_text.set(f"Export will update {names}.")
 
     def _export(self) -> None:
+        self._end_pick()
         try:
             self._export_unsafe()
         except (InputError, GeometryError, AirfoilParseError, ValueError) as exc:

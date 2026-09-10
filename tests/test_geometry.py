@@ -452,6 +452,79 @@ def test_normal_line_rejects_coincident_points():
         g.plane_frame(g.NORMAL_LINE, p1=(1, 1, 1), p2=(1, 1, 1))
 
 
+# ------------------------------------------------------- points picked off a model
+
+
+PICKED = [
+    ((0, 0, 1), (1, 0, 0)),          # XY, chord along +X
+    ((0, 1, 0), (0, 0, 1)),          # XZ, chord along +Z
+    ((1, 0, 0), (0, 1, 0)),          # YZ, chord along +Y
+    ((1, 1, 0), (0, 0, 1)),          # a plane on no axis at all
+    ((2, -3, 6), (1, 1, 1)),         # normal not a unit vector
+]
+
+
+@pytest.mark.parametrize("normal,chord", PICKED)
+def test_picked_points_rebuild_the_plane_they_came_from(normal, chord):
+    """The whole point of the pick: what SolidWorks was asked for is what comes
+    back. A plane reconstructed even slightly off would put a rib slightly off,
+    and nothing downstream would notice."""
+    n = g.normalize(normal)
+    flat = g.normalize(g.sub(chord, g.scale(n, g.dot(chord, n))))
+    p1, p2, p3 = g.picked_points(normal, (7.0, -2.0, 3.0), chord)
+    u, v = g.plane_frame("3points", p1=p1, p2=p2, p3=p3)
+    assert g.cross(u, v) == approx(n)
+    assert u == approx(flat)
+
+
+def test_picked_points_put_the_nose_at_p1():
+    p1, _, _ = g.picked_points((0, 0, 1), (12.5, 4.0, 0.0), (1, 0, 0))
+    assert p1 == (12.5, 4.0, 0.0)
+
+
+def test_the_points_keep_the_length_of_the_line_they_came_from():
+    """Only the directions reach the frame, but these three numbers are shown
+    to someone: P2 belongs at the end of the line they clicked, not a
+    millimetre along it."""
+    p1, p2, p3 = g.picked_points((0, 0, 1), (0, 0, 0), (100.0, 0.0, 0.0))
+    assert p2 == approx((100, 0, 0))
+    assert g.length(g.sub(p3, p1)) == pytest.approx(100.0)
+
+
+def test_a_line_off_the_plane_is_projected_onto_it():
+    """A sketch line rarely lies exactly on the plane you picked, and only its
+    shadow on that plane can be a chord."""
+    p1, p2, p3 = g.picked_points((0, 0, 1), (0, 0, 0), (1, 0, 0.9))
+    u, _ = g.plane_frame("3points", p1=p1, p2=p2, p3=p3)
+    assert u == approx((1, 0, 0))
+
+
+def test_the_chord_runs_the_way_the_line_was_given():
+    forward = g.picked_points((0, 0, 1), (0, 0, 0), (1, 0, 0))
+    backward = g.picked_points((0, 0, 1), (0, 0, 0), (-1, 0, 0))
+    u_forward, _ = g.plane_frame("3points", p1=forward[0], p2=forward[1], p3=forward[2])
+    u_backward, _ = g.plane_frame("3points", p1=backward[0], p2=backward[1], p3=backward[2])
+    assert u_forward == approx((1, 0, 0))
+    assert u_backward == approx((-1, 0, 0))
+
+
+def test_picked_points_are_right_handed_like_a_normal_to_line_plane():
+    """Both build a frame from a normal alone, so they had better agree."""
+    line = g.plane_frame(g.NORMAL_LINE, p1=(0, 0, 0), p2=(0, 0, 1))
+    p1, p2, p3 = g.picked_points((0, 0, 1), (0, 0, 0), line[0])
+    assert g.plane_frame("3points", p1=p1, p2=p2, p3=p3)[1] == approx(line[1])
+
+
+def test_a_line_perpendicular_to_the_plane_is_refused():
+    with pytest.raises(GeometryError, match="perpendicular to the plane"):
+        g.picked_points((0, 0, 1), (0, 0, 0), (0, 0, 5))
+
+
+def test_a_plane_with_no_normal_is_refused():
+    with pytest.raises(GeometryError, match="plane normal"):
+        g.picked_points((0, 0, 0), (0, 0, 0), (1, 0, 0))
+
+
 # ------------------------------------------------------------------ transform
 
 

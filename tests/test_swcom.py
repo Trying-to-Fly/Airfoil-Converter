@@ -148,6 +148,41 @@ def test_the_diagnostic_reports_a_missing_pywin32_rather_than_crashing(monkeypat
     assert "pip install pywin32" in capsys.readouterr().out
 
 
+# -- sketch coordinates -----------------------------------------------------
+
+
+IDENTITY = [1, 0, 0, 0, 1, 0, 0, 0, 1, 0, 0, 0, 1]
+# A quarter turn about Z, then 10 along X: the shape a sketch on an offset
+# plane hands back.
+TURNED = [0, -1, 0, 1, 0, 0, 0, 0, 1, 10, 0, 0, 1]
+
+
+def test_an_identity_transform_leaves_a_point_where_it_was():
+    assert swcom.transform_point(IDENTITY, (1.0, 2.0, 3.0)) == (1.0, 2.0, 3.0)
+
+
+def test_a_transform_turns_and_then_moves():
+    """Rotation first, translation second. The other order puts a sketch point
+    somewhere plausible but wrong, which is the whole risk of a pick."""
+    assert swcom.transform_point(TURNED, (1.0, 0.0, 0.0)) == (10.0, 1.0, 0.0)
+    assert swcom.transform_point(TURNED, (0.0, 1.0, 0.0)) == (9.0, 0.0, 0.0)
+
+
+def test_the_translation_alone_places_the_sketch_origin():
+    assert swcom.transform_point(TURNED, (0.0, 0.0, 0.0)) == (10.0, 0.0, 0.0)
+
+
+def test_the_scale_at_the_end_is_applied():
+    doubled = list(IDENTITY)
+    doubled[12] = 2.0
+    assert swcom.transform_point(doubled, (1.0, 2.0, 3.0)) == (2.0, 4.0, 6.0)
+
+
+def test_a_transform_without_a_scale_is_still_read():
+    """Twelve values is a valid answer; the scale is only the thirteenth."""
+    assert swcom.transform_point(IDENTITY[:12], (1.0, 2.0, 3.0)) == (1.0, 2.0, 3.0)
+
+
 # -- the worker thread ------------------------------------------------------
 
 

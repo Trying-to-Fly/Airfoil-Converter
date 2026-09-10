@@ -4,8 +4,8 @@ Everything COM-shaped is confined here, behind plain data. ``pywin32`` is
 imported inside a ``try`` so this module imports anywhere — the tests run on
 Linux — and :func:`is_available` reports whether it is really usable.
 
-Three things about this connection were established by probe rather than
-guessed, and each is load-bearing:
+Everything below about this connection was established by probe rather than
+guessed, and each point is load-bearing:
 
 * **Attach through the Running Object Table, never a ProgID.** This machine
   carries SolidWorks 2024, 2025 and 2026 side by side. The unversioned
@@ -24,6 +24,13 @@ guessed, and each is load-bearing:
   mismatch; it needs a null of dispatch type. ``GetObjectByPersistReference3``
   has an out parameter that must be supplied as a by-reference integer. Both
   were found by probe, and both are silent until they are not.
+* **What was clicked is settled by asking the object, not by its type
+  number.** ``GetSelectedObjectType3`` is a long list of constants, and getting
+  one wrong would be silent. So a vertex is whatever answers ``GetPoint``, an
+  edge whatever answers ``GetCurve``, a sketch line whatever answers
+  ``GetStartPoint2``; the type numbers only supply a noun for a refusal
+  message. Run ``python -m airfoil_converter.swcom --selection`` to see what
+  any click actually offers.
 """
 
 from __future__ import annotations
@@ -31,9 +38,10 @@ from __future__ import annotations
 import os
 import queue
 import re
+import sys
 import threading
 from dataclasses import dataclass, field
-from typing import Any, Callable, List, Optional, Sequence, Tuple, TypeVar
+from typing import Any, Callable, List, Optional, Sequence, Tuple, TypeVar, Union
 
 try:  # pragma: no cover - exercised only on Windows with pywin32 present
     import pythoncom
@@ -48,6 +56,7 @@ except ImportError as exc:  # pragma: no cover - the Linux and no-pywin32 path
     _IMPORT_ERROR = str(exc)
 
 T = TypeVar("T")
+Vec3 = Tuple[float, float, float]
 
 # SolidWorks majors advance by one a year: 32 is 2024, 33 is 2025, 34 is 2026.
 MINIMUM_MAJOR = 34
@@ -286,6 +295,180 @@ class FeatureInfo:
         return self.type_name == COMPOSITE_TYPE_NAME
 
 
+# -- what a click in SolidWorks comes back as -------------------------------
+#
+# Plain data, in millimetres, so the pick can be reasoned about and tested on a
+# machine with no CAD package. Nothing below holds a COM pointer.
+
+
+@dataclass(frozen=True)
+class PickedPoint:
+    where: Vec3
+
+
+@dataclass(frozen=True)
+class PickedLine:
+    start: Vec3
+    end: Vec3
+
+
+@dataclass(frozen=True)
+class PickedPlane:
+    normal: Vec3
+    root: Vec3
+
+
+@dataclass(frozen=True)
+class Refused:
+    """Something was selected, but not something this step can use."""
+
+    what: str
+
+
+Picked = Union[PickedPoint, PickedLine, PickedPlane, Refused]
+
+# Only ever used to put a noun in a refusal, never to decide how to read
+# something — that is done by asking the object itself, below. So a number that
+# turns out to be wrong costs one imprecise word in one message, and nothing
+# else. swSelectType_e.
+SELECTION_NAMES = {
+    1: "an edge",
+    2: "a face",
+    3: "a corner",
+    4: "a plane",
+    5: "an axis",
+    6: "a reference point",
+    9: "a sketch",
+    10: "a sketch line",
+    11: "a sketch point",
+    20: "a whole feature",
+}
+
+
+def transform_point(data: Sequence[float], point: Vec3) -> Vec3:
+    """Put a point through a SolidWorks transform.
+
+    ``IMathTransform.ArrayData`` is sixteen doubles: nine of rotation, three of
+    translation, then a scale. Sketch geometry reports itself in the sketch's
+    own coordinates, and this is what carries it back into the model's.
+    """
+    r = [float(v) for v in data[:9]]
+    tx, ty, tz = (float(v) for v in data[9:12])
+    s = float(data[12]) if len(data) > 12 else 1.0
+    x, y, z = point
+    return (
+        s * (r[0] * x + r[1] * y + r[2] * z) + tx,
+        s * (r[3] * x + r[4] * y + r[5] * z) + ty,
+        s * (r[6] * x + r[7] * y + r[8] * z) + tz,
+    )
+
+
+def _try(obj: Any, name: str, *args: Any) -> Any:
+    """A member the object may simply not have.
+
+    What was clicked is worked out by asking it what it can do, rather than by
+    trusting a table of type numbers. A vertex has ``GetPoint``, an edge has
+    ``GetCurve``, a sketch line has ``GetStartPoint2``; anything else answers
+    this with None.
+    """
+    if obj is None:
+        return None
+    try:
+        return call(obj, name, *args)
+    except Exception:  # noqa: BLE001 - "no such member" is the answer, not a fault
+        return None
+
+
+def _in_mm(values: Sequence[float]) -> Vec3:
+    return (
+        float(values[0]) * MM_PER_METRE,
+        float(values[1]) * MM_PER_METRE,
+        float(values[2]) * MM_PER_METRE,
+    )
+
+
+def _interpret(manager: Any, index: int) -> Picked:
+    obj = call(manager, "GetSelectedObject6", index, -1)
+    if obj is None:
+        return Refused("something this app cannot read")
+    for reader in (_as_plane, _as_line, _as_point):
+        found = reader(manager, index, obj)
+        if found is not None:
+            return found
+    type_id = _try(manager, "GetSelectedObjectType3", index, -1)
+    return Refused(SELECTION_NAMES.get(int(type_id or 0), "something this app cannot use"))
+
+
+def _as_plane(manager: Any, index: int, obj: Any) -> Optional[PickedPlane]:
+    surface = _try(obj, "GetSurface")
+    if surface is not None and _try(surface, "IsPlane"):
+        params = _try(surface, "PlaneParams")
+        if params is not None and len(params) >= 6:
+            normal = (float(params[0]), float(params[1]), float(params[2]))
+            return PickedPlane(normal=normal, root=_in_mm(params[3:6]))
+        return None
+
+    # A reference plane arrives as a feature, and carries its frame as a
+    # transform rather than as parameters. Its local Z is the normal, which is
+    # read by sending the local origin and a step along Z through the same
+    # transform rather than by picking the rotation apart.
+    data = _try(_try(_try(obj, "GetSpecificFeature2"), "Transform"), "ArrayData")
+    if data is None or len(data) < 12:
+        return None
+    root = transform_point(data, (0.0, 0.0, 0.0))
+    tip = transform_point(data, (0.0, 0.0, 1.0))
+    return PickedPlane(
+        normal=(tip[0] - root[0], tip[1] - root[1], tip[2] - root[2]),
+        root=_in_mm(root),
+    )
+
+
+def _as_line(manager: Any, index: int, obj: Any) -> Optional[PickedLine]:
+    curve = _try(obj, "GetCurve")
+    if curve is not None:
+        if not _try(curve, "IsLine"):
+            return None
+        start = _try(_try(obj, "GetStartVertex"), "GetPoint")
+        end = _try(_try(obj, "GetEndVertex"), "GetPoint")
+        if start is None or end is None:
+            return None
+        return PickedLine(start=_in_mm(start), end=_in_mm(end))
+
+    start_point = _try(obj, "GetStartPoint2")
+    end_point = _try(obj, "GetEndPoint2")
+    if start_point is None or end_point is None:
+        return None
+    to_model = _sketch_transform(manager, index, obj)
+    start = _sketch_coords(start_point, to_model)
+    end = _sketch_coords(end_point, to_model)
+    if start is None or end is None:
+        return None
+    return PickedLine(start=start, end=end)
+
+
+def _as_point(manager: Any, index: int, obj: Any) -> Optional[PickedPoint]:
+    where = _try(obj, "GetPoint")
+    if where is not None and len(where) >= 3:
+        return PickedPoint(where=_in_mm(where))
+
+    coords = _sketch_coords(obj, _sketch_transform(manager, index, obj))
+    return None if coords is None else PickedPoint(where=coords)
+
+
+def _sketch_transform(manager: Any, index: int, obj: Any) -> Optional[Sequence[float]]:
+    """Sketch coordinates to model coordinates, if this thing is in a sketch."""
+    sketch = _try(manager, "GetSelectedObjectsSketch", index) or _try(obj, "GetSketch")
+    inverse = _try(_try(sketch, "ModelToSketchTransform"), "Inverse")
+    return _try(inverse, "ArrayData")
+
+
+def _sketch_coords(obj: Any, to_model: Optional[Sequence[float]]) -> Optional[Vec3]:
+    x, y, z = _try(obj, "X"), _try(obj, "Y"), _try(obj, "Z")
+    if x is None or y is None or z is None or to_model is None:
+        return None
+    return _in_mm(transform_point(to_model, (float(x), float(y), float(z))))
+
+
 class Session:
     """One connected SolidWorks. Only ever touched from the worker thread."""
 
@@ -504,6 +687,33 @@ class Session:
         """Rebuild the active document. Called once, after the last curve."""
         return bool(call(self._active(), "ForceRebuild3", False))
 
+    # -- reading what the user clicked --------------------------------------
+
+    def clear_selection(self) -> None:
+        call(self._active(), "ClearSelection2", True)
+
+    def take_selection(self) -> Optional[Picked]:
+        """What is selected right now, taken rather than merely read.
+
+        Clearing after the read is what turns a selection into an event. The
+        app is polling, not being told, so without clearing it cannot tell one
+        click from the same thing still being selected a fifth of a second
+        later. Clearing also shows the user their click landed.
+
+        ``None`` means nothing was selected, which is the ordinary answer on
+        almost every poll.
+        """
+        doc = self._active()
+        manager = call(doc, "SelectionManager")
+        if manager is None:
+            return None
+        if int(call(manager, "GetSelectedObjectCount2", -1) or 0) < 1:
+            return None
+        try:
+            return _interpret(manager, 1)
+        finally:
+            call(doc, "ClearSelection2", True)
+
 
 def connect() -> Session:
     """Attach to the newest reachable SolidWorks that this app supports."""
@@ -603,13 +813,68 @@ EXIT_WRONG_VERSION = 4
 EXIT_COM_ERROR = 5
 
 
+def probe_selection(session: "Session") -> None:
+    """Print what is selected in SolidWorks, and every way of reading it.
+
+    Run as ``python -m airfoil_converter.swcom --selection`` with something
+    clicked. The pick works out what was clicked by asking the object what
+    members it has, so it does not depend on any of these numbers — but two
+    layouts underneath it are conventions rather than deductions, and this is
+    what settles them on a real machine: whether a plane's parameters run
+    normal-then-root, and whether a transform's rotation is stored by rows.
+    A face reports its normal both ways at once, so a reference plane read that
+    disagrees with a flat face on the same plane is the transform being
+    transposed.
+    """
+    doc = call(session._app, "ActiveDoc")
+    if doc is None:
+        print("no active document, so nothing can be selected")
+        return
+    manager = call(doc, "SelectionManager")
+    count = int(call(manager, "GetSelectedObjectCount2", -1) or 0)
+    print(f"\nselected: {count}")
+    if count < 1:
+        print("Click something in SolidWorks and run this again.")
+        return
+
+    for index in range(1, count + 1):
+        type_id = int(_try(manager, "GetSelectedObjectType3", index, -1) or 0)
+        name = SELECTION_NAMES.get(type_id, "not in the table")
+        obj = call(manager, "GetSelectedObject6", index, -1)
+        print(f"\n  [{index}] type={type_id} ({name})")
+        print(f"      read as: {_interpret(manager, index)}")
+
+        surface = _try(obj, "GetSurface")
+        if surface is not None:
+            print(f"      IsPlane={_try(surface, 'IsPlane')}  PlaneParams={_try(surface, 'PlaneParams')}")
+        curve = _try(obj, "GetCurve")
+        if curve is not None:
+            print(f"      IsLine={_try(curve, 'IsLine')}  LineParams={_try(curve, 'LineParams')}")
+        for member in ("GetPoint", "X", "Y", "Z"):
+            value = _try(obj, member)
+            if value is not None:
+                print(f"      {member}={value}")
+        specific = _try(obj, "GetSpecificFeature2")
+        if specific is not None:
+            data = _try(_try(specific, "Transform"), "ArrayData")
+            print(f"      GetSpecificFeature2 Transform.ArrayData={data}")
+        sketch = _try(manager, "GetSelectedObjectsSketch", index) or _try(obj, "GetSketch")
+        if sketch is not None:
+            forward = _try(_try(sketch, "ModelToSketchTransform"), "ArrayData")
+            inverse = _try(_try(_try(sketch, "ModelToSketchTransform"), "Inverse"), "ArrayData")
+            print(f"      ModelToSketchTransform={forward}")
+            print(f"      its Inverse={inverse}")
+
+
 def main(argv: Optional[Sequence[str]] = None) -> int:
     """Report what this machine's SolidWorks looks like from here.
 
     Run as ``python -m airfoil_converter.swcom``. Everything the live link
     depends on is printed by this one command, which is what makes a failure
-    somewhere later cheap to place.
+    somewhere later cheap to place. Add ``--selection`` to have it describe
+    what is clicked in SolidWorks instead of the curves in the part.
     """
+    arguments = list(sys.argv[1:] if argv is None else argv)
     if not is_available():
         print(f"pywin32 is not usable here: {unavailable_reason()}")
         print("Install it with: pip install pywin32")
@@ -660,6 +925,10 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     if active is None:
         print("\nno active document, so no features listed")
         return EXIT_OK
+    if "--selection" in arguments:
+        probe_selection(session)
+        return EXIT_OK
+
     if not active.is_part:
         print(f"\n{active.title} is not a part, so it can hold no curves")
         return EXIT_OK
