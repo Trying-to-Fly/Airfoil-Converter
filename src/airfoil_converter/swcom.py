@@ -41,7 +41,7 @@ import re
 import sys
 import threading
 from dataclasses import dataclass, field
-from typing import Any, Callable, List, Optional, Sequence, Tuple, TypeVar, Union
+from typing import Any, Callable, Dict, List, Optional, Sequence, Tuple, TypeVar, Union
 
 try:  # pragma: no cover - exercised only on Windows with pywin32 present
     import pythoncom
@@ -68,6 +68,18 @@ _MONIKER = re.compile(r"^SolidWorks_PID_(\d+)$", re.IGNORECASE)
 
 CURVE_TYPE_NAME = "CurveInFile"
 COMPOSITE_TYPE_NAME = "CompositeCurve"
+FOLDER_TYPE_NAME = "FtrFolder"
+
+# A folder in the tree is two features: the folder and a closing tag after
+# everything it holds. The tag is an implementation detail of the walk and is
+# never shown or counted.
+FOLDER_END_TAG = "___EndTag___"
+
+# swFeatureTreeFolderType_e. Only "containing" is any use here, and on SolidWorks
+# 2026 it is the only value that makes a folder around what is selected: 1 makes
+# an empty one, 3 hands back the Surface Bodies folder, 0 does nothing. The
+# numbers were read off a live session rather than trusted to the header.
+FOLDER_CONTAINING = 2
 
 # Composite Curve reads its inputs from the selection, and only from selection
 # mark 1. At mark 0 it returns False and says nothing about why.
@@ -563,6 +575,77 @@ class Session:
 
     def feature_names(self) -> List[str]:
         return [f.name for f in self.features()]
+
+    # -- folders in the tree -----------------------------------------------
+    #
+    # Three calls, and one of them is a deletion, so: deleting a folder deletes
+    # the folder and nothing else. Its features stay exactly where they were,
+    # in the order they were in. That is what makes the arrangement rebuildable
+    # instead of something to be patched feature by feature -- which is just as
+    # well, because MoveToFolder answers False on every argument it was offered.
+
+    def folders(self) -> Dict[str, List[str]]:
+        """Every tree folder, and the names it holds, one level deep.
+
+        The tree is read along the top-level chain rather than through
+        :meth:`_walk`, which also descends into subfeatures: a sketch absorbed
+        into a feature would land in the middle of a folder's contents and the
+        nesting would stop adding up.
+        """
+        out: Dict[str, List[str]] = {}
+        stack: List[str] = []
+        feature = call(self._active(), "FirstFeature")
+        guard = 0
+        while feature is not None and guard < 5000:
+            guard += 1
+            name = str(call(feature, "Name"))
+            try:
+                type_name = str(call(feature, "GetTypeName2"))
+            except Exception:  # noqa: BLE001 - a feature that will not describe itself
+                type_name = "?"
+            feature = call(feature, "GetNextFeature")
+
+            if type_name != FOLDER_TYPE_NAME:
+                if stack:
+                    out[stack[-1]].append(name)
+                continue
+            if name.endswith(FOLDER_END_TAG):
+                if stack:
+                    stack.pop()
+                continue
+            if stack:
+                out[stack[-1]].append(name)
+            out.setdefault(name, [])
+            stack.append(name)
+        return out
+
+    def insert_folder(self, names: Sequence[str], folder: str) -> str:
+        """Wrap features in a new folder, and report the name it kept."""
+        if not names:
+            raise SolidWorksError("A folder has to be made around something.")
+        doc = self._active()
+        call(doc, "ClearSelection2", True)
+        for position, name in enumerate(names):
+            if not call(self._curve_feature(name), "Select2", position > 0, 0):
+                raise SolidWorksError(f"{name} could not be selected.")
+        made = call(call(doc, "FeatureManager"), "InsertFeatureTreeFolder2",
+                    FOLDER_CONTAINING)
+        call(doc, "ClearSelection2", True)
+        if made is None or made is False:
+            raise SolidWorksError(f"SolidWorks would not make a folder for {folder}.")
+        made.Name = folder
+        return str(call(made, "Name"))
+
+    def delete_folder(self, folder: str) -> None:
+        """Remove the folder, leaving everything it held where it was."""
+        doc = self._active()
+        call(doc, "ClearSelection2", True)
+        if not call(self._curve_feature(folder), "Select2", False, 0):
+            raise SolidWorksError(f"{folder} could not be selected.")
+        deleted = call(call(doc, "Extension"), "DeleteSelection2", 0)
+        call(doc, "ClearSelection2", True)
+        if not deleted:
+            raise SolidWorksError(f"SolidWorks would not remove the folder {folder}.")
 
     def insert_curve(self, path: str, name: str) -> str:
         """Import a curve file as a new feature and give it the name we want.

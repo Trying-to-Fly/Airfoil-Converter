@@ -25,6 +25,7 @@ from .export import (
     InputError,
     build_curves,
     feature_name,
+    folder_name,
     joinable,
 )
 from .geometry import GeometryError
@@ -251,6 +252,8 @@ class ConverterApp(ttk.Frame):
         self._pending: Optional[Any] = None
         self._pending_kind = ""
         self._pending_push: Optional[Any] = None
+        self._pending_arrange: Optional[Any] = None
+        self._tick_failure = ""   # the last poll failure reported, so it is said once
         self._push_context: Optional[Dict[str, Any]] = None
         self._snapshot: Optional[dict] = None
         self._sidecar: Optional[store.Sidecar] = None
@@ -1188,10 +1191,22 @@ class ConverterApp(ttk.Frame):
         self.after(200, self._tick)
 
     def _tick(self) -> None:
-        """One turn of the poll. Never blocks, never raises into the loop."""
+        """One turn of the poll. Never blocks, never raises into the loop.
+
+        Each collector is guarded on its own. They share one channel to the
+        worker, so a collector that throws every time would otherwise starve
+        the ones after it: the answers pile up uncollected and the panel says
+        "Looking for SolidWorks..." for ever, with nothing on screen to say why.
+        That is a real bug this once had, so the trouble is now reported rather
+        than swallowed — once per reason, not once a second.
+        """
+        for collect in (self._collect_push, self._collect_arrange, self._collect):
+            try:
+                collect()
+            except Exception as exc:  # noqa: BLE001 - never kill the timer
+                self._tick_trouble(exc)
+
         try:
-            self._collect_push()
-            self._collect()
             if self._worker is not None and self._pending is None and self._pending_push is None:
                 if self._pick is not None:
                     self._ask_for_pick()
@@ -1202,9 +1217,20 @@ class ConverterApp(ttk.Frame):
                         self._ask_for_snapshot()
                     else:
                         self._ask_for_key()
-        except Exception:  # noqa: BLE001 - a tick must never kill the timer
-            pass
+        except Exception as exc:  # noqa: BLE001 - never kill the timer
+            self._tick_trouble(exc)
+
         self.after(self.PICK_MS if self._pick is not None else self.POLL_MS, self._tick)
+
+    def _tick_trouble(self, exc: BaseException) -> None:
+        reason = f"{type(exc).__name__}: {exc}"
+        if reason == self._tick_failure:
+            return
+        self._tick_failure = reason
+        try:
+            self._set_status(f"The SolidWorks poll hit a problem — {reason}", ok=False)
+        except Exception:  # noqa: BLE001 - the status line is not worth a crash
+            pass
 
     def _ask(self, kind: str, work) -> None:
         if self._worker is None or self._pending is not None:
@@ -1650,6 +1676,7 @@ class ConverterApp(ttk.Frame):
             "were not remembered, so open one and export to make it yours again."
             + self._memory_note()
         )
+        self._arrange_tree()
 
     def _states(self) -> List[store.CurveState]:
         if self._sidecar is None:
@@ -2002,27 +2029,107 @@ class ConverterApp(ttk.Frame):
             )
             return
 
+        join_as = feature_name(stem, ROLE_JOINED, index)
         self._begin_push(
             curves, folder,
-            join_as=feature_name(stem, ROLE_JOINED, index),
+            join_as=join_as,
+            groups=self._tree_groups(record, curves, stem, index, join_as),
             context=dict(record=record, curves=curves, spec=spec, stem=stem,
                          folder=folder, index=index),
         )
+
+    def _tree_groups(self, record, curves, stem: str, index: int,
+                     join_as: str) -> "List[swlink.TreeGroup]":
+        """What the feature tree should look like once this export lands.
+
+        Every record, not just this one: the parent folder holds all of them,
+        so it can only be checked against the whole set. The export being made
+        is described from the curves it is about to write, because its record
+        does not exist yet on the first export of a new curve.
+        """
+        editing = record.export_id if record is not None else ""
+        groups = self._recorded_groups(skip=editing)
+
+        mine = [c.feature for c in curves]
+        if joinable(curves):
+            mine.append(join_as)
+        if record is not None:
+            # A retired curve is still in the part, and still this rib's.
+            mine.extend(c.feature for c in record.curves
+                        if c.retired and c.feature not in mine)
+        if mine:
+            groups.append(swlink.TreeGroup(folder_name(stem, index), tuple(mine)))
+        return groups
+
+    def _recorded_groups(self, skip: str = "") -> "List[swlink.TreeGroup]":
+        """A folder for every record that has curves in the part."""
+        groups: List[swlink.TreeGroup] = []
+        for record in (self._sidecar.exports if self._sidecar else []):
+            if record.export_id == skip or not record.curves:
+                continue
+            groups.append(swlink.TreeGroup(
+                folder_name(record.stem, record.name_index),
+                tuple(c.feature for c in record.curves),
+            ))
+        return groups
+
+    def _arrange_tree(self) -> None:
+        """Tidy the tree on its own, outside an export.
+
+        Tracking curves makes records without touching SolidWorks, so this is
+        what puts the folders round them. It goes through the worker like every
+        other COM call, and reports when it lands.
+        """
+        groups = self._recorded_groups()
+        if not groups or self._worker is None or not (self._snapshot or {}).get("is_part"):
+            return
+        if self._pending_arrange is not None or self._pending_push is not None:
+            return
+        self._pending_arrange = self._worker.submit(
+            lambda session: swlink.arrange(session, groups)
+        )
+
+    def _collect_arrange(self) -> None:
+        if self._pending_arrange is None:
+            return
+        answer = self._pending_arrange.poll()
+        if answer is None:
+            return
+        result, error = answer
+        self._pending_arrange = None
+        if error is not None:
+            self._set_status(f"The tree could not be tidied: {error}", ok=False)
+            return
+        if result.made:
+            self._set_status(f"{self.status.get()} Tidied the tree: "
+                             f"{result.summary()}.")
+        self._refresh_panel()
 
     # ------------------------------------------------------ pushing, without
     # blocking the window. Waiting on the worker from here would stop this
     # thread pumping messages, and a cross-apartment COM call that needs it
     # then never completes — which is a hang, not an error.
 
-    def _begin_push(self, curves, folder: str, join_as: str, context: Dict[str, Any]) -> None:
+    def _begin_push(self, curves, folder: str, join_as: str, groups,
+                    context: Dict[str, Any]) -> None:
         assert self._worker is not None
         insert = self.insert_missing.get()
         self._push_context = context
-        self._pending_push = self._worker.submit(
-            lambda session: swlink.push(
+
+        def work(session):
+            result = swlink.push(
                 session, curves, folder, insert_missing=insert, join_as=join_as
             )
-        )
+            # The curves are in by now. Tidying the tree is the last thing, and
+            # never the thing that loses a successful push: it reports its own
+            # trouble rather than raising through it.
+            try:
+                result.arranged = swlink.arrange(session, groups)
+            except swcom.SolidWorksError as exc:
+                result.failures.append(("folders", str(exc)))
+            return result
+
+        self._pending_push = self._worker.submit(work)
         self.export_button.configure(state="disabled")
         self._set_status("Sending to SolidWorks...")
 
@@ -2061,6 +2168,8 @@ class ConverterApp(ttk.Frame):
                 f". The surface and its trailing edge are joined as {result.joined}; "
                 "loft that rather than either half."
             )
+        if result.arranged is not None and result.arranged.made:
+            message += f". Tidied the tree: {result.arranged.summary()}"
         if result.failures:
             detail = "; ".join(f"{name}: {why}" for name, why in result.failures)
             self._set_status(f"{message}. Failed — {detail}", ok=False)

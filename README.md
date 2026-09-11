@@ -314,6 +314,37 @@ upper/lower* have nothing to join, so nothing is made for them.
 Joining creates a feature, so the **Insert new curves into the open part**
 checkbox governs it too.
 
+### The curves go in folders
+
+Four curves per rib, loose in the tree, is four rows that say nothing about
+belonging together. So each export's curves go in a folder named after the
+export, and those folders go in one folder of their own:
+
+```
+Airfoil Curves
+    n0012_150mm
+        n0012_150mm_airfoil
+        n0012_150mm_airfoil_te
+        n0012_150mm_camber
+        n0012_150mm_airfoil_joined
+    n0012_150mm_2
+        ...
+```
+
+A folder is a row in the tree and not geometry, so nothing a loft points at
+moves when one is made. Rename a folder in SolidWorks and the name sticks: the
+app finds a folder by what it holds, not by what it is called.
+
+The arrangement is rebuilt rather than patched, because SolidWorks gives no way
+to add a feature to a folder that already exists — `MoveToFolder` answers False
+whatever it is offered. What it does allow is wrapping a selection in a new
+folder, and deleting a folder without disturbing anything it held. So a folder
+whose contents are already right is left alone entirely, and one whose contents
+have changed is deleted and made again around the full set.
+
+**Track** folders what it takes over, so an older part comes out arranged the
+same way.
+
 ### What it remembers
 
 SolidWorks stores points and nothing else. The chord, the plane, the angle of

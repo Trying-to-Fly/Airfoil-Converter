@@ -197,6 +197,19 @@ def feature_name(stem: str, role: str, index: int = 1) -> str:
     return f"{writer.sanitize(stem)}_{role}{suffix}"
 
 
+def folder_name(stem: str, index: int = 1) -> str:
+    """What the tree folder holding one export's curves is called.
+
+    The same shape as the curve names it holds, so a folder and its contents
+    read as one thing: ``rib`` holds ``rib_airfoil``, ``rib_2`` holds
+    ``rib_airfoil_2``.
+    """
+    if index < 1:
+        raise InputError(f"Name index must be 1 or more (got {index}).")
+    suffix = f"_{index}" if index > 1 else ""
+    return f"{writer.sanitize(stem)}{suffix}"
+
+
 def joinable(curves: Sequence[Curve]) -> Tuple[str, ...]:
     """The curves that should become one, or nothing.
 

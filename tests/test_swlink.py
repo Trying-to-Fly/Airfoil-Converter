@@ -28,6 +28,8 @@ class FakeSolidWorks:
         self.reload_fails = set()
         self.composites = []
         self.join_fails = False
+        self.tree = {}           # folder name -> the names it holds
+        self.folder_fails = set()
 
     def active_document(self):
         return self.doc
@@ -49,7 +51,7 @@ class FakeSolidWorks:
             raise SolidWorksError(f"cannot reload {name}")
 
     def feature_names(self):
-        return list(self.curves) + list(self.composites)
+        return list(self.curves) + list(self.composites) + list(self.tree)
 
     def insert_composite_curve(self, sources, name):
         self.calls.append(("join", tuple(sources), name))
@@ -65,6 +67,33 @@ class FakeSolidWorks:
     def rebuild(self):
         self.calls.append(("rebuild",))
         return True
+
+    # -- the tree's folders, kept as name -> what it holds ------------------
+
+    def folders(self):
+        return {name: list(held) for name, held in self.tree.items()}
+
+    def insert_folder(self, names, folder):
+        self.calls.append(("folder", tuple(names), folder))
+        if folder in self.folder_fails:
+            raise SolidWorksError(f"cannot make {folder}")
+        for held in self.tree.values():
+            for name in names:
+                if name in held:
+                    held.remove(name)
+        kept = self.rename_to.get(folder, folder)
+        self.tree[kept] = list(names)
+        return kept
+
+    def delete_folder(self, folder):
+        self.calls.append(("unfolder", folder))
+        held = self.tree.pop(folder, [])
+        # Deleting a folder keeps what it held, at the level the folder was on.
+        for name, contents in self.tree.items():
+            if folder in contents:
+                contents.remove(folder)
+                contents.extend(held)
+                return
 
 
 def curve(role, feature, y=0.0):
@@ -391,3 +420,133 @@ def test_a_composite_from_an_earlier_run_is_recognised_not_remade(tmp_path):
     assert result.joined == "rib_airfoil_joined"
     assert result.joined_now is False
     assert indexes(sw.calls, "join") == []
+
+
+# -- the shape of the tree --------------------------------------------------
+
+
+def group(folder, *features):
+    return swlink.TreeGroup(folder, tuple(features))
+
+
+def test_one_export_gets_a_folder_inside_the_parent():
+    sw = FakeSolidWorks(features=["rib_airfoil", "rib_camber"])
+
+    result = swlink.arrange(sw, [group("rib", "rib_airfoil", "rib_camber")])
+
+    assert sw.tree == {
+        "rib": ["rib_airfoil", "rib_camber"],
+        swlink.PARENT_FOLDER: ["rib"],
+    }
+    assert result.made == ["rib", swlink.PARENT_FOLDER]
+    assert not result.failures
+
+
+def test_a_second_export_joins_the_first_under_one_parent():
+    sw = FakeSolidWorks(features=["rib_airfoil", "rib_airfoil_2"])
+    swlink.arrange(sw, [group("rib", "rib_airfoil")])
+    sw.calls.clear()
+
+    swlink.arrange(sw, [group("rib", "rib_airfoil"), group("rib_2", "rib_airfoil_2")])
+
+    assert sw.tree == {
+        "rib": ["rib_airfoil"],
+        "rib_2": ["rib_airfoil_2"],
+        swlink.PARENT_FOLDER: ["rib", "rib_2"],
+    }
+
+
+def test_a_tree_already_right_is_left_completely_alone():
+    sw = FakeSolidWorks(features=["rib_airfoil", "rib_camber"])
+    swlink.arrange(sw, [group("rib", "rib_airfoil", "rib_camber")])
+    sw.calls.clear()
+
+    result = swlink.arrange(sw, [group("rib", "rib_airfoil", "rib_camber")])
+
+    assert sw.calls == []
+    assert result.made == [] and result.kept == ["rib", swlink.PARENT_FOLDER]
+
+
+def test_a_folder_renamed_in_solidworks_keeps_its_name():
+    sw = FakeSolidWorks(features=["rib_airfoil", "rib_camber"])
+    swlink.arrange(sw, [group("rib", "rib_airfoil", "rib_camber")])
+    sw.tree["Root rib"] = sw.tree.pop("rib")
+    sw.tree[swlink.PARENT_FOLDER] = ["Root rib"]
+    sw.calls.clear()
+
+    result = swlink.arrange(sw, [group("rib", "rib_airfoil", "rib_camber")])
+
+    assert sw.calls == []
+    assert "Root rib" in sw.tree and "rib" not in sw.tree
+    assert result.kept == ["Root rib", swlink.PARENT_FOLDER]
+
+
+def test_a_curve_added_to_an_export_is_folded_in_with_the_rest():
+    sw = FakeSolidWorks(features=["rib_airfoil", "rib_camber"])
+    swlink.arrange(sw, [group("rib", "rib_airfoil")])
+    sw.calls.clear()
+
+    swlink.arrange(sw, [group("rib", "rib_airfoil", "rib_camber")])
+
+    assert sw.tree["rib"] == ["rib_airfoil", "rib_camber"]
+    assert ("unfolder", "rib") in sw.calls   # rebuilt, not patched
+    assert sw.tree[swlink.PARENT_FOLDER] == ["rib"]
+
+
+def test_a_curve_not_in_the_part_is_not_folded():
+    sw = FakeSolidWorks(features=["rib_airfoil"])
+
+    swlink.arrange(sw, [group("rib", "rib_airfoil", "rib_camber")])
+
+    assert sw.tree["rib"] == ["rib_airfoil"]
+
+
+def test_an_export_with_nothing_in_the_part_makes_no_folder():
+    sw = FakeSolidWorks(features=[])
+
+    result = swlink.arrange(sw, [group("rib", "rib_airfoil")])
+
+    assert sw.tree == {} and result.made == []
+
+
+def test_a_folder_that_cannot_be_made_is_reported_not_raised():
+    sw = FakeSolidWorks(features=["rib_airfoil"])
+    sw.folder_fails.add("rib")
+
+    result = swlink.arrange(sw, [group("rib", "rib_airfoil")])
+
+    assert result.failures == [("rib", "cannot make rib")]
+    assert result.made == []
+
+
+def test_the_joined_curve_goes_in_the_folder_with_its_halves():
+    sw = FakeSolidWorks(features=["rib_airfoil", "rib_airfoil_te"])
+    sw.composites.append("rib_airfoil_joined")
+
+    swlink.arrange(sw, [group("rib", "rib_airfoil", "rib_airfoil_te",
+                              "rib_airfoil_joined")])
+
+    assert sw.tree["rib"] == ["rib_airfoil", "rib_airfoil_te", "rib_airfoil_joined"]
+
+
+def test_a_rename_survives_the_folder_being_rebuilt():
+    sw = FakeSolidWorks(features=["rib_airfoil", "rib_camber"])
+    swlink.arrange(sw, [group("rib", "rib_airfoil")])
+    sw.tree["Root rib"] = sw.tree.pop("rib")
+    sw.tree[swlink.PARENT_FOLDER] = ["Root rib"]
+
+    swlink.arrange(sw, [group("rib", "rib_airfoil", "rib_camber")])
+
+    assert sw.tree["Root rib"] == ["rib_airfoil", "rib_camber"]
+    assert "rib" not in sw.tree
+
+
+def test_a_renamed_parent_keeps_its_name_when_a_rib_is_added():
+    sw = FakeSolidWorks(features=["rib_airfoil", "rib_airfoil_2"])
+    swlink.arrange(sw, [group("rib", "rib_airfoil")])
+    sw.tree["Sections"] = sw.tree.pop(swlink.PARENT_FOLDER)
+
+    swlink.arrange(sw, [group("rib", "rib_airfoil"), group("rib_2", "rib_airfoil_2")])
+
+    assert sw.tree["Sections"] == ["rib", "rib_2"]
+    assert swlink.PARENT_FOLDER not in sw.tree
