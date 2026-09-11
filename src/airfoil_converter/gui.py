@@ -107,6 +107,10 @@ def _record_place(record: "Optional[store.ExportRecord]") -> str:
     """Where the leading edge sits, which is what distinguishes one rib from the next."""
     if record is None:
         return ""
+    if record.adopted:
+        # Read back from the names in the part, which say nothing about where
+        # the curves were put. A plausible ``0, 0, 0`` here would be a lie.
+        return "adopted"
     try:
         x, y, z = ExportSpec.from_dict(record.settings).leading_edge
     except Exception:  # noqa: BLE001
@@ -251,6 +255,9 @@ class ConverterApp(ttk.Frame):
         self._snapshot: Optional[dict] = None
         self._sidecar: Optional[store.Sidecar] = None
         self._sidecar_path = ""
+        # Records made against a document that has no path yet, kept until
+        # there is somewhere on disk to put them.
+        self._homeless: List[store.ExportRecord] = []
         self._editing: str = ""          # the export id being edited, or ""
         self._last_states: List[store.CurveState] = []
         self._restoring = False
@@ -815,14 +822,19 @@ class ConverterApp(ttk.Frame):
 
         tools = tk.Frame(parent, bg=theme.SECONDARY_BG)
         tools.grid(row=2, column=0, sticky="ew", padx=pad, pady=(theme.px(8), theme.px(8)))
-        tools.columnconfigure(2, weight=1)
+        tools.columnconfigure(3, weight=1)
         widgets.Button(tools, "Refresh", command=self._refresh_panel, icon="refresh",
                        height=24, bg=theme.SECONDARY_BG).grid(row=0, column=0)
         widgets.Button(tools, "New curve", command=self._new_curve, icon="plus",
                        height=24, bg=theme.SECONDARY_BG).grid(row=0, column=1,
                                                               padx=(theme.px(6), 0))
+        self.track_button = widgets.Button(
+            tools, "Track", command=self._track_strays, icon="link", height=24,
+            bg=theme.SECONDARY_BG,
+        )
+        self.track_button.grid(row=0, column=2, padx=(theme.px(6), 0))
         tk.Label(tools, textvariable=self.tree_count, bg=theme.SECONDARY_BG,
-                 fg=theme.MUTED, font=self.fonts.readout).grid(row=0, column=2, sticky="e")
+                 fg=theme.MUTED, font=self.fonts.readout).grid(row=0, column=3, sticky="e")
 
         holder = widgets.Box(parent, bg=theme.WHITE)
         holder.grid(row=3, column=0, sticky="nsew", padx=pad)
@@ -1525,20 +1537,64 @@ class ConverterApp(ttk.Frame):
     # ------------------------------------------------------- remembered work
 
     def _load_sidecar(self) -> None:
-        path = (self._snapshot or {}).get("path") or ""
+        """Read the part's record, and never drop one on the way.
+
+        Records made while the part had no path have nowhere to go, so they are
+        held aside. Saving the part is what gives them somewhere — and it is
+        also what brings this method back round — so this is the one place that
+        has to carry them across rather than read straight over them.
+
+        They are only ever carried into a document that actually holds the
+        curves they name. Otherwise what happened was not a save but a different
+        part being opened, and those curves are nothing to do with this one.
+        """
+        snapshot = self._snapshot or {}
+        path = snapshot.get("path") or ""
+        features = snapshot.get("curves", [])
+
         if not path:
-            self._sidecar_path = ""
-            if self._sidecar is None:
+            # An unsaved document must not be shown the last part's records, so
+            # its memory starts empty and only the homeless records whose curves
+            # it holds come back into it.
+            if self._sidecar is None or self._sidecar_path or self._sidecar.part_path:
                 self._sidecar = store.Sidecar()
+            self._sidecar_path = ""
+            store.carry_over(self._sidecar, self._homeless, features)
+            self._forget_stale_editing()
             return
+
         try:
             self._sidecar_path = store.sidecar_path(path)
             self._sidecar = store.load(self._sidecar_path) or store.Sidecar(
-                part_path=path, part_title=(self._snapshot or {}).get("title", "")
+                part_path=path, part_title=snapshot.get("title", "")
             )
         except store.StoreError as exc:
             self._sidecar = store.Sidecar(part_path=path)
             self._set_status(str(exc), ok=False)
+
+        moved = store.carry_over(self._sidecar, self._homeless, features)
+        if moved:
+            ids = {record.export_id for record in moved}
+            self._homeless = [r for r in self._homeless if r.export_id not in ids]
+            self._save_sidecar()
+            curves = sum(len(record.live_curves()) for record in moved)
+            self._set_status(
+                f"{os.path.basename(self._sidecar_path)} was written: the {curves} "
+                "curve(s) made before the part was saved are remembered now."
+            )
+        self._forget_stale_editing()
+
+    def _forget_stale_editing(self) -> None:
+        """The record being edited belongs to the part that was open.
+
+        Another part's list will not hold it, and an id pointing at nothing is
+        worse than starting a new curve: Export would have nothing to update.
+        """
+        if self._editing and (
+            self._sidecar is None or self._sidecar.find(self._editing) is None
+        ):
+            self._editing = ""
+            self._describe_editing()
 
     def _save_sidecar(self) -> None:
         if self._sidecar is None or not self._sidecar_path:
@@ -1550,6 +1606,50 @@ class ConverterApp(ttk.Frame):
             store.save(self._sidecar_path, self._sidecar)
         except OSError as exc:
             self._set_status(f"Could not write the curve record: {exc}", ok=False)
+
+    def _memory_note(self) -> str:
+        """Said after an export that had nowhere to keep its settings."""
+        if self._sidecar_path:
+            return ""
+        return (
+            " This part has never been saved, so its settings are held in the app "
+            "only — save the part and they will be kept beside it."
+        )
+
+    def _track_strays(self) -> None:
+        """Take over curves in the part that no record claims.
+
+        Their names are all that is left of them, and the names carry the stem,
+        the role and the index — enough to update the same features again
+        rather than make a second set beside them. The settings are gone; the
+        record says so rather than showing a plausible set of defaults.
+        """
+        if self._sidecar is None or not (self._snapshot or {}).get("is_part"):
+            self._set_status(
+                "No part is open in SolidWorks, so there is nothing to track.",
+                ok=False,
+            )
+            return
+        features = (self._snapshot or {}).get("curves", [])
+        made = store.adopt(
+            self._sidecar, features, self.out_folder.get().strip(), self.extension.get()
+        )
+        if not made:
+            self._set_status(
+                "Nothing to track: every curve in the part is either already in a "
+                "record or was not made by this app."
+            )
+            return
+        if not self._sidecar_path:
+            self._homeless.extend(made)
+        self._save_sidecar()
+        self._fill_tree()
+        curves = sum(len(record.live_curves()) for record in made)
+        self._set_status(
+            f"Tracked {curves} curve(s) as {len(made)} record(s). Their settings "
+            "were not remembered, so open one and export to make it yours again."
+            + self._memory_note()
+        )
 
     def _states(self) -> List[store.CurveState]:
         if self._sidecar is None:
@@ -1687,6 +1787,10 @@ class ConverterApp(ttk.Frame):
         text, ok = ui_text.curves_linked(states)
         self.card_state.set(text)
         self.card_state_label.configure(fg=theme.OK if ok else theme.ERROR)
+        if record.adopted:
+            self.card_settings.set(ui_text.ADOPTED_SETTINGS)
+            self.card_hint.configure(text=ui_text.ADOPTED_HINT)
+            return
         try:
             self.card_settings.set(ui_text.record_summary(record.spec))
         except Exception:  # noqa: BLE001 - a record written by a later version
@@ -1725,7 +1829,9 @@ class ConverterApp(ttk.Frame):
         if self._editing == "" or self._sidecar is None:
             return False
         record = self._sidecar.find(self._editing)
-        if record is None:
+        if record is None or record.adopted:
+            # An adopted record never put anything on the form, so nothing on
+            # the form is a change to it.
             return False
         try:
             return self._spec() != record.spec
@@ -1739,6 +1845,22 @@ class ConverterApp(ttk.Frame):
         flag and the point fields re-sync it, so the leading edge and that flag
         have to come last or they are quietly overwritten.
         """
+        if record.adopted:
+            self._editing = record.export_id
+            if record.output_folder:
+                self.out_folder.set(record.output_folder)
+            self.curve_name.set(record.stem)
+            self._name_typed = False
+            self._describe_editing()
+            self._fill_tree()
+            self._select_editing()
+            self._set_status(
+                f"Editing {record.stem}. Nothing was remembered about how its "
+                "curves were made, so the form is left as it is and Export will "
+                "rebuild them from what it says now."
+            )
+            return
+
         self._restoring = True
         try:
             if record.source:
@@ -1876,6 +1998,7 @@ class ConverterApp(ttk.Frame):
             self._remember(record, curves, spec, stem, folder, index, hashes, pushed=False)
             self._set_status(
                 f"Wrote {len(curves)} file(s). " + self._offline_reason()
+                + self._memory_note()
             )
             return
 
@@ -1942,7 +2065,7 @@ class ConverterApp(ttk.Frame):
             detail = "; ".join(f"{name}: {why}" for name, why in result.failures)
             self._set_status(f"{message}. Failed — {detail}", ok=False)
         else:
-            self._set_status(message)
+            self._set_status(message + self._memory_note())
 
     def _next_index(self, stem: str) -> int:
         return self._sidecar.next_index(stem) if self._sidecar else 1
@@ -2035,6 +2158,13 @@ class ConverterApp(ttk.Frame):
             self._sidecar.exports[self._sidecar.exports.index(record)] = fresh
         else:
             self._sidecar.exports.append(fresh)
+
+        # A record made with nowhere to write it is kept aside as well, so that
+        # saving the part later — or coming back to the document after looking
+        # at another one — still finds it.
+        self._homeless = [r for r in self._homeless if r.export_id != fresh.export_id]
+        if not self._sidecar_path:
+            self._homeless.append(fresh)
 
         self._editing = fresh.export_id
         self._describe_editing()

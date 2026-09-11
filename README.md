@@ -322,8 +322,27 @@ and none of it can be read back out. So the app keeps it beside the part, in
 `<part>.airfoils.json`. Click a curve in the panel and its settings come back to
 the form.
 
-A part that has never been saved has nowhere to keep that file, so its settings
-last only until the app closes. The panel says so.
+A part that has never been saved has nowhere to keep that file yet, so its
+settings are held in the app until it does. The panel says so, and so does the
+status line after an export. Save the part and the file is written there and
+then, with everything made before the save still in it — the records are carried
+across rather than dropped at the one moment it would hurt most.
+
+### Taking over curves nothing remembers
+
+Curves in the part that no record claims are listed under **In the part, not
+tracked**. They turn up when the record was lost, or when curves were made
+against a part that was never saved by an older version of the app.
+
+**Track** takes them over. Their names are all that is left of them, and a name
+carries the stem, what the curve is and its number — enough to group them back
+into the exports that made them and to update those same features again, rather
+than making a second set beside them. The settings are gone for good: they lived
+only in the record. So an adopted record says `adopted` where the others show a
+leading edge, and its card says outright that nothing was remembered. Open it,
+set the form up as you want it, and Export takes it over from there.
+
+Curves this app did not name are left alone.
 
 ### Making a second rib
 

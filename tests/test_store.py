@@ -270,3 +270,100 @@ def test_a_retired_curve_is_left_out_of_both():
     )
     assert record.written_curves() == []
     assert record.live_curves() == []
+
+
+# -- taking over curves that are already there ------------------------------
+
+
+def test_a_feature_name_is_read_back_into_its_parts():
+    assert store.parse_feature("n0012_airfoil") == ("n0012", "airfoil", 1)
+    assert store.parse_feature("n0012_airfoil_te") == ("n0012", "airfoil_te", 1)
+    assert store.parse_feature("n0012_camber_2") == ("n0012", "camber", 2)
+    assert store.parse_feature("n0012_airfoil_joined_3") == ("n0012", "airfoil_joined", 3)
+
+
+def test_a_name_this_app_did_not_make_is_not_claimed():
+    assert store.parse_feature("Curve1") is None
+    assert store.parse_feature("_airfoil") is None
+    assert store.parse_feature("rib_spline") is None
+
+
+def test_untracked_curves_group_into_the_exports_that_made_them():
+    groups = store.adoptable(
+        [
+            "n0012_airfoil", "n0012_airfoil_te", "n0012_camber",
+            "n0012_airfoil_2", "Curve1", "rib_airfoil",
+        ],
+        known=["rib_airfoil"],
+    )
+    assert [(g.stem, g.index, len(g.curves)) for g in groups] == [
+        ("n0012", 1, 3),
+        ("n0012", 2, 1),
+    ]
+
+
+def test_adopting_writes_a_record_that_knows_the_names_and_nothing_else(tmp_path):
+    folder = str(tmp_path)
+    (tmp_path / "n0012_airfoil.sldcrv").write_text("1\t2\t3\n")
+    side = Sidecar(part_path=r"C:\parts\Wing.SLDPRT")
+
+    made = store.adopt(
+        side, ["n0012_airfoil", "n0012_airfoil_te", "n0012_airfoil_joined"], folder
+    )
+
+    assert len(made) == 1
+    record = made[0]
+    assert record.adopted and record.settings == {} and record.stem == "n0012"
+    assert side.exports == [record]
+    # The joined curve is derived, so it is recorded with no file of its own.
+    assert [c.file for c in record.curves] == [
+        "n0012_airfoil.sldcrv", "n0012_airfoil_te.sldcrv", ""
+    ]
+    # A file that is there is hashed, so a later edit to it still shows drift.
+    assert record.curves[0].sha256 and not record.curves[1].sha256
+
+
+def test_adopting_twice_claims_nothing_a_second_time():
+    side = Sidecar()
+    store.adopt(side, ["n0012_airfoil"])
+    assert store.adopt(side, ["n0012_airfoil"]) == []
+    assert len(side.exports) == 1
+
+
+def test_an_adopted_record_takes_the_index_its_names_carry():
+    side = Sidecar()
+    store.adopt(side, ["n0012_airfoil_2"])
+    assert side.exports[0].name_index == 2
+    assert side.next_index("n0012") == 1
+
+
+def test_records_made_before_the_part_was_saved_move_into_its_file():
+    homeless = [ExportRecord(export_id="exp-1", stem="rib", curves=[
+        CurveRecord(role="airfoil", feature="rib_airfoil", file="rib_airfoil.sldcrv")
+    ])]
+    side = Sidecar(part_path=r"C:\parts\Wing.SLDPRT")
+
+    moved = store.carry_over(side, homeless, ["rib_airfoil", "Curve1"])
+
+    assert moved == homeless
+    assert side.exports == homeless
+
+
+def test_records_do_not_follow_the_app_into_a_different_part():
+    homeless = [ExportRecord(export_id="exp-1", stem="rib", curves=[
+        CurveRecord(role="airfoil", feature="rib_airfoil", file="rib_airfoil.sldcrv")
+    ])]
+    side = Sidecar(part_path=r"C:\parts\Other.SLDPRT")
+
+    assert store.carry_over(side, homeless, ["somebody_elses_curve"]) == []
+    assert side.exports == []
+
+
+def test_a_record_the_part_already_holds_is_not_carried_in_twice():
+    record = ExportRecord(export_id="exp-1", stem="rib", curves=[
+        CurveRecord(role="airfoil", feature="rib_airfoil", file="rib_airfoil.sldcrv")
+    ])
+    side = Sidecar(exports=[record])
+
+    assert store.carry_over(side, [record], ["rib_airfoil"]) == []
+    assert side.exports == [record]

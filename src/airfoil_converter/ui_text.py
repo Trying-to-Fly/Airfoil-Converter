@@ -217,6 +217,16 @@ def tracker_rows(session: Pick) -> List[TrackerRow]:
 #                                                                record card
 
 
+# An adopted record knows what its curves are called and nothing else. Both
+# lines say so outright: a card that showed the defaults instead would read as
+# a set of settings somebody chose.
+ADOPTED_SETTINGS = "Taken over from the part. Its settings were not remembered."
+ADOPTED_HINT = (
+    "Export will rebuild these curves from the form as it stands now, keeping "
+    "their names. From then on the settings are kept with the part."
+)
+
+
 def record_summary(spec: ExportSpec) -> str:
     """One line of a remembered export's settings, for the card under the tree."""
     parts = [f"Leading edge at {', '.join(spec.leading_edge)}"]

@@ -90,6 +90,13 @@ def draw_icon(canvas: tk.Canvas, name: str, color: str, size: int) -> None:
     elif name == "plus":
         line([(8, 3.2), (8, 12.8)])
         line([(3.2, 8), (12.8, 8)])
+    elif name == "link":
+        # Two half-rings and the bar between them: a chain link, for taking
+        # hold of curves the app did not put in the part itself.
+        for box, start in ((((2.2, 4.6), (9.0, 11.4)), 90), (((7.0, 4.6), (13.8, 11.4)), 270)):
+            canvas.create_arc(*_scaled(box, size), start=start, extent=180,
+                              style="arc", outline=color, width=width, tags="icon")
+        line([(5.6, 8), (10.4, 8)])
 
 
 class Icon(tk.Canvas):

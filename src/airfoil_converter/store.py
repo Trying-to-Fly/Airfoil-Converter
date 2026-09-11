@@ -19,10 +19,11 @@ from __future__ import annotations
 import json
 import os
 import time
+import uuid
 from dataclasses import asdict, dataclass, field
-from typing import Any, Dict, List, Optional, Sequence, Tuple
+from typing import Any, Collection, Dict, List, Optional, Sequence, Tuple
 
-from .export import Curve, ExportSpec
+from .export import ROLE_JOINED, ROLES, Curve, ExportSpec
 
 SCHEMA_VERSION = 1
 SIDECAR_SUFFIX = ".airfoils.json"
@@ -84,6 +85,9 @@ class ExportRecord:
     loaded_section: Optional[Dict[str, Any]] = None
     curves: List[CurveRecord] = field(default_factory=list)
     created: str = ""
+    # Built from the names in the part rather than from an export, so it knows
+    # what its curves are called and nothing about how they were made.
+    adopted: bool = False
 
     @property
     def spec(self) -> ExportSpec:
@@ -295,6 +299,136 @@ def record_from_export(
             for curve in curves
         ],
     )
+
+
+# -- taking over curves that are already there ------------------------------
+#
+# Two ways a part ends up holding curves nothing remembers. It was never saved
+# when they were made, so there was nowhere to write the record; or the record
+# was lost. Either way the curves are still ours, and their names say so: the
+# naming scheme is the only thing that survived, so it is what they are read
+# back from. Nothing here can recover the settings — those existed only in the
+# record — so an adopted record says plainly that it has none.
+
+
+def parse_feature(name: str) -> Optional[Tuple[str, str, int]]:
+    """``rib_airfoil_te_2`` -> ``("rib", "airfoil_te", 2)``, or None.
+
+    None means the name was not made by this app, which is the answer that
+    matters most: somebody else's curve must never be claimed.
+    """
+    head, separator, tail = name.rpartition("_")
+    index = 1
+    if separator and tail.isdigit() and int(tail) >= 2:
+        name, index = head, int(tail)
+    # Longest first, so ``airfoil_te`` is never read as ``airfoil``.
+    for role in sorted(ROLES, key=len, reverse=True):
+        suffix = "_" + role
+        if name.endswith(suffix):
+            stem = name[: -len(suffix)]
+            if stem:
+                return stem, role, index
+    return None
+
+
+@dataclass(frozen=True)
+class Adoption:
+    """One export's worth of untracked curves, as read back from their names."""
+
+    stem: str
+    index: int
+    curves: Tuple[Tuple[str, str], ...] = ()  # (feature, role), in document order
+
+
+def adoptable(features: Sequence[str], known: Collection[str] = ()) -> List[Adoption]:
+    """Group the curves nothing tracks by the export that would have made them."""
+    groups: Dict[Tuple[str, int], List[Tuple[str, str]]] = {}
+    order: List[Tuple[str, int]] = []
+    for name in features:
+        if name in known:
+            continue
+        parsed = parse_feature(name)
+        if parsed is None:
+            continue
+        stem, role, index = parsed
+        key = (stem, index)
+        if key not in groups:
+            groups[key] = []
+            order.append(key)
+        groups[key].append((name, role))
+    return [Adoption(stem, index, tuple(groups[(stem, index)])) for stem, index in order]
+
+
+def adopt(
+    sidecar: Sidecar,
+    features: Sequence[str],
+    folder: str = "",
+    extension: str = ".sldcrv",
+) -> List[ExportRecord]:
+    """Make a record for every group of untracked curves, and add them.
+
+    The file a curve would be written to is recorded whether or not it is there
+    now: it is where a refresh will put it, and naming it is what lets the
+    record be exported over. The joined curve is the exception — SolidWorks
+    derives it from two of ours and no file is ever written for it.
+    """
+    known = set(sidecar.all_feature_names())
+    made: List[ExportRecord] = []
+    for group in adoptable(features, known):
+        curves = []
+        for feature, role in group.curves:
+            filename = "" if role == ROLE_JOINED else feature + extension
+            digest = ""
+            if filename and folder:
+                path = os.path.join(folder, filename)
+                if os.path.exists(path):
+                    digest = _file_hash(path)
+            curves.append(
+                CurveRecord(role=role, feature=feature, file=filename, sha256=digest)
+            )
+        record = ExportRecord(
+            export_id=f"adopted-{uuid.uuid4().hex[:8]}",
+            name_index=group.index,
+            stem=group.stem,
+            output_folder=folder,
+            settings={},
+            curves=curves,
+            created=now(),
+            adopted=True,
+        )
+        sidecar.exports.append(record)
+        made.append(record)
+    return made
+
+
+def carry_over(
+    sidecar: Sidecar,
+    records: Sequence[ExportRecord],
+    present: Sequence[str],
+) -> List[ExportRecord]:
+    """Move records made before the part had a path into the part's own file.
+
+    A part that has never been saved has nowhere to keep a record, so the app
+    holds it in memory. The moment it is saved there is somewhere, and losing
+    the record at exactly that point would be the cruellest possible time.
+
+    A record only moves if every curve it names is in the document — otherwise
+    what happened was not a save but a different part being opened, and those
+    curves have nothing to do with this one.
+    """
+    known = set(sidecar.all_feature_names())
+    in_document = set(present)
+    moved: List[ExportRecord] = []
+    for record in records:
+        names = [curve.feature for curve in record.live_curves()]
+        if not names or any(name in known for name in names):
+            continue
+        if not all(name in in_document for name in names):
+            continue
+        sidecar.exports.append(record)
+        known.update(names)
+        moved.append(record)
+    return moved
 
 
 # -- reconciliation ---------------------------------------------------------
