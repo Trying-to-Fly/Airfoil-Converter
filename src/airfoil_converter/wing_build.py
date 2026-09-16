@@ -36,7 +36,8 @@ from .parser import AirfoilParseError
 
 WING_FOLDER = "Wing Curves"
 # A turn this sharp between two neighbouring points of an offset section is a
-# corner, and the section is exported in two there.
+# corner, and the section is cut there rather than at the point nearest its
+# leading edge.
 CORNER_DEG = 30.0
 
 Progress = Callable[[str], None]
@@ -264,7 +265,7 @@ def build_wing(
                 if role == export.ROLE_TE:
                     pieces = [(ROLE_SECTION_TE, points, closed)]
                 else:
-                    pieces = split_at_corner(points, closed, up)
+                    pieces = split_at_nose(points, closed, up, sec.le)
                 for kind, piece, shut in pieces:
                     placed = wing_offset.to_3d(model.frame, s, piece)
                     curves.append(named(kind, placed, shut, number, tag))
@@ -298,16 +299,18 @@ def build_wing(
     return WingBuild(curves=curves, joins=joins, model=model, offset=result)
 
 
-def split_at_corner(
-    points: Sequence[Point2], closed: bool, up: Point2
+def split_at_nose(
+    points: Sequence[Point2], closed: bool, up: Point2, nose: Point2
 ) -> List[Tuple[str, List[Point2], bool]]:
-    """A section's outline as the curves to export: whole, or in two at a corner.
+    """A section's outline as the curves to export: upper and lower, meeting at the nose.
 
     SolidWorks draws one smooth spline through a curve's points, and round a
     corner that spline swings wide, or loops and will not loft at all. An
     inward offset deeper than the airfoil's nose radius has just such a corner
-    at its nose. There the outline is cut in two, upper and lower, each keeping
-    the corner as an end.
+    at its nose, so the outline is cut there, each half keeping it as an end.
+    Every section is cut, corner or not: a loft will not join profiles cut
+    into different numbers of pieces. Offset sections are dense enough at the
+    nose that a cut through a smooth one changes nothing to speak of.
     """
     pts = list(points)
     sharpest, at = 0.0, -1
@@ -316,6 +319,8 @@ def split_at_corner(
         if turn > sharpest:
             sharpest, at = turn, i
     if sharpest < CORNER_DEG:
+        at = min(range(len(pts)), key=lambda i: math.hypot(pts[i][0] - nose[0], pts[i][1] - nose[1]))
+    if not 0 < at < len(pts) - 1:
         return [(ROLE_SECTION, pts, closed)]
     first, second = pts[: at + 1], pts[at:]
     height = lambda piece: sum(p[0] * up[0] + p[1] * up[1] for p in piece) / len(piece)

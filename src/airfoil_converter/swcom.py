@@ -748,6 +748,31 @@ class Session:
         except Exception:  # noqa: BLE001
             return None
 
+    def _select_all(self, picks: Sequence[Tuple[str, int]], what: str) -> None:
+        """Select curves by name, each at its mark, rebuilding and retrying once.
+
+        Straight after a push SolidWorks sometimes cannot find a curve it has
+        just made; a rebuild settles it.
+        """
+        doc = self._active()
+        extension = call(doc, "Extension")
+        for attempt in range(2):
+            call(doc, "ClearSelection2", True)
+            missing = ""
+            for position, (curve, mark) in enumerate(picks):
+                if not call(
+                    extension, "SelectByID2", curve, "REFERENCECURVES",
+                    0.0, 0.0, 0.0, position > 0, mark, _null_dispatch(), 0,
+                ):
+                    missing = curve
+                    break
+            if not missing:
+                return
+            call(doc, "ClearSelection2", True)
+            if attempt == 0:
+                call(doc, "ForceRebuild3", False)
+        raise SolidWorksError(f"{missing} could not be selected {what}.")
+
     def insert_composite_curve(self, sources: Sequence[str], name: str) -> str:
         """Join several curves into one selectable curve, and name it.
 
@@ -761,16 +786,7 @@ class Session:
             raise SolidWorksError("A composite curve needs at least two curves to join.")
 
         doc = self._active()
-        extension = call(doc, "Extension")
-        call(doc, "ClearSelection2", True)
-        for position, source in enumerate(sources):
-            selected = call(
-                extension, "SelectByID2", source, "REFERENCECURVES",
-                0.0, 0.0, 0.0, position > 0, COMPOSITE_SELECT_MARK, _null_dispatch(), 0,
-            )
-            if not selected:
-                call(doc, "ClearSelection2", True)
-                raise SolidWorksError(f"{source} could not be selected to join.")
+        self._select_all([(source, COMPOSITE_SELECT_MARK) for source in sources], "to join")
 
         before = set(self.feature_names())
         made = call(doc, "InsertCompositeCurve")
@@ -871,17 +887,8 @@ class Session:
         if len(profiles) < 2:
             raise SolidWorksError("A loft needs at least two profiles.")
         doc = self._active()
-        extension = call(doc, "Extension")
-        call(doc, "ClearSelection2", True)
         picks = [(p, LOFT_PROFILE_MARK) for p in profiles] + [(g, LOFT_GUIDE_MARK) for g in guides]
-        for position, (curve, mark) in enumerate(picks):
-            selected = call(
-                extension, "SelectByID2", curve, "REFERENCECURVES",
-                0.0, 0.0, 0.0, position > 0, mark, _null_dispatch(), 0,
-            )
-            if not selected:
-                call(doc, "ClearSelection2", True)
-                raise SolidWorksError(f"{curve} could not be selected for the loft.")
+        self._select_all(picks, "for the loft")
 
         before = set(self.feature_names())
         if not solid:

@@ -250,11 +250,12 @@ def test_an_offset_wing_names_its_sections_root_to_tip(straight_wing):
     build = wing_build.build_wing(spec, straight_wing.sidecar(), "inner", index=2)
     names = [c.feature for c in build.curves]
     sections = build.section_names
-    assert sections[0] == "inner_2_s01"
+    # A sharp trailing edge closes the loop; cut at the nose, its halves are joined.
+    assert sections[0] == "inner_2_s01_joined"
     assert names[-2:] == ["inner_2_le", "inner_2_te"]
     assert not any(c.role == export.ROLE_WING_SURFACE for c in build.curves)
     assert build.station_count == len(sections)
-    assert build.joins == []
+    assert sorted(build.joins[0][0]) == ["inner_2_s01_lower", "inner_2_s01_upper"]
 
 
 def test_a_wing_may_not_take_another_records_names(straight_wing):
@@ -520,39 +521,63 @@ def test_the_thickness_rule_decides_the_shape_between_ribs(thickness, tmp_path):
         assert mid == pytest.approx(in_proportion, rel=1e-3)
 
 
-# -- a corner in a section ----------------------------------------------------
+# -- cutting a section at its nose --------------------------------------------
 
 
-def test_a_section_with_a_corner_is_exported_in_two_meeting_there():
-    # A nose come to a point, upper surface first.
+def pointed_nose():
+    # A nose come to a point at (0, 0), upper surface first.
     upper = [(100.0 - x, 5.0 * (1 - (1 - x / 100.0) ** 2)) for x in range(0, 101, 5)]
     lower = [(float(x), -3.0 * (1 - (1 - x / 100.0) ** 2)) for x in range(5, 101, 5)]
-    pieces = wing_build.split_at_corner(upper + lower, False, (0.0, 1.0))
+    return upper, lower
+
+
+def test_a_section_with_a_corner_is_cut_at_the_corner():
+    upper, lower = pointed_nose()
+    # Told its nose is elsewhere: the corner wins.
+    pieces = wing_build.split_at_nose(upper + lower, False, (0.0, 1.0), (30.0, 3.0))
     assert [role for role, _, _ in pieces] == [export.ROLE_SECTION_UPPER, export.ROLE_SECTION_LOWER]
     (_, top, _), (_, bottom, _) = pieces
     assert top == upper and bottom == [upper[-1]] + lower
 
 
 def test_the_halves_are_named_by_which_way_is_up():
-    upper = [(100.0 - x, 5.0 * (1 - (1 - x / 100.0) ** 2)) for x in range(0, 101, 5)]
-    lower = [(float(x), -3.0 * (1 - (1 - x / 100.0) ** 2)) for x in range(5, 101, 5)]
-    pieces = wing_build.split_at_corner(upper + lower, False, (0.0, -1.0))
+    upper, lower = pointed_nose()
+    pieces = wing_build.split_at_nose(upper + lower, False, (0.0, -1.0), (0.0, 0.0))
     # Still in the outline's order, so they join end to end.
     assert [role for role, _, _ in pieces] == [export.ROLE_SECTION_LOWER, export.ROLE_SECTION_UPPER]
     assert pieces[1][1] == [upper[-1]] + lower
 
 
-def test_a_smooth_section_stays_whole():
+def test_a_smooth_section_is_cut_at_its_nose_too():
+    """A loft will not join profiles cut into different numbers of pieces."""
     loop = [(50.0 + 50.0 * math.cos(math.radians(a)), 10.0 * math.sin(math.radians(a)))
             for a in range(0, 361, 5)]
-    assert wing_build.split_at_corner(loop, True, (0.0, 1.0)) == [(export.ROLE_SECTION, loop, True)]
+    pieces = wing_build.split_at_nose(loop, True, (0.0, 1.0), (0.0, 0.0))
+    assert [role for role, _, _ in pieces] == [export.ROLE_SECTION_UPPER, export.ROLE_SECTION_LOWER]
+    assert pieces[0][1][-1] == pieces[1][1][0] == loop[36]
 
 
-def test_an_outward_offset_has_no_corner_to_split(tmp_path):
+def test_every_section_of_an_offset_wing_comes_in_the_same_pieces(tmp_path):
     synthetic = SyntheticWing([0.0, 300.0], lambda s: 0.0, lambda s: -200.0,
                               te_mode=export.TE_LINE, te_thickness="0.8")
-    spec = synthetic.wing_spec(offset="2", offset_dir=export.OFFSET_OUTWARD)
-    build = wing_build.build_wing(spec, synthetic.sidecar(), "w")
-    roles = {c.role for c in build.curves}
-    assert export.ROLE_SECTION in roles and export.ROLE_SECTION_UPPER not in roles
-    assert build.joins[0] == (("w_root", "w_root_te"), "w_root_joined")
+    for direction in (export.OFFSET_OUTWARD, export.OFFSET_INWARD):
+        spec = synthetic.wing_spec(offset="2", offset_dir=direction)
+        build = wing_build.build_wing(spec, synthetic.sidecar(), "w")
+        assert [sorted(s) for s, _ in build.joins] == [
+            ["w_root_lower", "w_root_te", "w_root_upper"],
+            ["w_tip_lower", "w_tip_te", "w_tip_upper"],
+        ]
+
+
+def test_a_hairpin_left_by_the_trim_is_taken_out():
+    # A nose corner at (0, 0), turning about 100°, with a point 0.07 mm past it
+    # that the outline runs out to and straight back from.
+    loop = [(100.0, 5.0), (3.0, 4.0), (-0.042, -0.056), (0.0, 0.0), (3.0, -3.0), (100.0, -1.0)]
+    front = lambda p: p[0] < 50.0
+    cleaned = wing_offset._despike(loop, front)
+    assert cleaned == [(100.0, 5.0), (3.0, 4.0), (0.0, 0.0), (3.0, -3.0), (100.0, -1.0)]
+    square = [(0.0, 0.0), (1.0, 0.0), (1.0, 1.0), (0.0, 1.0)]
+    assert wing_offset._despike(square, front) == square
+    # A sharp tail turns back on itself too, and is left alone.
+    tail = [(0.0, 5.0), (99.0, 1.0), (100.0, 0.0), (99.0, -1.0), (0.0, -5.0)]
+    assert wing_offset._despike(tail, front) == tail

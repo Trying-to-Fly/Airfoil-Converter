@@ -462,9 +462,17 @@ A rib is modelled as SolidWorks draws it: a Curve Through XYZ Points is a
 natural cubic spline through the points, spaced by the distance between them,
 and straight lines between the same points cut up to 0.18 mm inside it at the
 nose. An offset wing's profile that comes to a corner — an inward offset deeper
-than the nose radius — is written in two halves meeting there
-(`wing_inner_root_upper`, `…_lower`), so the spline keeps the corner; the
-joined curve is still the one to pick. Each passes through a point
+than the nose radius — would loop a spline round it, so every profile of an offset
+wing is written in two halves meeting at its nose (`wing_inner_root_upper`,
+`…_lower`), corner or not: a loft will not join profiles cut into different
+numbers of pieces. The joined curve is still the one to pick.
+
+**Loft** on the Wing tab builds the chosen wing's loft in the open part —
+`wing_loft`, `wing_inner_loft` — through every profile and guide it exported;
+tick *Loft in SolidWorks after export* to have it done after each export. A
+loft already there is left alone, since it follows its curves; delete it to
+loft again. Where SolidWorks will not make the solid, a surface loft is made
+instead and the status line says so. Each passes through a point
 of every profile the loft is given, so the loft accepts it. **Thickness** says
 which shape they hold:
 

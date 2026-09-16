@@ -615,11 +615,48 @@ def offset_outline(
             trimmed, bridges = _fill_gaps(skin, s, trimmed, bridges, d, sign < 0)
             if not any(bridges):
                 break
+    _, u, _ = loft.axes(s)
+    along = [p[0] * u[0] + p[1] * u[1] for p in trimmed]
+    middle = 0.5 * (min(along) + max(along))
+    trimmed = _despike(trimmed, lambda p: p[0] * u[0] + p[1] * u[1] < middle)
     if g.signed_area(trimmed) < 0:
         trimmed.reverse()
-    _, u, _ = loft.axes(s)
     looped = _start_at_tail(trimmed, lambda p: p[0] * u[0] + p[1] * u[1])
     return g.auto_close(looped)
+
+
+# A loop that turns back on itself by more than this at a point has a spike
+# there, not a corner.
+SPIKE_DEG = 150.0
+
+
+def _despike(loop: List[Point2], where: Callable[[Point2], bool]) -> List[Point2]:
+    """The loop without the hairpins trimming can leave where two offsets meet.
+
+    Where an inward offset comes to a corner at the nose, the trim can keep a
+    point a hair's breadth past it, so the outline runs out and straight back.
+    A spline through that loops, and SolidWorks will not join the curve at all.
+    Only points ``where`` says are taken out: a sharp trailing edge turns back
+    on itself too, and is meant to.
+    """
+    pts = list(loop)
+    if len(pts) > 1 and math.hypot(pts[0][0] - pts[-1][0], pts[0][1] - pts[-1][1]) <= 1e-12:
+        pts.pop()
+    limit = math.cos(math.radians(SPIKE_DEG))
+    changed = True
+    while changed and len(pts) > 3:
+        changed = False
+        n = len(pts)
+        for i in range(n):
+            a, b, c = pts[i - 1], pts[i], pts[(i + 1) % n]
+            ux, uy = b[0] - a[0], b[1] - a[1]
+            vx, vy = c[0] - b[0], c[1] - b[1]
+            size = math.hypot(ux, uy) * math.hypot(vx, vy)
+            if (size <= 0.0 or (ux * vx + uy * vy) / size < limit) and where(b):
+                del pts[i]
+                changed = True
+                break
+    return pts
 
 
 def _solve_depth(
