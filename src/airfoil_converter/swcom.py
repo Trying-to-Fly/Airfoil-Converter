@@ -85,6 +85,29 @@ FOLDER_CONTAINING = 2
 # mark 1. At mark 0 it returns False and says nothing about why.
 COMPOSITE_SELECT_MARK = 1
 
+# A loft reads its profiles from selection mark 1 and its guide curves from
+# mark 2, as the Loft property page does.
+LOFT_PROFILE_MARK = 1
+LOFT_GUIDE_MARK = 2
+LOFT_TYPE_NAME = "Blend"
+LOFT_SURFACE_TYPE_NAME = "BlendRefSurface"
+
+# Values read out of the SolidWorks 2026 constant library (swconst.tlb) rather
+# than remembered: swGuideCurveInfluence_e, swFeatureSuppressionAction_e,
+# swInConfigurationOpts_e, swOpenDocOptions_e, swSaveAsOptions_e,
+# swDocumentTypes_e.
+GUIDE_TO_NEXT_GUIDE = 0
+GUIDE_TO_NEXT_SHARP = 1
+GUIDE_TO_NEXT_EDGE = 2
+GUIDE_GLOBAL = 3
+SUPPRESS = 0
+UNSUPPRESS = 1
+THIS_CONFIGURATION = 1
+SW_DOC_PART = 1
+OPEN_SILENT = 1
+SAVE_SILENT = 1
+SAVE_AS_COPY = 2
+
 # SolidWorks holds curve points in metres however the file is written, so
 # everything crossing this boundary is scaled. The file says "175.000000mm"
 # and the part reads back 0.175.
@@ -777,6 +800,129 @@ class Session:
     def rebuild(self) -> bool:
         """Rebuild the active document. Called once, after the last curve."""
         return bool(call(self._active(), "ForceRebuild3", False))
+
+    # -- documents ------------------------------------------------------------
+
+    def open_part(self, path: str) -> DocInfo:
+        """Open a part (or bring it forward if it is open already) and make it active."""
+        path = os.path.abspath(path)
+        errors, warnings = _out_long(), _out_long()
+        doc = call(self._app, "OpenDoc6", path, SW_DOC_PART, OPEN_SILENT, "", errors, warnings)
+        if doc is None:
+            raise SolidWorksError(f"SolidWorks would not open {path} (error {errors.value}).")
+        title = str(call(doc, "GetTitle"))
+        call(self._app, "ActivateDoc3", title, False, 0, _out_long())
+        active = self.active_document()
+        if active is None or os.path.normcase(active.path) != os.path.normcase(path):
+            raise SolidWorksError(f"{title} opened, but did not become the active document.")
+        return active
+
+    def close_document(self, title: str) -> None:
+        """Close a document without saving it."""
+        call(self._app, "CloseDoc", title)
+
+    def save(self) -> None:
+        """Save the active document where it already is."""
+        doc = self._active()
+        errors, warnings = _out_long(), _out_long()
+        if not call(doc, "Save3", SAVE_SILENT, errors, warnings):
+            raise SolidWorksError(f"SolidWorks would not save {call(doc, 'GetTitle')} (error {errors.value}).")
+
+    # -- lofts and bodies -----------------------------------------------------
+    #
+    # A loft reads its inputs from the selection, the way a composite curve
+    # does: its profiles at mark 1, in order, and its guide curves at mark 2.
+    # The settings copied here are the ones a loft made by hand in the Loft
+    # property page carries, read back off such a loft rather than assumed.
+
+    def features_of_type(self, *type_names: str) -> List[str]:
+        return [f.name for f in self.features() if f.type_name in type_names]
+
+    def insert_loft(
+        self,
+        profiles: Sequence[str],
+        guides: Sequence[str],
+        name: str,
+        merge: bool = False,
+        keep_tangency: bool = True,
+        guide_influence: int = GUIDE_TO_NEXT_GUIDE,
+    ) -> str:
+        """A solid loft through ``profiles`` in order, held by ``guides``, named ``name``."""
+        if len(profiles) < 2:
+            raise SolidWorksError("A loft needs at least two profiles.")
+        doc = self._active()
+        extension = call(doc, "Extension")
+        call(doc, "ClearSelection2", True)
+        picks = [(p, LOFT_PROFILE_MARK) for p in profiles] + [(g, LOFT_GUIDE_MARK) for g in guides]
+        for position, (curve, mark) in enumerate(picks):
+            selected = call(
+                extension, "SelectByID2", curve, "REFERENCECURVES",
+                0.0, 0.0, 0.0, position > 0, mark, _null_dispatch(), 0,
+            )
+            if not selected:
+                call(doc, "ClearSelection2", True)
+                raise SolidWorksError(f"{curve} could not be selected for the loft.")
+
+        before = set(self.feature_names())
+        made = call(
+            call(doc, "FeatureManager"), "InsertProtrusionBlend2",
+            False,           # Closed
+            keep_tangency,   # KeepTangency: "Maintain tangency" in the page
+            False,           # ForceNonRational
+            1.0,             # TessToleranceFactor
+            0, 0,            # start and end constraints: none
+            1.0, 1.0,        # tangent lengths, unused with no constraint
+            False, False,    # tangent directions, likewise
+            False, 0.0, 0.0, 0,  # not a thin feature
+            merge,
+            False, True,     # feature scope: every body
+            guide_influence,
+        )
+        call(doc, "ClearSelection2", True)
+        if made is None or made is False:
+            raise SolidWorksError(
+                f"SolidWorks would not loft {' to '.join(profiles)} along {len(guides)} guide curve(s)."
+            )
+        created = [n for n in self.feature_names() if n not in before]
+        if len(created) != 1:
+            raise SolidWorksError(
+                f"The loft added {len(created)} features, so which one it is cannot be told."
+            )
+        return self.rename_feature(created[0], name)
+
+    def delete_feature(self, name: str) -> None:
+        """Delete one feature, leaving what it was built from."""
+        doc = self._active()
+        call(doc, "ClearSelection2", True)
+        if not call(self._curve_feature(name), "Select2", False, 0):
+            raise SolidWorksError(f"{name} could not be selected.")
+        deleted = call(call(doc, "Extension"), "DeleteSelection2", 0)
+        call(doc, "ClearSelection2", True)
+        if not deleted:
+            raise SolidWorksError(f"SolidWorks would not delete {name}.")
+
+    def set_suppressed(self, name: str, suppressed: bool) -> None:
+        action = SUPPRESS if suppressed else UNSUPPRESS
+        feature = self._curve_feature(name)
+        if not call(feature, "SetSuppression2", action, THIS_CONFIGURATION, None):
+            raise SolidWorksError(
+                f"SolidWorks would not {'suppress' if suppressed else 'unsuppress'} {name}."
+            )
+
+    def export_step(self, path: str) -> None:
+        """Write every visible body of the active part to a STEP file, as a copy.
+
+        The part stays the open document under its own name.
+        """
+        doc = self._active()
+        path = os.path.abspath(path)
+        errors, warnings = _out_long(), _out_long()
+        saved = call(
+            call(doc, "Extension"), "SaveAs", path, 0, SAVE_SILENT | SAVE_AS_COPY,
+            _null_dispatch(), errors, warnings,
+        )
+        if not saved or not os.path.exists(path):
+            raise SolidWorksError(f"SolidWorks would not write {path} (error {errors.value}).")
 
     # -- reading what the user clicked --------------------------------------
 

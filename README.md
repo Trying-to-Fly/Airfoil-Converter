@@ -579,6 +579,7 @@ src/airfoil_converter/
   store.py      # what the app remembers about a part's curves
   swcom.py      # the only module that talks to SolidWorks
   swlink.py     # insert, refresh, rebuild -- in that order
+  swloft.py     # loft a wing in SolidWorks and write each loft to STEP
   gui.py        # tkinter window: the panels, the handlers, the poll
   wing_tab.py   # the Wing tab
   theme.py      # every colour, size and face the window uses
