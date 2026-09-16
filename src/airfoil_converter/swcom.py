@@ -787,6 +787,19 @@ class Session:
             )
         return self.rename_feature(created[0], name)
 
+    def composite_sources(self, name: str) -> List[str]:
+        """The curves a composite joins, by name, in the order it holds them."""
+        doc = self._active()
+        data = call(self._curve_feature(name), "GetDefinition")
+        if data is None or not call(data, "AccessSelections", doc, _null_dispatch()):
+            raise SolidWorksError(f"The curves {name} joins could not be read.")
+        try:
+            kinds = VARIANT(pythoncom.VT_BYREF | pythoncom.VT_VARIANT, None)
+            entities = call(data, "GetEntitiesToJoin", kinds) or ()
+            return [str(call(e, "Name")) for e in entities]
+        finally:
+            call(data, "ReleaseSelectionAccess")
+
     def set_rebuild_suppressed(self, suppressed: bool) -> None:
         """Hold the rebuild off while several curves are reloaded.
 
@@ -846,8 +859,15 @@ class Session:
         merge: bool = False,
         keep_tangency: bool = True,
         guide_influence: int = GUIDE_TO_NEXT_GUIDE,
+        solid: bool = True,
     ) -> str:
-        """A solid loft through ``profiles`` in order, held by ``guides``, named ``name``."""
+        """A loft through ``profiles`` in order, held by ``guides``, named ``name``.
+
+        A solid unless ``solid`` is off, when it is a surface: SolidWorks
+        refuses some solids whose surface it makes without complaint, and a
+        surface is all a measurement needs. A surface loft takes no guide
+        influence; it uses SolidWorks' own.
+        """
         if len(profiles) < 2:
             raise SolidWorksError("A loft needs at least two profiles.")
         doc = self._active()
@@ -864,26 +884,33 @@ class Session:
                 raise SolidWorksError(f"{curve} could not be selected for the loft.")
 
         before = set(self.feature_names())
-        made = call(
-            call(doc, "FeatureManager"), "InsertProtrusionBlend2",
-            False,           # Closed
-            keep_tangency,   # KeepTangency: "Maintain tangency" in the page
-            False,           # ForceNonRational
-            1.0,             # TessToleranceFactor
-            0, 0,            # start and end constraints: none
-            1.0, 1.0,        # tangent lengths, unused with no constraint
-            False, False,    # tangent directions, likewise
-            False, 0.0, 0.0, 0,  # not a thin feature
-            merge,
-            False, True,     # feature scope: every body
-            guide_influence,
-        )
-        call(doc, "ClearSelection2", True)
-        if made is None or made is False:
-            raise SolidWorksError(
-                f"SolidWorks would not loft {' to '.join(profiles)} along {len(guides)} guide curve(s)."
+        if not solid:
+            # Returns nothing either way; whether it worked shows in the tree.
+            call(doc, "InsertLoftRefSurface2", False, keep_tangency, False, 1.0, 0, 0)
+            made = True
+        else:
+            made = call(
+                call(doc, "FeatureManager"), "InsertProtrusionBlend2",
+                False,           # Closed
+                keep_tangency,   # KeepTangency: "Maintain tangency" in the page
+                False,           # ForceNonRational
+                1.0,             # TessToleranceFactor
+                0, 0,            # start and end constraints: none
+                1.0, 1.0,        # tangent lengths, unused with no constraint
+                False, False,    # tangent directions, likewise
+                False, 0.0, 0.0, 0,  # not a thin feature
+                merge,
+                False, True,     # feature scope: every body
+                guide_influence,
             )
+        call(doc, "ClearSelection2", True)
         created = [n for n in self.feature_names() if n not in before]
+        if made is None or made is False or not created:
+            kind = "solid" if solid else "surface"
+            raise SolidWorksError(
+                f"SolidWorks would not make a {kind} loft of {' to '.join(profiles)} "
+                f"along {len(guides)} guide curve(s)."
+            )
         if len(created) != 1:
             raise SolidWorksError(
                 f"The loft added {len(created)} features, so which one it is cannot be told."

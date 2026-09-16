@@ -396,10 +396,17 @@ ROLE_WING_SURFACE = "wing_surface"
 ROLE_SECTION = "section"
 ROLE_SECTION_TE = "section_te"
 ROLE_SECTION_JOINED = "section_joined"
+# A section with a corner in its outline — the nose of a wing offset inward by
+# more than its nose radius — is exported as two curves meeting there, so the
+# spline through each keeps the corner instead of looping round it.
+ROLE_SECTION_UPPER = "section_upper"
+ROLE_SECTION_LOWER = "section_lower"
 WING_ROLES = (
     ROLE_WING_LE, ROLE_WING_TE, ROLE_WING_TE_UPPER, ROLE_WING_TE_LOWER, ROLE_WING_SURFACE,
-    ROLE_SECTION, ROLE_SECTION_TE, ROLE_SECTION_JOINED,
+    ROLE_SECTION, ROLE_SECTION_TE, ROLE_SECTION_JOINED, ROLE_SECTION_UPPER, ROLE_SECTION_LOWER,
 )
+# The curve that stands for a whole section when a loft's profiles are listed.
+SECTION_HEAD_ROLES = (ROLE_SECTION, ROLE_SECTION_UPPER)
 WING_EDGE_ROLES = (
     ROLE_WING_LE, ROLE_WING_TE, ROLE_WING_TE_UPPER, ROLE_WING_TE_LOWER, ROLE_WING_SURFACE,
 )
@@ -502,6 +509,10 @@ def wing_feature_name(
         return f"{base}_{number}"
     if role == ROLE_SECTION_TE:
         return f"{base}_{number}_te"
+    if role == ROLE_SECTION_UPPER:
+        return f"{base}_{number}_upper"
+    if role == ROLE_SECTION_LOWER:
+        return f"{base}_{number}_lower"
     if role == ROLE_SECTION_JOINED:
         return f"{base}_{number}_joined"
     raise InputError(f"Unknown wing curve role {role!r}.")

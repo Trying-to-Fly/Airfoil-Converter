@@ -46,9 +46,19 @@ MIN_SPACING = 0.5
 # Past this much sweep the offset is solved in 3D instead of corrected in 2D.
 STEEP_SWEEP = 20.0
 # Points along each surface, nose to tail, in a resampled outline.
-SAMPLES = 80
+SAMPLES = 160
 # Where along the chord the guides for a root-and-tip loft run, on each surface.
-SURFACE_GUIDES = (0.02, 0.05, 0.15, 0.30, 0.50, 0.75, 0.90)
+# Measured on a real pair of lofts, SolidWorks sags up to 0.15 mm between
+# guides 10 to 25% of the chord apart; this spacing holds it to 0.05 mm.
+SURFACE_GUIDES = (
+    0.01, 0.02, 0.035, 0.05, 0.075, 0.10, 0.15, 0.20, 0.25, 0.30,
+    0.40, 0.50, 0.60, 0.75, 0.90, 0.95,
+)
+# An offset wing's guides start this far back: nearer its nose, where an inward
+# offset comes to a corner, SolidWorks will not loft through them all.
+OFFSET_GUIDES_FROM = 0.02
+# A rib's outline is filled in with this many steps between each two of its points.
+DRAWN_STEPS = 8
 # Between ribs the surface guides are sampled at least this often.
 SURFACE_STEP = 5.0
 # A closed end grown outward is rounded by sections at these angles.
@@ -375,9 +385,35 @@ def rib_from_record(record, data, section=None) -> Rib:
     factor = g.scale_factor(data.chord, plain.target_chord_mm())
     u, v = export.plane_frame(plain, section)
     le = plain.vector("leading_edge")
-    # Thinned just as the rib's exported curve is, so guides can land on its points.
-    outline = g.thin_curve(g.to_3d(points, le, u, v, factor))
+    # Thinned just as the rib's exported curve is, then filled in along the
+    # curve SolidWorks draws through those points.
+    outline = as_drawn(g.thin_curve(g.to_3d(points, le, u, v, factor)))
     return Rib(name=name, spec=spec, outline=outline, le=le, u=u, v=v, closed=closed)
+
+
+def as_drawn(points: Sequence[Vec3], per_span: int = DRAWN_STEPS) -> List[Vec3]:
+    """The curve SolidWorks draws through ``points``, as ``per_span`` steps between each two.
+
+    A Curve Through XYZ Points is a natural cubic spline, parametrised by the
+    straight distance from point to point: measured against a STEP of a real
+    loft it matches to under 0.001 mm, where straight lines between the same 57
+    points of an SD7037 rib cut 0.18 mm inside it at the nose. Every point given
+    is kept, so a guide can still land on one.
+    """
+    pts = list(points)
+    if len(pts) < 3:
+        return pts
+    run = [0.0]
+    for a, b in zip(pts, pts[1:]):
+        run.append(run[-1] + g.length(g.sub(b, a)))
+    axes = [Spline(run, [p[c] for p in pts]) for c in range(3)]
+    out = [pts[0]]
+    for i in range(len(pts) - 1):
+        for k in range(1, per_span):
+            t = run[i] + (run[i + 1] - run[i]) * k / per_span
+            out.append(tuple(axis(t) for axis in axes))
+        out.append(pts[i + 1])
+    return out
 
 
 def _normal(rib: Rib) -> Vec3:
@@ -879,8 +915,17 @@ def _on_surface(loft: "Loft", profile: Profile, fraction: float, side: int) -> T
     return best, loft.unplace(s, best)[0]
 
 
+def guide_tag(side: str, fraction: float) -> str:
+    """``upper_05`` for 5%, ``upper_3p5`` for 3.5%."""
+    pct = round(fraction * 100.0, 1)
+    if pct == int(pct):
+        return f"{side}_{int(pct):02d}"
+    return f"{side}_{int(pct)}p{round((pct - int(pct)) * 10)}"
+
+
 def surface_guides(
-    loft: "Loft", profiles: Sequence[Profile], samples: Sequence[float], up: Point2
+    loft: "Loft", profiles: Sequence[Profile], samples: Sequence[float], up: Point2,
+    fractions: Sequence[float] = SURFACE_GUIDES,
 ) -> List[Tuple[str, Guide]]:
     """Guides along the upper and lower surfaces, through every profile.
 
@@ -901,7 +946,7 @@ def surface_guides(
     upper = loft.upper_side(up)
     guides = []
     for side, name in ((upper, "upper"), (1 - upper, "lower")):
-        for fraction in SURFACE_GUIDES:
+        for fraction in fractions:
             hits = [_on_surface(loft, p, fraction, side) for p in profiles]
             points = []
             for s in wanted:
@@ -912,7 +957,7 @@ def surface_guides(
                 t = (s - stations[k]) / (stations[k + 1] - stations[k])
                 f = hits[k][1] + t * (hits[k + 1][1] - hits[k][1])
                 points.append(loft.surface_point(s, f, side))
-            guides.append((f"{name}_{round(fraction * 100):02d}", Guide(wanted, points)))
+            guides.append((guide_tag(name, fraction), Guide(wanted, points)))
     return guides
 
 

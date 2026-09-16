@@ -5,7 +5,7 @@ import pytest
 from airfoil_converter import export, store, swloft
 from airfoil_converter.store import CurveRecord
 from airfoil_converter.swcom import DocInfo, SolidWorksError
-from airfoil_converter.swloft import LoftPlan, loft_and_export, wing_plan
+from airfoil_converter.swloft import LoftPlan, loft_and_export, loft_in_part, wing_plan
 
 
 def rib(export_id, stem, joined=True):
@@ -106,6 +106,7 @@ class FakeSolidWorks:
         self.suppressed = set()
         self.calls = []
         self.loft_fails = set()
+        self.surface_fails = set()
         self.export_fails = False
         self.sketching = False
 
@@ -122,9 +123,9 @@ class FakeSolidWorks:
         return list(self.lofts)
 
     def insert_loft(self, profiles, guides, name, merge=False, keep_tangency=True,
-                    guide_influence=0):
-        self.calls.append(("loft", name))
-        if name in self.loft_fails:
+                    guide_influence=0, solid=True):
+        self.calls.append(("loft" if solid else "surface", name))
+        if name in (self.loft_fails if solid else self.surface_fails):
             raise SolidWorksError("no loft")
         self.names.append(name)
         self.lofts.append(name)
@@ -169,9 +170,26 @@ def test_a_loft_of_the_same_name_is_replaced(tmp_path):
     assert sw.calls[:2] == [("delete", "wing_loft"), ("loft", "wing_loft")]
 
 
+def test_a_refused_solid_is_made_as_a_surface(tmp_path):
+    sw = FakeSolidWorks()
+    sw.loft_fails = {"wing_inner_loft"}
+    first, second = loft_and_export(sw, PLANS, str(tmp_path))
+    assert first.ok and not first.surface
+    assert second.ok and second.surface
+    assert ("surface", "wing_inner_loft") in sw.calls
+
+
+def test_the_surface_fallback_can_be_turned_off(tmp_path):
+    sw = FakeSolidWorks()
+    sw.loft_fails = {"wing_inner_loft"}
+    _, second = loft_and_export(sw, PLANS, str(tmp_path), surface_fallback=False)
+    assert not second.ok
+    assert ("surface", "wing_inner_loft") not in sw.calls
+
+
 def test_a_failed_loft_does_not_stop_the_others(tmp_path):
     sw = FakeSolidWorks()
-    sw.loft_fails = {"wing_loft"}
+    sw.loft_fails = sw.surface_fails = {"wing_loft"}
     first, second = loft_and_export(sw, PLANS, str(tmp_path))
     assert not first.ok and "no loft" in first.error
     assert second.ok and second.step.endswith("wing_inner_loft.STEP")
@@ -191,3 +209,50 @@ def test_nothing_is_done_while_a_sketch_is_open(tmp_path):
     with pytest.raises(SolidWorksError):
         loft_and_export(sw, PLANS, str(tmp_path))
     assert sw.calls == []
+
+
+def test_a_section_in_two_halves_is_one_profile():
+    wing = inner_wing()
+    for curve in wing.curves:
+        if curve.feature == "wing_inner_tip":
+            curve.role, curve.feature = export.ROLE_SECTION_UPPER, "wing_inner_tip_upper"
+    wing.curves.append(CurveRecord(role=export.ROLE_SECTION_LOWER,
+                                   feature="wing_inner_tip_lower", file="x"))
+    assert wing_plan(wing, part()).profiles == ("wing_inner_root_joined", "wing_inner_tip_joined")
+
+
+# -- lofting in the part being worked on --------------------------------------
+
+
+def test_lofting_in_the_part_makes_each_loft_and_writes_no_step():
+    sw = FakeSolidWorks()
+    results = loft_in_part(sw, PLANS)
+    assert [r.feature for r in results] == ["wing_loft", "wing_inner_loft"]
+    assert not any(c[0] == "step" for c in sw.calls)
+    assert all("lofted through" in r.describe() for r in results)
+
+
+def test_a_loft_already_in_the_part_is_left_alone():
+    """Something may be built on it, and it follows its curves anyway."""
+    sw = FakeSolidWorks(features=["wing_loft"])
+    sw.lofts = ["wing_loft"]
+    first, second = loft_in_part(sw, PLANS)
+    assert first.kept and first.ok
+    assert ("delete", "wing_loft") not in sw.calls
+    assert ("loft", "wing_loft") not in sw.calls
+    assert "already in the part" in first.describe()
+    assert second.feature == "wing_inner_loft"
+
+
+def test_a_surface_made_in_the_part_says_so():
+    sw = FakeSolidWorks()
+    sw.loft_fails = {"wing_loft"}
+    first, _ = loft_in_part(sw, PLANS)
+    assert first.surface and "as a surface" in first.describe()
+
+
+def test_a_loft_that_fails_in_the_part_says_why():
+    sw = FakeSolidWorks()
+    sw.loft_fails = sw.surface_fails = {"wing_loft"}
+    first, _ = loft_in_part(sw, PLANS)
+    assert "could not be lofted: no loft" in first.describe()

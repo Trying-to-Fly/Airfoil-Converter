@@ -40,6 +40,8 @@ class SolidWorks(Protocol):
     def curve_features(self) -> List[FeatureInfo]: ...
     def insert_curve(self, path: str, name: str) -> str: ...
     def insert_composite_curve(self, sources: Sequence[str], name: str) -> str: ...
+    def composite_sources(self, name: str) -> List[str]: ...
+    def rename_feature(self, current: str, new: str) -> str: ...
     def feature_names(self) -> List[str]: ...
     def reload_curve(self, name: str, path: str) -> None: ...
     def set_rebuild_suppressed(self, suppressed: bool) -> None: ...
@@ -48,6 +50,10 @@ class SolidWorks(Protocol):
     def insert_folder(self, names: Sequence[str], folder: str) -> str: ...
     def delete_folder(self, folder: str) -> None: ...
     def editing_sketch(self) -> bool: ...
+
+
+# What a joined curve is renamed to when it is made again.
+OLD_JOIN_SUFFIX = "_old"
 
 
 class LinkError(SolidWorksError):
@@ -80,6 +86,10 @@ class PushResult:
     joined_now: bool = False   # ...and whether this push is what made it
     joined_all: List[str] = field(default_factory=list)   # every join, for a wing's many
     joined_new: int = 0   # ...and how many of them this push made
+    # Joins made again because what they join changed, each with the name the
+    # old one was moved to. A loft that picked one as a profile still has the
+    # old one, and has to be given the new one.
+    remade: List[Tuple[str, str]] = field(default_factory=list)
     arranged: Optional["ArrangeResult"] = None   # what the tree tidy-up did
 
     @property
@@ -98,6 +108,10 @@ class PushResult:
             parts.append(f"{self.joined_new} joined")
         elif self.joined_now:
             parts.append(f"joined as {self.joined}")
+        if self.remade:
+            parts.append(f"{len(self.remade)} joined curve(s) made again — "
+                         "pick them again in any loft (the old ones end in "
+                         f"{OLD_JOIN_SUFFIX})")
         if self.rebuilt:
             parts.append("rebuilt")
         if self.failures:
@@ -268,9 +282,39 @@ def _join(
     if join_as in present:
         # Already there, from an earlier push. Report it anyway, so a record
         # made before it existed still learns the name and stops calling it a
-        # stray.
-        _joined(result, join_as, made=False)
-        return
+        # stray. A section can change how many pieces it comes in — a nose
+        # that has come to a corner is two — so what it joins is checked.
+        try:
+            same = list(sw.composite_sources(join_as)) == list(sources)
+        except SolidWorksError as exc:
+            result.failures.append((join_as, str(exc)))
+            return
+        if same:
+            _joined(result, join_as, made=False)
+            return
+        # What an existing composite joins cannot be changed from here — the
+        # new pieces sit below it in the tree, out of its reach — and deleting
+        # it takes the loft built on it along. So it is renamed out of the way,
+        # still holding up that loft, and made again under its own name.
+        absent = [name for name in sources if name not in curve_names]
+        if absent:
+            result.failures.append((join_as, f"cannot join without {', '.join(absent)}"))
+            return
+        taken = set(present)
+        old = join_as + OLD_JOIN_SUFFIX
+        count = 2
+        while old in taken:
+            old = f"{join_as}{OLD_JOIN_SUFFIX}{count}"
+            count += 1
+        try:
+            kept = sw.rename_feature(join_as, old)
+        except SolidWorksError as exc:
+            result.failures.append((join_as, str(exc)))
+            return
+        if kept == join_as:
+            result.failures.append((join_as, "SolidWorks would not rename the old one out of the way"))
+            return
+        result.remade.append((join_as, kept))
 
     absent = [name for name in sources if name not in curve_names]
     if absent:

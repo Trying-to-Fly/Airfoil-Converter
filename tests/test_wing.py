@@ -54,7 +54,9 @@ def test_a_rib_is_its_exported_outline_without_its_own_offset(straight_wing):
     data = parser.parse_csv(SAMPLE_CSV)
     rib = wing.rib_from_record(record, data)
     plain = export.build_curves(data, dataclasses.replace(spec, offset=""), "rib")
-    assert rib.outline == plain[0].points
+    # Every exported point is kept, with the curve SolidWorks draws filled in between.
+    assert rib.outline[::wing.DRAWN_STEPS] == plain[0].points
+    assert len(rib.outline) == (len(plain[0].points) - 1) * wing.DRAWN_STEPS + 1
 
 
 def test_an_adopted_rib_is_refused(straight_wing):
@@ -285,3 +287,27 @@ def test_a_rib_whose_source_moved_is_reported(straight_wing, tmp_path):
     sidecar.exports[1].source = str(tmp_path / "gone.csv")
     with pytest.raises(InputError, match="not where it was"):
         wing_build.stand_up(straight_wing.wing_spec(), sidecar)
+
+
+def test_the_filled_in_outline_follows_a_natural_spline_by_chord_length():
+    # Points on a circle, unevenly spaced: the spline between them stays on it.
+    angles = [0.0, 0.2, 0.5, 0.6, 1.0, 1.3, 1.5]
+    pts = [(0.0, 50.0 * math.cos(a), 50.0 * math.sin(a)) for a in angles]
+    drawn = wing.as_drawn(pts)
+    assert drawn[::wing.DRAWN_STEPS] == pts
+    # A natural spline runs straight at its ends, so only the inside is held to the circle.
+    inside = drawn[2 * wing.DRAWN_STEPS:-2 * wing.DRAWN_STEPS]
+    worst = max(abs(math.hypot(p[1], p[2]) - 50.0) for p in inside)
+    assert worst < 0.05
+    straight = max(abs(math.hypot((a[1] + b[1]) / 2, (a[2] + b[2]) / 2) - 50.0)
+                   for a, b in zip(pts[2:-2], pts[3:-2]))
+    assert worst < straight / 5
+
+
+def test_guide_tags_name_the_surface_and_the_per_cent():
+    assert wing.guide_tag("upper", 0.05) == "upper_05"
+    assert wing.guide_tag("lower", 0.75) == "lower_75"
+    assert wing.guide_tag("upper", 0.035) == "upper_3p5"
+    assert wing.guide_tag("lower", 0.075) == "lower_7p5"
+    tags = [wing.guide_tag("upper", f) for f in wing.SURFACE_GUIDES]
+    assert len(set(tags)) == len(tags)

@@ -9,6 +9,7 @@ thread of its own.
 
 from __future__ import annotations
 
+import math
 import os
 from dataclasses import dataclass
 from typing import Callable, List, Optional, Sequence, Tuple
@@ -17,7 +18,9 @@ from . import export, parser, wing, wing_offset, writer
 from .export import (
     ROLE_SECTION,
     ROLE_SECTION_JOINED,
+    ROLE_SECTION_LOWER,
     ROLE_SECTION_TE,
+    ROLE_SECTION_UPPER,
     ROLE_WING_LE,
     ROLE_WING_TE,
     ROLE_WING_TE_LOWER,
@@ -28,10 +31,13 @@ from .export import (
     wing_feature_name,
 )
 from . import geometry
-from .geometry import GeometryError, Vec3
+from .geometry import GeometryError, Point2, Vec3
 from .parser import AirfoilParseError
 
 WING_FOLDER = "Wing Curves"
+# A turn this sharp between two neighbouring points of an offset section is a
+# corner, and the section is exported in two there.
+CORNER_DEG = 30.0
 
 Progress = Callable[[str], None]
 
@@ -67,11 +73,14 @@ class WingBuild:
     @property
     def section_names(self) -> List[str]:
         """The loft's profiles, root to tip: what to pick, in order."""
-        joined = {sources[0]: name for sources, name in self.joins}
+        joined = {}
+        for sources, name in self.joins:
+            for source in sources:
+                joined[source] = name
         return [
             joined.get(curve.feature, curve.feature)
             for curve in self.curves
-            if curve.role == ROLE_SECTION
+            if curve.role in export.SECTION_HEAD_ROLES
         ]
 
     @property
@@ -201,7 +210,7 @@ def build_wing(
         feature = wing_feature_name(stem, role, index, section, tag)
         # A section is thinned already, in its own plane, so that the surface
         # guides can land on its points; thinning it again could move them.
-        if role not in (ROLE_SECTION, ROLE_SECTION_TE):
+        if role not in (ROLE_SECTION, ROLE_SECTION_TE, ROLE_SECTION_UPPER, ROLE_SECTION_LOWER):
             points = geometry.thin_curve(points)
         return Curve(
             role=role, points=points, closed=closed,
@@ -220,6 +229,8 @@ def build_wing(
         # these hold it to the one the wing is meant to have, and the one the
         # offset wing is worked out from.
         loft = model.loft
+        # The outline is the curve SolidWorks draws through the rib's points, to
+        # well under its own tolerance, so a guide may land anywhere along it.
         profiles = [wing.Profile(sec.station, sec.outline, sec.le) for sec in model.sections]
         samples = wing.span_samples(
             loft.start, loft.end, loft.le_guide.stations, loft.te_guide.stations
@@ -245,21 +256,22 @@ def build_wing(
             exported = [(result.sections[0], 0, "root"), (result.sections[-1], 0, "tip")]
         else:
             exported = [(sec, number, "") for number, sec in enumerate(result.sections, start=1)]
+        up = model.sections[0].up or (0.0, 1.0)
         for sec, number, tag in exported:
             s = sec.station.station
+            sources = []
             for role, points, closed in sec.curves:
-                placed = wing_offset.to_3d(model.frame, s, points)
-                kind = ROLE_SECTION_TE if role == export.ROLE_TE else ROLE_SECTION
-                curves.append(named(kind, placed, closed, number, tag))
-            if any(role == export.ROLE_TE for role, _, _ in sec.curves):
+                if role == export.ROLE_TE:
+                    pieces = [(ROLE_SECTION_TE, points, closed)]
+                else:
+                    pieces = split_at_corner(points, closed, up)
+                for kind, piece, shut in pieces:
+                    placed = wing_offset.to_3d(model.frame, s, piece)
+                    curves.append(named(kind, placed, shut, number, tag))
+                    sources.append(wing_feature_name(stem, kind, index, number, tag))
+            if len(sources) > 1:
                 joins.append(
-                    (
-                        (
-                            wing_feature_name(stem, ROLE_SECTION, index, number, tag),
-                            wing_feature_name(stem, ROLE_SECTION_TE, index, number, tag),
-                        ),
-                        wing_feature_name(stem, ROLE_SECTION_JOINED, index, number, tag),
-                    )
+                    (tuple(sources), wing_feature_name(stem, ROLE_SECTION_JOINED, index, number, tag))
                 )
         curves.append(named(ROLE_WING_LE, result.le.to_3d(model.frame), False))
         if result.te_corners is not None:
@@ -284,6 +296,44 @@ def build_wing(
             "Give the wing another name."
         )
     return WingBuild(curves=curves, joins=joins, model=model, offset=result)
+
+
+def split_at_corner(
+    points: Sequence[Point2], closed: bool, up: Point2
+) -> List[Tuple[str, List[Point2], bool]]:
+    """A section's outline as the curves to export: whole, or in two at a corner.
+
+    SolidWorks draws one smooth spline through a curve's points, and round a
+    corner that spline swings wide, or loops and will not loft at all. An
+    inward offset deeper than the airfoil's nose radius has just such a corner
+    at its nose. There the outline is cut in two, upper and lower, each keeping
+    the corner as an end.
+    """
+    pts = list(points)
+    sharpest, at = 0.0, -1
+    for i in range(1, len(pts) - 1):
+        turn = _turn(pts[i - 1], pts[i], pts[i + 1])
+        if turn > sharpest:
+            sharpest, at = turn, i
+    if sharpest < CORNER_DEG:
+        return [(ROLE_SECTION, pts, closed)]
+    first, second = pts[: at + 1], pts[at:]
+    height = lambda piece: sum(p[0] * up[0] + p[1] * up[1] for p in piece) / len(piece)
+    # Kept in the outline's own order, so the pieces and the trailing-edge line
+    # join end to end: a composite given them out of order will not loft.
+    if height(first) >= height(second):
+        return [(ROLE_SECTION_UPPER, first, False), (ROLE_SECTION_LOWER, second, False)]
+    return [(ROLE_SECTION_LOWER, first, False), (ROLE_SECTION_UPPER, second, False)]
+
+
+def _turn(a: Point2, b: Point2, c: Point2) -> float:
+    ux, uy = b[0] - a[0], b[1] - a[1]
+    vx, vy = c[0] - b[0], c[1] - b[1]
+    size = math.hypot(ux, uy) * math.hypot(vx, vy)
+    if size <= 0.0:
+        return 0.0
+    cos = max(-1.0, min(1.0, (ux * vx + uy * vy) / size))
+    return math.degrees(math.acos(cos))
 
 
 def describe(build: WingBuild) -> List[str]:

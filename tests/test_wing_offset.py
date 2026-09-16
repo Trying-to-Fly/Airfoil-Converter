@@ -144,12 +144,21 @@ def test_blunt_ribs_give_blunt_sections_and_joins(tmp_path):
     spec = synthetic.wing_spec(offset="2", profiles=export.PROFILES_ALL)
     build = wing_build.build_wing(spec, synthetic.sidecar(), "w", check=True)
     within(build.offset.report, 2.0, 0.01, 0.01)
-    sections = [c for c in build.curves if c.role == export.ROLE_SECTION]
+    sections = [c for c in build.curves if c.role in export.SECTION_HEAD_ROLES]
     lines = [c for c in build.curves if c.role == export.ROLE_SECTION_TE]
     assert len(sections) == len(lines) == len(build.joins)
     assert all(len(line.points) == 2 for line in lines)
-    assert build.joins[0] == (("w_s01", "w_s01_te"), "w_s01_joined")
+    # SD7037's nose is rounder than 2 mm on a 200 mm chord only just: offset
+    # 2 mm in, it comes to a corner, so each section goes in two halves.
+    sources, name = build.joins[0]
+    assert name == "w_s01_joined"
+    assert sorted(sources) == ["w_s01_lower", "w_s01_te", "w_s01_upper"]
+    assert sources[-1] == "w_s01_te"   # the halves end to end, then the line
+    by_name = {c.feature: c.points for c in build.curves}
+    first, second = by_name[sources[0]], by_name[sources[1]]
+    assert first[-1] == second[0]
     assert build.section_names[0] == "w_s01_joined"
+    assert len(build.section_names) == len(build.joins)
     for line in lines:
         a, b = line.points
         assert math.dist(a, b) == pytest.approx(0.8, abs=1e-6)
@@ -421,12 +430,19 @@ def test_root_and_tip_only_exports_two_profiles_and_surface_guides(hooked_wing, 
     spec = hooked_wing.wing_spec(tmp_path, offset="2", profiles=export.PROFILES_ENDS)
     build = wing_build.build_wing(spec, hooked_wing.sidecar(), "w")
     names = [c.feature for c in build.curves]
-    guides = [f"w_{side}_{pct:02d}" for side in ("upper", "lower") for pct in (round(f * 100) for f in wing.SURFACE_GUIDES)]
-    assert names == ["w_root", "w_tip", "w_le", "w_te"] + guides
-    assert build.section_names == ["w_root", "w_tip"]
+    fractions = [f for f in wing.SURFACE_GUIDES if f >= wing.OFFSET_GUIDES_FROM]
+    guides = ["w_" + wing.guide_tag(side, f) for side in ("upper", "lower") for f in fractions]
+    # A sharp SD7037 offset 2 mm in comes to a corner at its nose, so each end
+    # goes in two halves, joined.
+    ends = [n for n in names if n.startswith(("w_root_", "w_tip_"))]
+    assert sorted(ends) == ["w_root_lower", "w_root_upper", "w_tip_lower", "w_tip_upper"]
+    assert names == ends + ["w_le", "w_te"] + guides
+    assert build.section_names == ["w_root_joined", "w_tip_joined"]
     assert build.station_count == 2
     assert len(build.offset.sections) > 2   # still worked out through all of them
     profiles = {c.feature: c.points for c in build.curves}
+    profiles["w_root"] = profiles["w_root_upper"] + profiles["w_root_lower"]
+    profiles["w_tip"] = profiles["w_tip_upper"] + profiles["w_tip_lower"]
     for curve in build.curves:
         if curve.role != export.ROLE_WING_SURFACE:
             continue
@@ -469,7 +485,8 @@ def test_the_wings_own_guides_land_on_every_rib(hooked_wing, tmp_path):
     from airfoil_converter import parser
 
     data = parser.parse_csv(SAMPLE_CSV)
-    ribs = [export.build_curves(data, hooked_wing.spec(s), "rib")[0].points
+    # Each rib as SolidWorks draws it: the spline through its exported points.
+    ribs = [wing.as_drawn(export.build_curves(data, hooked_wing.spec(s), "rib")[0].points)
             for s in hooked_wing.stations]
     guides = [c for c in build.curves if c.role == export.ROLE_WING_SURFACE]
     assert len(guides) == 2 * len(wing.SURFACE_GUIDES)
@@ -501,3 +518,41 @@ def test_the_thickness_rule_decides_the_shape_between_ribs(thickness, tmp_path):
         assert mid == pytest.approx(straight_across, rel=1e-3)
     else:
         assert mid == pytest.approx(in_proportion, rel=1e-3)
+
+
+# -- a corner in a section ----------------------------------------------------
+
+
+def test_a_section_with_a_corner_is_exported_in_two_meeting_there():
+    # A nose come to a point, upper surface first.
+    upper = [(100.0 - x, 5.0 * (1 - (1 - x / 100.0) ** 2)) for x in range(0, 101, 5)]
+    lower = [(float(x), -3.0 * (1 - (1 - x / 100.0) ** 2)) for x in range(5, 101, 5)]
+    pieces = wing_build.split_at_corner(upper + lower, False, (0.0, 1.0))
+    assert [role for role, _, _ in pieces] == [export.ROLE_SECTION_UPPER, export.ROLE_SECTION_LOWER]
+    (_, top, _), (_, bottom, _) = pieces
+    assert top == upper and bottom == [upper[-1]] + lower
+
+
+def test_the_halves_are_named_by_which_way_is_up():
+    upper = [(100.0 - x, 5.0 * (1 - (1 - x / 100.0) ** 2)) for x in range(0, 101, 5)]
+    lower = [(float(x), -3.0 * (1 - (1 - x / 100.0) ** 2)) for x in range(5, 101, 5)]
+    pieces = wing_build.split_at_corner(upper + lower, False, (0.0, -1.0))
+    # Still in the outline's order, so they join end to end.
+    assert [role for role, _, _ in pieces] == [export.ROLE_SECTION_LOWER, export.ROLE_SECTION_UPPER]
+    assert pieces[1][1] == [upper[-1]] + lower
+
+
+def test_a_smooth_section_stays_whole():
+    loop = [(50.0 + 50.0 * math.cos(math.radians(a)), 10.0 * math.sin(math.radians(a)))
+            for a in range(0, 361, 5)]
+    assert wing_build.split_at_corner(loop, True, (0.0, 1.0)) == [(export.ROLE_SECTION, loop, True)]
+
+
+def test_an_outward_offset_has_no_corner_to_split(tmp_path):
+    synthetic = SyntheticWing([0.0, 300.0], lambda s: 0.0, lambda s: -200.0,
+                              te_mode=export.TE_LINE, te_thickness="0.8")
+    spec = synthetic.wing_spec(offset="2", offset_dir=export.OFFSET_OUTWARD)
+    build = wing_build.build_wing(spec, synthetic.sidecar(), "w")
+    roles = {c.role for c in build.curves}
+    assert export.ROLE_SECTION in roles and export.ROLE_SECTION_UPPER not in roles
+    assert build.joins[0] == (("w_root", "w_root_te"), "w_root_joined")

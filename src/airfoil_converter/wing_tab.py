@@ -23,9 +23,9 @@ import threading
 import tkinter as tk
 import uuid
 from tkinter import filedialog, messagebox, ttk
-from typing import Any, Callable, Dict, List, Optional
+from typing import Any, Callable, Dict, List, Optional, Sequence
 
-from . import store, swcom, swlink, theme, ui_text, wing, wing_build
+from . import store, swcom, swlink, swloft, theme, ui_text, wing, wing_build
 from .export import (
     OFFSET_DIRECTIONS,
     OFFSET_INWARD,
@@ -170,6 +170,7 @@ class WingTab(ttk.Frame):
         self.offset_dir = tk.StringVar(value=OFFSET_INWARD)
         self.profiles = tk.StringVar(value=PROFILES_ENDS)
         self.thickness = tk.StringVar(value=THICKNESS_BLENDED)
+        self.loft_after = tk.BooleanVar(value=False)
         self.ribs_text = tk.StringVar(value="")
         self.result_text = tk.StringVar(value="Check works the wing out without exporting it.")
         self.status = tk.StringVar(value="Export the ribs on the Airfoil tab, then pick them here.")
@@ -183,6 +184,8 @@ class WingTab(ttk.Frame):
         self._job_context: Optional[Dict[str, Any]] = None
         self._pending_push: Optional[Any] = None
         self._push_context: Optional[Dict[str, Any]] = None
+        self._pending_loft: Optional[Any] = None
+        self._after_export = ""       # what the export said, shown with the loft's result
 
         self._build()
         self.refresh()
@@ -346,8 +349,12 @@ class WingTab(ttk.Frame):
         self.status_label = ttk.Label(footer, textvariable=self.status, wraplength=2 * wrap,
                                       justify="left")
         self.status_label.grid(row=0, column=0, sticky="w")
+        ttk.Checkbutton(footer, text="Loft in SolidWorks after export",
+                        variable=self.loft_after).grid(row=0, column=1, sticky="e", padx=(8, 8))
+        self.loft_button = ttk.Button(footer, text="Loft", command=self.loft)
+        self.loft_button.grid(row=0, column=2, sticky="e", padx=(0, 6))
         self.export_button = ttk.Button(footer, text="Export", command=self.export)
-        self.export_button.grid(row=0, column=1, sticky="e")
+        self.export_button.grid(row=0, column=3, sticky="e")
         self._sync_edges()
 
     # ---------------------------------------------------------------- state
@@ -367,7 +374,7 @@ class WingTab(ttk.Frame):
 
     @property
     def pushing(self) -> bool:
-        return self._pending_push is not None
+        return self._pending_push is not None or self._pending_loft is not None
 
     def refresh(self) -> None:
         """Re-read the ribs and wings the part's record holds."""
@@ -511,9 +518,10 @@ class WingTab(ttk.Frame):
         self._job_kind = kind
         self._job_context = context
         self._pending_job = _Job(work)
-        self.export_button.configure(state="disabled")
-        self.check_button.configure(state="disabled")
-        self._set_status("Working the wing out...")
+        for button in (self.export_button, self.check_button, self.loft_button):
+            button.configure(state="disabled")
+        self._set_status("Working the wing out..." if kind != "loft"
+                         else "Reading the wing's loft off its record...")
 
     def _prepare(self):
         """Everything an export or a check needs, read off the form now."""
@@ -577,20 +585,81 @@ class WingTab(ttk.Frame):
             spec=spec, folder=folder, sidecar_path=self.host._sidecar_path,
         ))
 
+    def loft(self) -> None:
+        """Loft the wing being edited in the open part, through the curves it exported."""
+        if self._pending_job is not None or self.pushing:
+            return
+        try:
+            if self.host.busy():
+                raise InputError("SolidWorks is still working on the last export.")
+            if not self.host._can_push():
+                raise InputError("SolidWorks is not connected. " + self.host._offline_reason())
+            sidecar = self._sidecar()
+            record = sidecar.find_wing(self._editing) if (sidecar and self._editing) else None
+            if record is None or not any(c.last_pushed for c in record.live_curves()):
+                raise InputError("Export this wing to SolidWorks first; the loft is built "
+                                 "from its curves.")
+        except InputError as exc:
+            self._set_status(str(exc), ok=False)
+            return
+        self._start_loft(record)
+
+    def _start_loft(self, record) -> None:
+        snapshot = copy.deepcopy(self._sidecar())
+        wing_id = record.export_id
+
+        def work(say):
+            say("Reading the wing's loft off its record...")
+            return swloft.plan_for_wing(snapshot.find_wing(wing_id), snapshot)
+
+        self._start("loft", work, {"sidecar_path": self.host._sidecar_path})
+
+    def _send_loft(self, plan: "swloft.LoftPlan", context: Dict[str, Any]) -> None:
+        if self.host._sidecar_path != context["sidecar_path"] or not self.host._can_push():
+            self._idle()
+            self._set_status("The part in SolidWorks changed; nothing was lofted.", ok=False)
+            return
+        self._pending_loft = self.host._worker.submit(
+            lambda session: swloft.loft_in_part(session, [plan])
+        )
+        self._set_status(f"Lofting {plan.name} through {len(plan.profiles)} profiles and "
+                         f"{len(plan.guides)} guides in SolidWorks...")
+
+    def _collect_loft(self) -> None:
+        if self._pending_loft is None:
+            return
+        answer = self._pending_loft.poll()
+        if answer is None:
+            return
+        results, error = answer
+        self._pending_loft = None
+        self._idle()
+        if error is not None:
+            self._set_status(f"SolidWorks could not loft the wing: {error}", ok=False)
+            return
+        self.host._refresh_panel()
+        before = self._after_export
+        self._after_export = ""
+        text = " ".join(r.describe() for r in results)
+        self._set_status((before + " " if before else "") + text,
+                         ok=all(r.ok for r in results))
+
     def _tick(self) -> None:
         try:
             self._collect_job()
             self._collect_push()
+            self._collect_loft()
         except Exception as exc:  # noqa: BLE001 - never kill the timer
             self._set_status(f"The Wing tab hit a problem — {type(exc).__name__}: {exc}", ok=False)
             self._pending_job = None
             self._pending_push = None
+            self._pending_loft = None
             self._idle()
         self.after(self.POLL_MS, self._tick)
 
     def _idle(self) -> None:
-        self.export_button.configure(state="normal")
-        self.check_button.configure(state="normal")
+        for button in (self.export_button, self.check_button, self.loft_button):
+            button.configure(state="normal")
 
     def _collect_job(self) -> None:
         job = self._pending_job
@@ -611,6 +680,9 @@ class WingTab(ttk.Frame):
             else:
                 self._set_status(f"The wing could not be worked out: "
                                  f"{type(error).__name__}: {error}", ok=False)
+            return
+        if kind == "loft":
+            self._send_loft(job.result, context)
             return
         build: wing_build.WingBuild = job.result
         self.result_text.set("\n".join(wing_build.describe(build)))
@@ -720,7 +792,8 @@ class WingTab(ttk.Frame):
             return
         build = context["build"]
         self._remember(context["record"], build, context, result.hashes,
-                       pushed=True, joined=result.joined_all)
+                       pushed=True, joined=result.joined_all,
+                       moved_aside=[old for _, old in result.remade])
         self.host._refresh_panel()
 
         sections = build.section_names
@@ -736,10 +809,16 @@ class WingTab(ttk.Frame):
         if result.failures:
             detail = "; ".join(f"{name}: {why}" for name, why in result.failures[:5])
             self._set_status(f"{message} Failed — {detail}", ok=False)
-        else:
-            self._set_status(message)
+            return
+        self._set_status(message)
+        if self.loft_after.get():
+            record = self._sidecar().find_wing(self._editing) if self._sidecar() else None
+            if record is not None:
+                self._after_export = f"{result.part}: {result.summary()}."
+                self._start_loft(record)
 
-    def _remember(self, record, build, context, hashes, pushed: bool, joined: List[str]) -> None:
+    def _remember(self, record, build, context, hashes, pushed: bool, joined: List[str],
+                  moved_aside: Sequence[str] = ()) -> None:
         sidecar = self._sidecar()
         if sidecar is None:
             return
@@ -763,6 +842,13 @@ class WingTab(ttk.Frame):
                     role=ROLE_SECTION_JOINED, feature=name, file="",
                     last_written=stamp, last_pushed=stamp,
                 ))
+        # A join made again leaves the old one renamed, still under any loft
+        # built on it; it stays the wing's, retired.
+        for name in moved_aside:
+            fresh.curves.append(store.CurveRecord(
+                role=ROLE_SECTION_JOINED, feature=name, file="",
+                last_written=stamp, last_pushed=stamp, retired=True,
+            ))
         if record is not None:
             fresh.created = record.created or stamp
             known = {c.feature for c in fresh.curves}

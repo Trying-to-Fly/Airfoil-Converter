@@ -31,8 +31,10 @@ from . import export, geometry as g
 from .geometry import GeometryError, Point2, Vec3
 from .wing import (
     CLOSED,
+    OFFSET_GUIDES_FROM,
     OPEN,
     STEEP_SWEEP,
+    SURFACE_GUIDES,
     Guide,
     Loft,
     Section,
@@ -991,7 +993,8 @@ def surface_guides(
     ]
     samples = list(wing_.le_samples) + [sec.station.station for sec in wing_.sections]
     samples = span_samples(first.station.station, last.station.station, samples)
-    return wing_surface_guides(inner, profiles, samples, up)
+    fractions = [f for f in SURFACE_GUIDES if f >= OFFSET_GUIDES_FROM]
+    return wing_surface_guides(inner, profiles, samples, up, fractions)
 
 
 def measure_wall(

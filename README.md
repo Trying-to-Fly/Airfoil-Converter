@@ -451,10 +451,20 @@ middle 3 mm thinner than the airfoil scaled would be. An offset worked out for
 one shape and lofted in the other runs into its own skin.
 
 So the app decides the shape, and holds both lofts to it with **surface
-guides**: curves along the upper and lower surface at 2, 5, 15, 30, 50, 75 and
-90 % of the chord, named `wing_upper_02` … `wing_lower_90`. With only 5 to 75 %
-a lofted wing strayed up to 0.3 mm near the nose and the trailing edge; the two
-extra guides halved that. Each passes through a point
+guides**: curves along the upper and lower surface at 1, 2, 3.5, 5, 7.5, 10,
+15, 20, 25, 30, 40, 50, 60, 75, 90 and 95 % of the chord, named
+`wing_upper_01`, `wing_upper_3p5` … `wing_lower_95`. SolidWorks sags between
+guides — up to 0.15 mm with them 10 to 25 % apart — and this spacing holds a
+real loft to 0.05 mm over 99 % of the skin. An offset wing's guides start at
+2 %: nearer an inward offset's nose SolidWorks will not loft through them.
+
+A rib is modelled as SolidWorks draws it: a Curve Through XYZ Points is a
+natural cubic spline through the points, spaced by the distance between them,
+and straight lines between the same points cut up to 0.18 mm inside it at the
+nose. An offset wing's profile that comes to a corner — an inward offset deeper
+than the nose radius — is written in two halves meeting there
+(`wing_inner_root_upper`, `…_lower`), so the spline keeps the corner; the
+joined curve is still the one to pick. Each passes through a point
 of every profile the loft is given, so the loft accepts it. **Thickness** says
 which shape they hold:
 

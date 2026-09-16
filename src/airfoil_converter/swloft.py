@@ -26,8 +26,8 @@ from . import export, store
 from .export import (
     ROLE_AIRFOIL,
     ROLE_JOINED,
-    ROLE_SECTION,
     ROLE_SECTION_JOINED,
+    ROLE_SECTION_UPPER,
     ROLE_WING_LE,
     ROLE_WING_SURFACE,
     ROLE_WING_TE,
@@ -60,7 +60,7 @@ class SolidWorks(Protocol):
     def features_of_type(self, *type_names: str) -> List[str]: ...
     def insert_loft(self, profiles: Sequence[str], guides: Sequence[str], name: str,
                     merge: bool = False, keep_tangency: bool = True,
-                    guide_influence: int = GUIDE_TO_NEXT_GUIDE) -> str: ...
+                    guide_influence: int = GUIDE_TO_NEXT_GUIDE, solid: bool = True) -> str: ...
     def delete_feature(self, name: str) -> None: ...
     def set_suppressed(self, name: str, suppressed: bool) -> None: ...
     def rebuild(self) -> bool: ...
@@ -84,6 +84,22 @@ class LoftResult:
     feature: str = ""
     step: str = ""
     error: str = ""
+    # Set when SolidWorks refused the solid and a surface loft was made instead.
+    surface: bool = False
+    # Set when the loft was there already and was left as it is.
+    kept: bool = False
+
+    def describe(self) -> str:
+        name = self.plan.name
+        if self.error:
+            return f"{name} could not be lofted: {self.error}"
+        if self.kept:
+            return (f"{name} is already in the part and follows the curves. Delete it "
+                    "to loft it again.")
+        if self.surface:
+            return (f"{name} lofted as a surface: SolidWorks would not make it a solid "
+                    f"({len(self.plan.guides)} guides).")
+        return f"{name} lofted through {len(self.plan.profiles)} profiles and {len(self.plan.guides)} guides."
 
     @property
     def ok(self) -> bool:
@@ -122,8 +138,11 @@ def wing_plan(
     if spec.offset_mm():
         joined = {c.feature for c in _live(wing.curves, ROLE_SECTION_JOINED)}
         profiles = []
-        for curve in _live(wing.curves, ROLE_SECTION):
-            wanted = curve.feature + "_joined"
+        for curve in _live(wing.curves, *export.SECTION_HEAD_ROLES):
+            base = curve.feature
+            if curve.role == ROLE_SECTION_UPPER:
+                base = base[: -len("_upper")]
+            wanted = base + "_joined"
             profiles.append(wanted if wanted in joined else curve.feature)
     else:
         profiles = []
@@ -145,19 +164,7 @@ def wing_plan(
     )
 
 
-def loft_and_export(
-    sw: SolidWorks,
-    plans: Sequence[LoftPlan],
-    step_folder: str,
-    replace: bool = True,
-) -> List[LoftResult]:
-    """Build each loft, then write each one alone to ``<step_folder>/<name>.STEP``.
-
-    A loft already in the part under a plan's name is deleted first when
-    ``replace`` is set, so a run can be repeated. While one loft is written,
-    every other loft in the part is suppressed, and all of them are put back
-    afterwards whatever happens.
-    """
+def _ready(sw: SolidWorks) -> None:
     if sw.active_document() is None:
         raise SolidWorksError("No document is open in SolidWorks.")
     if sw.editing_sketch():
@@ -165,7 +172,11 @@ def loft_and_export(
             "A sketch is open for editing in SolidWorks. Close it first: selecting "
             "from outside while one is open can crash SolidWorks."
         )
-    os.makedirs(step_folder, exist_ok=True)
+
+
+def _make_lofts(
+    sw: SolidWorks, plans: Sequence[LoftPlan], replace: bool, surface_fallback: bool
+) -> List[LoftResult]:
     results = [LoftResult(plan) for plan in plans]
     present = set(sw.feature_names())
     for result in results:
@@ -173,14 +184,66 @@ def loft_and_export(
         try:
             if plan.name in present:
                 if not replace:
-                    raise SolidWorksError(f"{plan.name} is already in the part.")
+                    # Built on the wing's own curves, it follows them whenever
+                    # they are reloaded; there is nothing to do.
+                    result.feature = plan.name
+                    result.kept = True
+                    continue
                 sw.delete_feature(plan.name)
-            result.feature = sw.insert_loft(
-                plan.profiles, plan.guides, plan.name,
-                keep_tangency=plan.keep_tangency, guide_influence=plan.guide_influence,
-            )
+            try:
+                result.feature = sw.insert_loft(
+                    plan.profiles, plan.guides, plan.name,
+                    keep_tangency=plan.keep_tangency, guide_influence=plan.guide_influence,
+                )
+            except SolidWorksError:
+                if not surface_fallback:
+                    raise
+                # SolidWorks turns down some solids whose surface it makes
+                # without complaint.
+                result.feature = sw.insert_loft(
+                    plan.profiles, plan.guides, plan.name,
+                    keep_tangency=plan.keep_tangency, solid=False,
+                )
+                result.surface = True
         except SolidWorksError as exc:
             result.error = str(exc)
+    return results
+
+
+def loft_in_part(
+    sw: SolidWorks, plans: Sequence[LoftPlan], surface_fallback: bool = True
+) -> List[LoftResult]:
+    """Build each loft in the open part, leaving any that is there already.
+
+    A loft already there is never deleted: something may be built on it, and
+    it follows the curves it was made from anyway.
+    """
+    _ready(sw)
+    results = _make_lofts(sw, plans, replace=False, surface_fallback=surface_fallback)
+    if any(r.feature and not r.kept for r in results):
+        sw.rebuild()
+    return results
+
+
+def loft_and_export(
+    sw: SolidWorks,
+    plans: Sequence[LoftPlan],
+    step_folder: str,
+    replace: bool = True,
+    surface_fallback: bool = True,
+) -> List[LoftResult]:
+    """Build each loft, then write each one alone to ``<step_folder>/<name>.STEP``.
+
+    A loft already in the part under a plan's name is deleted first when
+    ``replace`` is set, so a run can be repeated — which is for a copy of the
+    part, never the one being worked on. While one loft is written, every
+    other loft in the part is suppressed, and all of them are put back
+    afterwards whatever happens. A solid SolidWorks refuses is made as a
+    surface instead, unless ``surface_fallback`` is off.
+    """
+    _ready(sw)
+    os.makedirs(step_folder, exist_ok=True)
+    results = _make_lofts(sw, plans, replace, surface_fallback)
 
     bodies = sw.features_of_type(*BODY_FEATURE_TYPES)
     for result in results:
@@ -211,25 +274,25 @@ def loft_and_export(
     return results
 
 
-def plans_for_part(sidecar: store.Sidecar, stems: Sequence[str] = ()) -> List[LoftPlan]:
-    """A loft for every wing recorded for the part, or for the ones named."""
+def plan_for_wing(wing: store.WingRecord, sidecar: store.Sidecar) -> LoftPlan:
+    """The loft a wing record describes, its ribs put in order root to tip."""
     from . import wing_build  # reading the ribs back is slow; only here is it needed
 
-    plans = []
-    for wing in sidecar.wings:
-        if stems and wing.stem not in stems:
-            continue
-        order = None
-        if not wing.spec.offset_mm():
-            model = wing_build.stand_up(wing.spec, sidecar)
-            by_name = {}
-            for rib_id in wing.spec.ribs:
-                record = sidecar.find(rib_id)
-                if record is not None:
-                    by_name[export.folder_name(record.stem, record.name_index)] = rib_id
-            order = [by_name[name] for name in model.rib_names if name in by_name] or None
-        plans.append(wing_plan(wing, sidecar, order))
-    return plans
+    order = None
+    if not wing.spec.offset_mm():
+        model = wing_build.stand_up(wing.spec, sidecar)
+        by_name = {}
+        for rib_id in wing.spec.ribs:
+            record = sidecar.find(rib_id)
+            if record is not None:
+                by_name[export.folder_name(record.stem, record.name_index)] = rib_id
+        order = [by_name[name] for name in model.rib_names if name in by_name] or None
+    return wing_plan(wing, sidecar, order)
+
+
+def plans_for_part(sidecar: store.Sidecar, stems: Sequence[str] = ()) -> List[LoftPlan]:
+    """A loft for every wing recorded for the part, or for the ones named."""
+    return [plan_for_wing(w, sidecar) for w in sidecar.wings if not stems or w.stem in stems]
 
 
 def main(argv: Optional[Sequence[str]] = None) -> int:
@@ -278,7 +341,8 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         print(f"   profiles: {', '.join(plan.profiles)}")
         print(f"   guides:   {', '.join(plan.guides)}")
         if result.ok:
-            print(f"   -> {result.step}")
+            made = " (as a surface: SolidWorks refused the solid)" if result.surface else ""
+            print(f"   -> {result.step}{made}")
         else:
             failed += 1
             print(f"   FAILED: {result.error}")
