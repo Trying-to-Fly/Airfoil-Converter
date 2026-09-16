@@ -421,7 +421,7 @@ def test_root_and_tip_only_exports_two_profiles_and_surface_guides(hooked_wing, 
     spec = hooked_wing.wing_spec(tmp_path, offset="2", profiles=export.PROFILES_ENDS)
     build = wing_build.build_wing(spec, hooked_wing.sidecar(), "w")
     names = [c.feature for c in build.curves]
-    guides = [f"w_{side}_{pct:02d}" for side in ("upper", "lower") for pct in (5, 15, 30, 50, 75)]
+    guides = [f"w_{side}_{pct:02d}" for side in ("upper", "lower") for pct in (round(f * 100) for f in wing.SURFACE_GUIDES)]
     assert names == ["w_root", "w_tip", "w_le", "w_te"] + guides
     assert build.section_names == ["w_root", "w_tip"]
     assert build.station_count == 2
@@ -472,7 +472,7 @@ def test_the_wings_own_guides_land_on_every_rib(hooked_wing, tmp_path):
     ribs = [export.build_curves(data, hooked_wing.spec(s), "rib")[0].points
             for s in hooked_wing.stations]
     guides = [c for c in build.curves if c.role == export.ROLE_WING_SURFACE]
-    assert len(guides) == 10
+    assert len(guides) == 2 * len(wing.SURFACE_GUIDES)
     for guide in guides:
         for rib in ribs:
             assert min(math.dist(p, q) for p in guide.points for q in rib) < 1e-9, guide.feature

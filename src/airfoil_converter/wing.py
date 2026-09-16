@@ -48,7 +48,7 @@ STEEP_SWEEP = 20.0
 # Points along each surface, nose to tail, in a resampled outline.
 SAMPLES = 80
 # Where along the chord the guides for a root-and-tip loft run, on each surface.
-SURFACE_GUIDES = (0.05, 0.15, 0.30, 0.50, 0.75)
+SURFACE_GUIDES = (0.02, 0.05, 0.15, 0.30, 0.50, 0.75, 0.90)
 # Between ribs the surface guides are sampled at least this often.
 SURFACE_STEP = 5.0
 # A closed end grown outward is rounded by sections at these angles.

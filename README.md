@@ -451,8 +451,10 @@ middle 3 mm thinner than the airfoil scaled would be. An offset worked out for
 one shape and lofted in the other runs into its own skin.
 
 So the app decides the shape, and holds both lofts to it with **surface
-guides**: curves along the upper and lower surface at 5, 15, 30, 50 and 75 % of
-the chord, named `wing_upper_05` … `wing_lower_75`. Each passes through a point
+guides**: curves along the upper and lower surface at 2, 5, 15, 30, 50, 75 and
+90 % of the chord, named `wing_upper_02` … `wing_lower_90`. With only 5 to 75 %
+a lofted wing strayed up to 0.3 mm near the nose and the trailing edge; the two
+extra guides halved that. Each passes through a point
 of every profile the loft is given, so the loft accepts it. **Thickness** says
 which shape they hold:
 
