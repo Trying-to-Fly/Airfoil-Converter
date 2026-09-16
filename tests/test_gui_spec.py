@@ -129,3 +129,49 @@ def test_an_export_that_makes_fewer_curves_retires_the_rest():
     kept = [Curve(role="section", points=[(0, 0, 0)], closed=True, feature="w_s01")]
     assert wing_tab.retire_missing(record, kept, []) == ["w_s02", "w_s02_joined"]
     assert [c.retired for c in record.curves] == [False, True, True]
+
+
+# -- the poll ------------------------------------------------------------------
+
+
+class _PolledSession:
+    """Counts what the once-a-second poll asks SolidWorks."""
+
+    pid = 7
+    label = "SolidWorks 2026"
+    revision = (34, 0, 0)
+
+    def __init__(self):
+        self.walks = 0
+        self.keys = 0
+
+    def active_document(self):
+        from airfoil_converter.swcom import DocInfo
+        return DocInfo(title="Wing.SLDPRT", path=r"C:\p\Wing.SLDPRT", doc_type=1)
+
+    def change_key(self):
+        self.keys += 1
+        return (120, 1292)
+
+    def features(self):
+        self.walks += 1
+        return []
+
+    def curve_features(self):
+        self.walks += 1
+        return []
+
+
+def test_the_second_by_second_poll_never_walks_the_tree():
+    """A walk took 650 ms of SolidWorks' drawing thread; orbiting stuttered."""
+    session = _PolledSession()
+    key = gui._read_key(session)
+    assert key == (7, "Wing.SLDPRT", r"C:\p\Wing.SLDPRT", (120, 1292))
+    assert session.walks == 0
+
+
+def test_a_full_read_walks_the_tree_once():
+    session = _PolledSession()
+    snapshot = gui._read_snapshot(session)
+    assert session.walks == 1
+    assert snapshot["key"] == gui._read_key(_PolledSession())

@@ -132,7 +132,7 @@ def _read_key(session) -> tuple:
         session.pid,
         document.title if document else "",
         document.path if document else "",
-        len(session.features()) if document and document.is_part else 0,
+        session.change_key() if document and document.is_part else (0, 0),
     )
 
 
@@ -143,12 +143,7 @@ def _read_snapshot(session) -> dict:
     if document is not None and document.is_part:
         curves = [f.name for f in session.curve_features()]
     return {
-        "key": (
-            session.pid,
-            document.title if document else "",
-            document.path if document else "",
-            len(session.features()) if document and document.is_part else 0,
-        ),
+        "key": _read_key(session),
         "version": session.label,
         "newer_than_tested": swcom.is_newer_than_tested(session.revision),
         "title": document.title if document else "",
@@ -1170,7 +1165,12 @@ class ConverterApp(ttk.Frame):
     # ------------------------------------------------------ the live link
 
     POLL_MS = 1000
-    SLOW_EVERY = 5  # a full walk this many quiet ticks apart, to catch renames
+    # A full read of the part's curves this many quiet ticks apart, to catch a
+    # rename, which moves neither the feature count nor the update stamp. It
+    # costs SolidWorks a few hundred milliseconds of its drawing thread, so it
+    # is only made while this window has the focus — and coming back to the
+    # window reads the part afresh anyway.
+    SLOW_EVERY = 5
 
     # A pick is a click being waited for, not a panel being kept fresh, so it
     # polls fast — and only while it is armed, which is why the panel's own
@@ -1212,7 +1212,7 @@ class ConverterApp(ttk.Frame):
                     self._ask_for_pick()
                 else:
                     self._quiet_ticks += 1
-                    if self._quiet_ticks >= self.SLOW_EVERY:
+                    if self._quiet_ticks >= self.SLOW_EVERY and self._window_has_focus():
                         self._quiet_ticks = 0
                         self._ask_for_snapshot()
                     else:
@@ -1221,6 +1221,13 @@ class ConverterApp(ttk.Frame):
             self._tick_trouble(exc)
 
         self.after(self.PICK_MS if self._pick is not None else self.POLL_MS, self._tick)
+
+    def _window_has_focus(self) -> bool:
+        try:
+            return self.focus_displayof() is not None
+        except (KeyError, tk.TclError):
+            # A combobox's drop-down list is not a widget tkinter knows by name.
+            return True
 
     def _tick_trouble(self, exc: BaseException) -> None:
         reason = f"{type(exc).__name__}: {exc}"

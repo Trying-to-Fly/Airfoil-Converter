@@ -552,9 +552,40 @@ class Session:
             raise SolidWorksError("No document is open in SolidWorks.")
         return doc
 
+    def change_key(self) -> Tuple[int, int]:
+        """Two numbers that move when the active part does: its feature count and
+        its update stamp.
+
+        Asked every second, so it has to be cheap: two calls, under a
+        millisecond. Walking the tree instead took 650 ms of SolidWorks' own
+        thread on a part of 120 features — every call is served there, between
+        frames — and orbiting the model stuttered while the app was open. The
+        stamp stands still while the model is only looked at.
+        """
+        doc = self._active()
+        return int(call(doc, "GetFeatureCount")), int(call(doc, "GetUpdateStamp"))
+
     def features(self) -> List[FeatureInfo]:
-        """Every feature in the active document, subfeatures included."""
-        return self._walk(call(self._active(), "FirstFeature"))
+        """Every feature in the active document, subfeatures included.
+
+        Listed in one call, then asked two questions each; walking the tree
+        asks four, and takes nearly twice as long.
+        """
+        doc = self._active()
+        try:
+            listed = call(call(doc, "FeatureManager"), "GetFeatures", False)
+        except Exception:  # noqa: BLE001 - the walk below always works
+            listed = None
+        if not listed:
+            return self._walk(call(doc, "FirstFeature"))
+        out: List[FeatureInfo] = []
+        for feature in listed:
+            try:
+                type_name = str(call(feature, "GetTypeName2"))
+            except Exception:  # noqa: BLE001 - a feature that will not describe itself
+                type_name = "?"
+            out.append(FeatureInfo(name=str(call(feature, "Name")), type_name=type_name))
+        return out
 
     def curve_features(self) -> List[FeatureInfo]:
         return [f for f in self.features() if f.is_curve]
