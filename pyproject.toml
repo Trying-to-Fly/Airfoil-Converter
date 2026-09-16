@@ -28,3 +28,6 @@ where = ["src"]
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 pythonpath = ["src"]
+markers = [
+    "slow: offsets a whole hooked-tip wing; seconds each (deselect with -m 'not slow')",
+]

@@ -23,9 +23,12 @@ import uuid
 from dataclasses import asdict, dataclass, field
 from typing import Any, Collection, Dict, List, Optional, Sequence, Tuple
 
-from .export import ROLE_JOINED, ROLES, Curve, ExportSpec
+from .export import ROLE_JOINED, ROLES, Curve, ExportSpec, WingSpec
 
-SCHEMA_VERSION = 1
+# A sidecar with wings in it is schema 2. One without is still written as 1,
+# so a part that never had a wing still opens in a version that knows none.
+SCHEMA_VERSION = 2
+PLAIN_SCHEMA = 1
 SIDECAR_SUFFIX = ".airfoils.json"
 
 
@@ -105,12 +108,57 @@ class ExportRecord:
 
 
 @dataclass
+class WingRecord:
+    """A wing: ribs, the edge curves lofting them, and any offset of the whole.
+
+    Its id is kept under the same name as an export's, so everything that
+    lines records up against the part treats the two alike.
+    """
+
+    export_id: str
+    name_index: int = 1
+    stem: str = ""
+    output_folder: str = ""
+    settings: Dict[str, Any] = field(default_factory=dict)
+    curves: List[CurveRecord] = field(default_factory=list)
+    # How many sections the offset wing had, so a change can be warned about:
+    # a loft picks its sections one by one.
+    station_count: int = 0
+    created: str = ""
+
+    @property
+    def spec(self) -> WingSpec:
+        return WingSpec.from_dict(self.settings)
+
+    def feature_names(self) -> List[str]:
+        return [c.feature for c in self.curves]
+
+    def live_curves(self) -> List[CurveRecord]:
+        return [c for c in self.curves if not c.retired]
+
+    def written_curves(self) -> List[CurveRecord]:
+        return [c for c in self.curves if not c.retired and not c.is_derived]
+
+
+@dataclass
 class Sidecar:
     part_path: str = ""
     part_title: str = ""
-    schema_version: int = SCHEMA_VERSION
+    # The version the file was read as; what gets written depends on its wings.
+    schema_version: int = PLAIN_SCHEMA
     written_by: str = ""
     exports: List[ExportRecord] = field(default_factory=list)
+    wings: List[WingRecord] = field(default_factory=list)
+
+    def records(self) -> List[Any]:
+        """Every record that claims curves in the part, ribs first."""
+        return list(self.exports) + list(self.wings)
+
+    def find_wing(self, wing_id: str) -> Optional[WingRecord]:
+        for record in self.wings:
+            if record.export_id == wing_id:
+                return record
+        return None
 
     def find(self, export_id: str) -> Optional[ExportRecord]:
         for record in self.exports:
@@ -125,11 +173,14 @@ class Sidecar:
         return None
 
     def all_feature_names(self) -> List[str]:
-        return [name for record in self.exports for name in record.feature_names()]
+        return [name for record in self.records() for name in record.feature_names()]
 
     def next_index(self, stem: str) -> int:
-        """The lowest index no record of this source is already using."""
-        used = {r.name_index for r in self.exports if r.stem == stem}
+        """The lowest index no record of this name is already using.
+
+        Ribs and wings share the count: both name a folder after their stem.
+        """
+        used = {r.name_index for r in self.records() if r.stem == stem}
         index = 1
         while index in used:
             index += 1
@@ -171,12 +222,14 @@ def resolve_file(record: CurveRecord, folder: str) -> str:
 
 def to_json(sidecar: Sidecar) -> str:
     """Byte-deterministic, so an unchanged sidecar is an unchanged file."""
-    payload = {
-        "schemaVersion": sidecar.schema_version,
+    payload: Dict[str, Any] = {
+        "schemaVersion": SCHEMA_VERSION if sidecar.wings else PLAIN_SCHEMA,
         "writtenBy": sidecar.written_by,
         "document": {"path": sidecar.part_path, "title": sidecar.part_title},
         "exports": [asdict(record) for record in sidecar.exports],
     }
+    if sidecar.wings:
+        payload["wings"] = [asdict(record) for record in sidecar.wings]
     return json.dumps(payload, indent=2, sort_keys=True) + "\n"
 
 
@@ -206,12 +259,20 @@ def from_json(text: str) -> Sidecar:
         fields["curves"] = curves
         exports.append(ExportRecord(**fields))
 
+    wings = []
+    for item in raw.get("wings") or []:
+        curves = [CurveRecord(**_known(CurveRecord, c)) for c in item.get("curves") or []]
+        fields = _known(WingRecord, item)
+        fields["curves"] = curves
+        wings.append(WingRecord(**fields))
+
     return Sidecar(
         part_path=document.get("path", ""),
         part_title=document.get("title", ""),
         schema_version=version,
         written_by=raw.get("writtenBy", ""),
         exports=exports,
+        wings=wings,
     )
 
 
@@ -285,6 +346,41 @@ def record_from_export(
         output_folder=folder,
         settings=spec.to_dict(),
         loaded_section=loaded_section,
+        created=stamp,
+        curves=[
+            CurveRecord(
+                role=curve.role,
+                feature=curve.feature,
+                file=curve.filename,
+                points=len(curve.points),
+                closed=curve.closed,
+                sha256=hashes.get(curve.feature, ""),
+                last_written=stamp,
+            )
+            for curve in curves
+        ],
+    )
+
+
+def wing_record_from_export(
+    wing_id: str,
+    curves: Sequence[Curve],
+    spec: WingSpec,
+    stem: str,
+    folder: str,
+    index: int = 1,
+    hashes: Optional[Dict[str, str]] = None,
+    station_count: int = 0,
+) -> WingRecord:
+    stamp = now()
+    hashes = hashes or {}
+    return WingRecord(
+        export_id=wing_id,
+        name_index=index,
+        stem=stem,
+        output_folder=folder,
+        settings=spec.to_dict(),
+        station_count=station_count,
         created=stamp,
         curves=[
             CurveRecord(
@@ -465,7 +561,7 @@ def reconcile(
     states: List[CurveState] = []
     claimed = set()
 
-    for record in sidecar.exports:
+    for record in sidecar.records():
         for curve in record.curves:
             if curve.retired:
                 states.append(CurveState(curve.feature, RETIRED, curve, record.export_id))

@@ -230,3 +230,76 @@ def test_a_plane_point_that_is_not_a_number_names_itself(data):
     spec = ExportSpec(plane_mode=export.MODE_3POINTS, p1=("nought", "0", "0"))
     with pytest.raises(InputError, match="P1 X must be a number"):
         export.build_curves(data, spec, "s")
+
+
+# -- wings ------------------------------------------------------------------
+
+
+def test_a_wing_spec_round_trips():
+    spec = export.WingSpec(ribs=("a", "b"), le_source="le.txt", offset="1.5",
+                           offset_dir=export.OFFSET_OUTWARD, swap_ends=True)
+    assert export.WingSpec.from_dict(spec.to_dict()) == spec
+
+
+def test_a_wing_offset_is_signed_by_direction():
+    assert export.WingSpec(offset="2").offset_mm() == -2.0
+    assert export.WingSpec(offset="2", offset_dir=export.OFFSET_OUTWARD).offset_mm() == 2.0
+    assert export.WingSpec().offset_mm() == 0.0
+    with pytest.raises(InputError, match="negative"):
+        export.WingSpec(offset="-1").offset_mm()
+
+
+@pytest.mark.parametrize("role,section,name", [
+    (export.ROLE_WING_LE, 0, "wing_le"),
+    (export.ROLE_WING_TE, 0, "wing_te"),
+    (export.ROLE_SECTION, 3, "wing_s03"),
+    (export.ROLE_SECTION_TE, 12, "wing_s12_te"),
+    (export.ROLE_SECTION_JOINED, 1, "wing_s01_joined"),
+])
+def test_wing_curve_names(role, section, name):
+    assert export.wing_feature_name("wing", role, 1, section) == name
+
+
+def test_a_second_wing_of_one_name_is_numbered_in_its_base():
+    assert export.wing_feature_name("wing", export.ROLE_SECTION, 2, 1) == "wing_2_s01"
+
+
+def test_a_section_needs_a_number():
+    with pytest.raises(InputError):
+        export.wing_feature_name("wing", export.ROLE_SECTION, 1, 0)
+
+
+def test_load_source_reads_a_csv_without_a_section():
+    data, section = export.load_source(SAMPLE_CSV)
+    assert section is None
+    assert data.chord == 175
+
+
+def test_load_source_reads_a_curve_back_onto_its_plane(tmp_path, data):
+    curves = export.build_curves(data, flat(), "rib")
+    path = tmp_path / "rib_airfoil.sldcrv"
+    from airfoil_converter import writer
+    writer.write_curve(str(path), curves[0].points)
+    loaded, section = export.load_source(str(path))
+    assert section is not None
+    assert loaded.chord == pytest.approx(175, abs=0.1)
+    assert export.section_from_dict(export.section_to_dict(section)) == section
+
+
+def test_surface_guides_and_end_profiles_are_named_by_tag():
+    assert export.wing_feature_name("w", export.ROLE_WING_SURFACE, tag="upper_30") == "w_upper_30"
+    assert export.wing_feature_name("w", export.ROLE_SECTION, 2, tag="root") == "w_2_root"
+    assert export.wing_feature_name("w", export.ROLE_SECTION_TE, tag="tip") == "w_tip_te"
+    assert export.wing_feature_name("w", export.ROLE_WING_TE_UPPER) == "w_te_upper"
+    with pytest.raises(InputError):
+        export.wing_feature_name("w", export.ROLE_WING_SURFACE)
+
+
+def test_a_wing_spec_keeps_its_profiles_choice():
+    spec = export.WingSpec(profiles=export.PROFILES_ALL, thickness=export.THICKNESS_SCALED)
+    back = export.WingSpec.from_dict(spec.to_dict())
+    assert (back.profiles, back.thickness) == (export.PROFILES_ALL, export.THICKNESS_SCALED)
+    # Root and tip with guides is what an export gives unless told otherwise,
+    # and the thickness follows the loft SolidWorks would make on its own.
+    assert export.WingSpec.from_dict({}).profiles == export.PROFILES_ENDS
+    assert export.WingSpec.from_dict({}).thickness == export.THICKNESS_BLENDED

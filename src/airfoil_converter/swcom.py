@@ -780,30 +780,39 @@ class Session:
 
     # -- reading what the user clicked --------------------------------------
 
-    def clear_selection(self) -> None:
-        call(self._active(), "ClearSelection2", True)
+    def editing_sketch(self) -> bool:
+        """Is a sketch open for editing in the active document?
 
-    def take_selection(self) -> Optional[Picked]:
-        """What is selected right now, taken rather than merely read.
+        Selecting and deselecting from outside while one is open can crash
+        SolidWorks outright, so the operations that must select things refuse
+        to start then.
+        """
+        doc = self._active()
+        return _try(_try(doc, "SketchManager"), "ActiveSketch") is not None
 
-        Clearing after the read is what turns a selection into an event. The
-        app is polling, not being told, so without clearing it cannot tell one
-        click from the same thing still being selected a fifth of a second
-        later. Clearing also shows the user their click landed.
+    def read_selection(self) -> Optional[Picked]:
+        """What was most recently selected, read and left exactly as it is.
 
-        ``None`` means nothing was selected, which is the ordinary answer on
-        almost every poll.
+        **Never clear the selection here.** This is called while the user is
+        clicking in SolidWorks — often in a sketch, with the Point property
+        page open on the very point just clicked. ``ClearSelection2`` then
+        pulls that point out from under the page, and SolidWorks 2026 dies with
+        an access violation in its own ``ClearSelectionsNotify``: twice, on
+        2026-09-16, both times with this read and that clear as the last API
+        calls. Telling a new click from one still selected is done by the
+        caller instead, by noticing when the selection changes.
+
+        ``None`` means nothing is selected.
         """
         doc = self._active()
         manager = call(doc, "SelectionManager")
         if manager is None:
             return None
-        if int(call(manager, "GetSelectedObjectCount2", -1) or 0) < 1:
+        count = int(call(manager, "GetSelectedObjectCount2", -1) or 0)
+        if count < 1:
             return None
-        try:
-            return _interpret(manager, 1)
-        finally:
-            call(doc, "ClearSelection2", True)
+        # The last one is the latest click, when several are held with Ctrl.
+        return _interpret(manager, count)
 
 
 def connect() -> Session:

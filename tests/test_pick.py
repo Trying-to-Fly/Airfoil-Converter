@@ -208,3 +208,30 @@ def test_a_refusal_is_cleared_by_the_next_good_pick():
     assert session.says.startswith("That is")
     session.accept(XY)
     assert session.says.startswith("Click a line")
+
+
+# -- telling a click from a selection still there ----------------------------
+
+
+def test_what_was_selected_before_the_pick_is_not_a_click():
+    watch = pick.SelectionWatch()
+    plane = PickedPlane(normal=(0.0, 0.0, 1.0), root=(0.0, 0.0, 0.0))
+    assert watch.fresh(plane) is None
+    assert watch.fresh(plane) is None
+
+
+def test_a_changed_selection_is_a_click_once():
+    watch = pick.SelectionWatch()
+    point = PickedPoint(where=(1.0, 2.0, 3.0))
+    assert watch.fresh(None) is None
+    assert watch.fresh(point) == point
+    assert watch.fresh(point) is None   # still selected, polled again
+
+
+def test_the_same_thing_clicked_again_after_nothing_counts():
+    watch = pick.SelectionWatch()
+    point = PickedPoint(where=(1.0, 2.0, 3.0))
+    watch.fresh(None)
+    assert watch.fresh(point) == point
+    assert watch.fresh(None) is None
+    assert watch.fresh(point) == point

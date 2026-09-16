@@ -7,9 +7,9 @@ import sys
 import tkinter as tk
 import uuid
 from tkinter import filedialog, font as tkfont, messagebox, ttk
-from typing import Any, Dict, List, Optional
+from typing import Any, Callable, Dict, List, Optional, Tuple
 
-from . import geometry, parser, pick, store, swcom, swlink, theme, ui_text, widgets, writer
+from . import geometry, pick, store, swcom, swlink, theme, ui_text, widgets, wing_tab, writer
 from .export import (
     MODE_2POINTS,
     MODE_3POINTS,
@@ -27,9 +27,12 @@ from .export import (
     feature_name,
     folder_name,
     joinable,
+    load_source,
+    section_from_dict,
+    section_to_dict,
 )
 from .geometry import GeometryError
-from .parser import AIRFOIL, AirfoilData, AirfoilParseError, parse_csv
+from .parser import AirfoilData, AirfoilParseError
 from . import __version__
 
 OK_COLOR = theme.OK
@@ -97,17 +100,20 @@ SPEC_VARS = (
 SPEC_COMPOUND = ("p1", "p2", "p3", "leading_edge", "le_manual")
 
 
-def _record_label(record: "Optional[store.ExportRecord]", export_id: str) -> str:
+def _record_label(record: "Optional[Any]", export_id: str) -> str:
     """Several ribs come off one aerofoil, so the stem alone does not tell them apart."""
     if record is None:
         return export_id
     return record.stem if record.name_index <= 1 else f"{record.stem} ({record.name_index})"
 
 
-def _record_place(record: "Optional[store.ExportRecord]") -> str:
+def _record_place(record: "Optional[Any]") -> str:
     """Where the leading edge sits, which is what distinguishes one rib from the next."""
     if record is None:
         return ""
+    if isinstance(record, store.WingRecord):
+        # A wing stands on its ribs; what tells one from the next is its offset.
+        return ui_text.wing_place(record.spec)
     if record.adopted:
         # Read back from the names in the part, which say nothing about where
         # the curves were put. A plausible ``0, 0, 0`` here would be a lie.
@@ -170,9 +176,9 @@ def _picked_summary(session) -> str:
     return f"Read {got[0]} from SolidWorks."
 
 
-def _take_selection(session):
-    """What the user just clicked, taken so the next poll starts empty."""
-    return session.take_selection()
+def _read_selection(session):
+    """What is selected now. Left selected: see Session.read_selection."""
+    return session.read_selection()
 
 
 class ConverterApp(ttk.Frame):
@@ -262,6 +268,10 @@ class ConverterApp(ttk.Frame):
         # there is somewhere on disk to put them.
         self._homeless: List[store.ExportRecord] = []
         self._editing: str = ""          # the export id being edited, or ""
+        # The Wing tab, which borrows this link and this record, and what
+        # opens a wing on it when one is clicked in the list here.
+        self._wing_tab: Optional[Any] = None
+        self._show_wing: Optional[Callable[[str], None]] = None
         self._last_states: List[store.CurveState] = []
         self._restoring = False
         self._quiet_ticks = 0
@@ -269,7 +279,7 @@ class ConverterApp(ttk.Frame):
         # Pick mode: None unless the user is clicking things in SolidWorks.
         self._pick: Optional[pick.Pick] = None
         self._pick_ticks = 0
-        self._pick_answers = 0
+        self._pick_watch = pick.SelectionWatch()
 
         self.p_vars: List[List[tk.StringVar]] = [
             [tk.StringVar(value="0") for _ in range(3)] for _ in range(3)
@@ -1070,16 +1080,6 @@ class ConverterApp(ttk.Frame):
         if path:
             self.out_folder.set(path)
 
-    def _load_curve(self, path: str) -> AirfoilData:
-        """Read a curve file back into a 2D section on the plane it was drawn on."""
-        section = geometry.flatten_curve(parser.parse_curve(path))
-        self.section = section
-        return AirfoilData(
-            name=os.path.splitext(os.path.basename(path))[0],
-            chord=section.chord,
-            sections={AIRFOIL: section.points},
-        )
-
     def _show_loaded(self, data: Optional[AirfoilData], curve: bool) -> None:
         """The Source panel's second line: the section, drawn and named.
 
@@ -1110,8 +1110,8 @@ class ConverterApp(ttk.Frame):
     def _load(self, path: str) -> None:
         self.section = None
         try:
-            curve = parser.is_curve_file(path)
-            data = self._load_curve(path) if curve else parse_csv(path)
+            data, self.section = load_source(path)
+            curve = self.section is not None
         except (AirfoilParseError, GeometryError) as exc:
             self.data = None
             self.loaded_text.set("No file loaded.")
@@ -1252,7 +1252,7 @@ class ConverterApp(ttk.Frame):
             self._end_pick("Pick stopped: nothing was clicked.")
             return
         self._update_pick_title()
-        self._ask("pick", _take_selection)
+        self._ask("pick", _read_selection)
 
     def _refresh_panel(self) -> None:
         """The Refresh button, and every path that needs the truth now.
@@ -1290,7 +1290,7 @@ class ConverterApp(ttk.Frame):
             return
         self._pick = pick.Pick(steps)
         self._pick_ticks = 0
-        self._pick_answers = 0
+        self._pick_watch = pick.SelectionWatch()
         self._quiet_ticks = 0
         self._pick_outcome = ""
         self.pick_text.set(self._pick.says)
@@ -1322,12 +1322,12 @@ class ConverterApp(ttk.Frame):
     def _took_pick(self, picked) -> None:
         if self._pick is None:
             return
-        self._pick_answers += 1
-        if self._pick_answers == 1:
-            return  # whatever was already selected when the pick began
-        if picked is None:
-            return  # nothing clicked yet, which is most polls
-        self._pick.accept(picked)
+        # Whatever was selected when the pick began, and the same selection
+        # read again on every poll after, are not clicks.
+        clicked = self._pick_watch.fresh(picked)
+        if clicked is None:
+            return
+        self._pick.accept(clicked)
         self._after_pick_step()
 
     def _after_pick_step(self) -> None:
@@ -1700,7 +1700,7 @@ class ConverterApp(ttk.Frame):
                 strays.append(state)
 
         for export_id, states in by_export.items():
-            record = self._sidecar.find(export_id) if self._sidecar else None
+            record = self._find_record(export_id)
             worst = "linked" if all(not s.needs_attention for s in states) else "attention"
             node = self.curve_tree.insert(
                 "", "end", iid=export_id, text=_record_label(record, export_id), open=True,
@@ -1785,7 +1785,7 @@ class ConverterApp(ttk.Frame):
         if selected and self._sidecar is not None:
             export_id = selected[0].split("/")[0]
             if export_id not in ("__strays__", NEW_CURVE):
-                record = self._sidecar.find(export_id)
+                record = self._find_record(export_id)
 
         # The name is only editable on a curve that does not exist yet.
         # Renaming one that does would leave its old features behind in the
@@ -1814,6 +1814,13 @@ class ConverterApp(ttk.Frame):
         text, ok = ui_text.curves_linked(states)
         self.card_state.set(text)
         self.card_state_label.configure(fg=theme.OK if ok else theme.ERROR)
+        if isinstance(record, store.WingRecord):
+            try:
+                self.card_settings.set(ui_text.wing_summary(record.spec))
+            except Exception:  # noqa: BLE001 - a record written by a later version
+                self.card_settings.set("")
+            self.card_hint.configure(text="A wing. Click it to open it on the Wing tab.")
+            return
         if record.adopted:
             self.card_settings.set(ui_text.ADOPTED_SETTINGS)
             self.card_hint.configure(text=ui_text.ADOPTED_HINT)
@@ -1838,6 +1845,11 @@ class ConverterApp(ttk.Frame):
             return
         export_id = selected[0].split("/")[0]
         if export_id in ("__strays__", NEW_CURVE) or self._sidecar is None:
+            return
+        if self._sidecar.find_wing(export_id) is not None:
+            if self._show_wing is not None:
+                self._show_wing(export_id)
+            self._select_editing()
             return
         record = self._sidecar.find(export_id)
         if record is None or record.export_id == self._editing:
@@ -1902,13 +1914,7 @@ class ConverterApp(ttk.Frame):
                         ok=False,
                     )
             if record.loaded_section:
-                self.section = geometry.FlatSection(
-                    points=[tuple(p) for p in record.loaded_section["points"]],
-                    origin=tuple(record.loaded_section["origin"]),
-                    u=tuple(record.loaded_section["u"]),
-                    v=tuple(record.loaded_section["v"]),
-                    chord=record.loaded_section["chord"],
-                )
+                self.section = section_from_dict(record.loaded_section)
 
             spec = record.spec
             for name, attr in SPEC_VARS:
@@ -1996,8 +2002,19 @@ class ConverterApp(ttk.Frame):
         except OSError as exc:
             self._set_status(f"Could not write the output: {exc}", ok=False)
 
+    def busy(self) -> bool:
+        """Is either tab still waiting on SolidWorks for an export?"""
+        wing_push = self._wing_tab is not None and self._wing_tab.pushing
+        return self._pending_push is not None or wing_push
+
+    def _find_record(self, export_id: str) -> "Optional[Any]":
+        """A rib's record, or a wing's: the list shows both."""
+        if self._sidecar is None:
+            return None
+        return self._sidecar.find(export_id) or self._sidecar.find_wing(export_id)
+
     def _export_unsafe(self) -> None:
-        if self._pending_push is not None:
+        if self.busy():
             raise InputError("SolidWorks is still working on the last export.")
         if self.data is None:
             raise InputError("Load a CSV first.")
@@ -2284,13 +2301,7 @@ class ConverterApp(ttk.Frame):
     def _section_as_dict(self) -> Optional[Dict[str, Any]]:
         if self.section is None or self.plane_mode.get() != MODE_LOADED:
             return None
-        return {
-            "points": [list(p) for p in self.section.points],
-            "origin": list(self.section.origin),
-            "u": list(self.section.u),
-            "v": list(self.section.v),
-            "chord": self.section.chord,
-        }
+        return section_to_dict(self.section)
 
 
 def _declare_dpi_aware() -> None:
@@ -2354,6 +2365,34 @@ def _scale_to_dpi(root: tk.Tk) -> float:
     return factor
 
 
+def build_window(root: tk.Tk, scale: float) -> "Tuple[ConverterApp, wing_tab.WingTab]":
+    """Two tabs: the converter as it always was, and the wing built from its ribs.
+
+    The wing tab borrows the converter's link and record of the part.
+    """
+    root.columnconfigure(0, weight=1)
+    root.rowconfigure(0, weight=1)
+    tabs = ttk.Notebook(root)
+    tabs.grid(row=0, column=0, sticky="nsew")
+    airfoil_page = tk.Frame(tabs, bg=theme.WINDOW)
+    app = ConverterApp(airfoil_page, scale=scale)
+    wing_page = wing_tab.WingTab(tabs, app)
+    tabs.add(airfoil_page, text="Airfoil")
+    tabs.add(wing_page, text="Wing")
+    app._wing_tab = wing_page
+
+    def show_wing(wing_id: str) -> None:
+        tabs.select(wing_page)
+        wing_page.open_wing(wing_id)
+
+    app._show_wing = show_wing
+    tabs.bind(
+        "<<NotebookTabChanged>>",
+        lambda _e: wing_page.refresh() if tabs.select() == str(wing_page) else None,
+    )
+    return app, wing_page
+
+
 def main() -> None:
     _declare_dpi_aware()
     # Windows will not use a font file it has not been told about, and Tk asks
@@ -2364,7 +2403,7 @@ def main() -> None:
     scale = _scale_to_dpi(root)
     root.configure(background=theme.WINDOW)
     root.minsize(int((STRIP_WIDTH + 24) * scale), int(480 * scale))
-    app = ConverterApp(root, scale=scale)
+    app, _wing = build_window(root, scale)
 
     # The strip can be taller than the screen. Open at the height the screen
     # has rather than at the height the form wants, or the footer — the status

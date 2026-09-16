@@ -200,3 +200,25 @@ def test_several_in_trouble_are_counted_rather_than_listed():
         store.CurveState(feature="b", state=store.MISSING),
     ]
     assert ui_text.curves_linked(states) == ("2 need attention", False)
+
+
+# -- wings ------------------------------------------------------------------
+
+
+def test_a_wing_is_summed_up_in_one_line():
+    from airfoil_converter.export import WingSpec
+
+    spec = WingSpec(ribs=("a", "b", "c"), le_source="le.sldcrv", offset="2")
+    assert ui_text.wing_summary(spec) == (
+        "3 ribs · LE from a file, TE straight · root open, tip closed · offset 2 mm inward"
+    )
+    assert ui_text.wing_summary(WingSpec()).endswith("no offset")
+
+
+def test_a_wing_says_what_it_is_where_a_rib_says_where_it_stands():
+    from airfoil_converter.export import OFFSET_OUTWARD, WingSpec
+
+    assert ui_text.wing_place(WingSpec()) == "wing"
+    assert ui_text.wing_place(WingSpec(offset="1.5", offset_dir=OFFSET_OUTWARD)) == (
+        "wing, 1.5 mm outward"
+    )

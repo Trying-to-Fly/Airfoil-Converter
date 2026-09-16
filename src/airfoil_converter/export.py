@@ -20,9 +20,11 @@ from __future__ import annotations
 from dataclasses import asdict, dataclass, field, fields
 from typing import Any, Dict, List, Optional, Sequence, Tuple
 
-from . import geometry, writer
+import os
+
+from . import geometry, parser, writer
 from .geometry import GeometryError  # noqa: F401  (re-exported for gui.py)
-from .parser import AirfoilData
+from .parser import AIRFOIL, AirfoilData
 
 Point2 = Tuple[float, float]
 Vec3 = Tuple[float, float, float]
@@ -223,6 +225,43 @@ def joinable(curves: Sequence[Curve]) -> Tuple[str, ...]:
     return ()
 
 
+def load_source(path: str) -> Tuple[AirfoilData, Optional[geometry.FlatSection]]:
+    """Read a CSV, or a curve file back onto the plane it was drawn on.
+
+    A curve file comes back with the section it was flattened into, which is
+    what an *As loaded* plane stands on.
+    """
+    if not parser.is_curve_file(path):
+        return parser.parse_csv(path), None
+    section = geometry.flatten_curve(parser.parse_curve(path))
+    data = AirfoilData(
+        name=os.path.splitext(os.path.basename(path))[0],
+        chord=section.chord,
+        sections={AIRFOIL: section.points},
+    )
+    return data, section
+
+
+def section_to_dict(section: geometry.FlatSection) -> Dict[str, Any]:
+    return {
+        "points": [list(p) for p in section.points],
+        "origin": list(section.origin),
+        "u": list(section.u),
+        "v": list(section.v),
+        "chord": section.chord,
+    }
+
+
+def section_from_dict(raw: Dict[str, Any]) -> geometry.FlatSection:
+    return geometry.FlatSection(
+        points=[tuple(p) for p in raw["points"]],
+        origin=tuple(raw["origin"]),
+        u=tuple(raw["u"]),
+        v=tuple(raw["v"]),
+        chord=raw["chord"],
+    )
+
+
 def plane_frame(spec: ExportSpec, section: Optional[geometry.FlatSection]) -> Tuple[Vec3, Vec3]:
     """The chord and up vectors the section is laid out along."""
     mode = spec.plane_mode
@@ -251,6 +290,25 @@ def plane_frame(spec: ExportSpec, section: Optional[geometry.FlatSection]) -> Tu
     return geometry.plane_frame(mode, **kwargs)
 
 
+def finish_surface(surface: Sequence[Point2], mode: str) -> List[Tuple[str, List[Point2], bool]]:
+    """The curves one airfoil surface becomes under a trailing-edge mode."""
+    if mode == TE_OPEN:
+        return [(ROLE_AIRFOIL, geometry.drop_duplicate(surface), False)]
+    if mode == TE_CLOSE:
+        return [(ROLE_AIRFOIL, geometry.auto_close(surface), True)]
+    if mode == TE_SPLIT:
+        upper, lower = geometry.split_surfaces(surface)
+        return [(ROLE_UPPER, upper, False), (ROLE_LOWER, lower, False)]
+    if mode == TE_LINE:
+        # The gap is closed by its own two-point curve, which imports as a
+        # straight line; closing it inside the spline would bulge it.
+        return [
+            (ROLE_AIRFOIL, geometry.drop_duplicate(surface), False),
+            (ROLE_TE, geometry.trailing_edge_line(surface), False),
+        ]
+    raise InputError(f"Unknown TE handling mode {mode!r}.")
+
+
 def build_sections(data: AirfoilData, spec: ExportSpec) -> List[Tuple[str, List[Point2], bool]]:
     """The 2D curves an export produces, as ``(role, points, closed)``."""
     curves: List[Tuple[str, List[Point2], bool]] = []
@@ -273,22 +331,7 @@ def build_sections(data: AirfoilData, spec: ExportSpec) -> List[Tuple[str, List[
                 surface, thickness / factor, keep_chord=spec.keep_chord
             )
 
-        mode = spec.te_mode
-        if mode == TE_OPEN:
-            curves.append((ROLE_AIRFOIL, geometry.drop_duplicate(surface), False))
-        elif mode == TE_CLOSE:
-            curves.append((ROLE_AIRFOIL, geometry.auto_close(surface), True))
-        elif mode == TE_SPLIT:
-            upper, lower = geometry.split_surfaces(surface)
-            curves.append((ROLE_UPPER, upper, False))
-            curves.append((ROLE_LOWER, lower, False))
-        elif mode == TE_LINE:
-            # The gap is closed by its own two-point curve, which imports as a
-            # straight line; closing it inside the spline would bulge it.
-            curves.append((ROLE_AIRFOIL, geometry.drop_duplicate(surface), False))
-            curves.append((ROLE_TE, geometry.trailing_edge_line(surface), False))
-        else:
-            raise InputError(f"Unknown TE handling mode {mode!r}.")
+        curves.extend(finish_surface(surface, spec.te_mode))
 
     if spec.export_camber:
         camber = data.camber
@@ -322,10 +365,143 @@ def build_curves(
         built.append(
             Curve(
                 role=role,
-                points=geometry.to_3d(points2d, leading_edge, u, v, factor),
+                points=geometry.thin_curve(geometry.to_3d(points2d, leading_edge, u, v, factor)),
                 closed=closed,
                 feature=name,
                 filename=name + spec.extension,
             )
         )
     return built
+
+
+# -- wings ------------------------------------------------------------------
+#
+# A wing is ribs already exported, plus the two edge curves that loft them,
+# and optionally an offset of the whole thing. Its settings are kept as typed,
+# for the same reasons as a rib's.
+
+WING_OPEN = "open"
+WING_CLOSED = "closed"
+
+# What a wing's curves are. Like a rib's, a name says what a curve is and
+# never how it was made, so a changed offset refreshes the same features.
+ROLE_WING_LE = "wing_le"
+ROLE_WING_TE = "wing_te"
+# A blunt trailing edge is a face, so it gets an edge along each corner.
+ROLE_WING_TE_UPPER = "wing_te_upper"
+ROLE_WING_TE_LOWER = "wing_te_lower"
+# Guides along the offset wing's upper and lower surfaces, for a loft through
+# its end profiles alone.
+ROLE_WING_SURFACE = "wing_surface"
+ROLE_SECTION = "section"
+ROLE_SECTION_TE = "section_te"
+ROLE_SECTION_JOINED = "section_joined"
+WING_ROLES = (
+    ROLE_WING_LE, ROLE_WING_TE, ROLE_WING_TE_UPPER, ROLE_WING_TE_LOWER, ROLE_WING_SURFACE,
+    ROLE_SECTION, ROLE_SECTION_TE, ROLE_SECTION_JOINED,
+)
+WING_EDGE_ROLES = (
+    ROLE_WING_LE, ROLE_WING_TE, ROLE_WING_TE_UPPER, ROLE_WING_TE_LOWER, ROLE_WING_SURFACE,
+)
+
+# Which of the offset wing's sections are exported: every one, so the loft
+# runs through them, or the two at its ends with guides along its surfaces.
+# How the wing's thickness runs between two ribs: blended in millimetres from
+# one to the other, as a SolidWorks loft through the two does on its own, or
+# the airfoil kept whole and scaled to the chord everywhere.
+THICKNESS_BLENDED = "blended"
+THICKNESS_SCALED = "scaled"
+THICKNESS_CHOICES = (THICKNESS_BLENDED, THICKNESS_SCALED)
+
+PROFILES_ALL = "all"
+PROFILES_ENDS = "ends"
+PROFILE_CHOICES = (PROFILES_ALL, PROFILES_ENDS)
+
+
+@dataclass(frozen=True)
+class WingSpec:
+    """Every setting of a wing, as typed."""
+
+    ribs: Tuple[str, ...] = ()  # rib export ids
+    le_source: str = ""  # a curve file, or blank for a straight line
+    te_source: str = ""
+    root_end: str = WING_OPEN
+    tip_end: str = WING_CLOSED
+    # The root is the end nearer the part's origin; this turns that round.
+    swap_ends: bool = False
+    offset: str = ""
+    offset_dir: str = OFFSET_INWARD
+    extension: str = ".sldcrv"
+    profiles: str = PROFILES_ENDS
+    thickness: str = THICKNESS_BLENDED
+
+    def to_dict(self) -> Dict[str, Any]:
+        data = asdict(self)
+        data["ribs"] = list(self.ribs)
+        return data
+
+    @classmethod
+    def from_dict(cls, raw: Dict[str, Any]) -> "WingSpec":
+        known = {f.name for f in fields(cls)}
+        values: Dict[str, Any] = {k: v for k, v in raw.items() if k in known}
+        if "ribs" in values:
+            values["ribs"] = tuple(str(r) for r in values["ribs"])
+        return cls(**values)
+
+    def offset_mm(self) -> float:
+        """Millimetres, positive outward and negative inward. Zero for the wing itself."""
+        text = self.offset.strip()
+        if not text:
+            return 0.0
+        value = parse_float(text, "Wing offset")
+        if value < 0.0:
+            raise InputError(
+                "Wing offset must not be negative — choose Inward or Outward instead."
+            )
+        return -value if self.offset_dir == OFFSET_INWARD else value
+
+
+def wing_base(stem: str, index: int = 1) -> str:
+    if index < 1:
+        raise InputError(f"Name index must be 1 or more (got {index}).")
+    return writer.sanitize(stem) + (f"_{index}" if index > 1 else "")
+
+
+def wing_feature_name(
+    stem: str, role: str, index: int = 1, section: int = 0, tag: str = ""
+) -> str:
+    """``wing_le``, ``wing_te``, ``wing_te_upper``, ``wing_upper_30``, ``wing_s03``,
+    ``wing_s03_te``, ``wing_s03_joined``.
+
+    A surface guide's ``tag`` says which surface and where along the chord:
+    ``upper_30`` runs along the upper surface at 30%.
+
+    The offset wing's sections are numbered root to tip. None of these end the
+    way a rib's names do, so nothing mistakes a wing's curve for a rib's.
+    """
+    base = wing_base(stem, index)
+    if role == ROLE_WING_LE:
+        return f"{base}_le"
+    if role == ROLE_WING_TE:
+        return f"{base}_te"
+    if role == ROLE_WING_TE_UPPER:
+        return f"{base}_te_upper"
+    if role == ROLE_WING_TE_LOWER:
+        return f"{base}_te_lower"
+    if role == ROLE_WING_SURFACE:
+        if not tag:
+            raise InputError("A surface guide needs a tag.")
+        return f"{base}_{tag}"
+    if tag:
+        number = tag  # an end profile: ``root`` or ``tip``
+    elif section < 1:
+        raise InputError(f"Section number must be 1 or more (got {section}).")
+    else:
+        number = f"s{section:02d}"
+    if role == ROLE_SECTION:
+        return f"{base}_{number}"
+    if role == ROLE_SECTION_TE:
+        return f"{base}_{number}_te"
+    if role == ROLE_SECTION_JOINED:
+        return f"{base}_{number}_joined"
+    raise InputError(f"Unknown wing curve role {role!r}.")

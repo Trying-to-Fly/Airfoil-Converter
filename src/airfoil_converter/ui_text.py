@@ -22,6 +22,7 @@ from .export import (
     MODE_LOADED,
     MODE_NORMAL,
     ExportSpec,
+    WingSpec,
 )
 from .pick import LINE, PLANE, POINT, Pick
 from .swcom import PickedLine, PickedPlane, PickedPoint
@@ -237,6 +238,29 @@ def record_summary(spec: ExportSpec) -> str:
         f"offset {spec.offset} mm {spec.offset_dir.lower()}" if spec.offset else "no offset"
     )
     return " · ".join(parts)
+
+
+def wing_summary(spec: WingSpec) -> str:
+    """One line of a remembered wing's settings, for the card and the Wing tab."""
+    parts = [f"{len(spec.ribs)} rib{'' if len(spec.ribs) == 1 else 's'}"]
+    edges = [
+        f"{name} {'from a file' if source else 'straight'}"
+        for name, source in (("LE", spec.le_source), ("TE", spec.te_source))
+    ]
+    parts.append(", ".join(edges))
+    parts.append(f"root {spec.root_end}, tip {spec.tip_end}")
+    parts.append(
+        f"offset {spec.offset} mm {spec.offset_dir.lower()}" if spec.offset.strip()
+        else "no offset"
+    )
+    return " · ".join(parts)
+
+
+def wing_place(spec: WingSpec) -> str:
+    """What the tree's state column shows for a wing, where a rib shows its leading edge."""
+    if not spec.offset.strip():
+        return "wing"
+    return f"wing, {spec.offset} mm {spec.offset_dir.lower()}"
 
 
 def curves_linked(states: Sequence["store.CurveState"]) -> Tuple[str, bool]:

@@ -30,9 +30,13 @@ class FakeSolidWorks:
         self.join_fails = False
         self.tree = {}           # folder name -> the names it holds
         self.folder_fails = set()
+        self.sketching = False
 
     def active_document(self):
         return self.doc
+
+    def editing_sketch(self):
+        return self.sketching
 
     def curve_features(self):
         return [FeatureInfo(name=n, type_name="CurveInFile") for n in self.curves]
@@ -550,3 +554,90 @@ def test_a_renamed_parent_keeps_its_name_when_a_rib_is_added():
 
     assert sw.tree["Sections"] == ["rib", "rib_2"]
     assert swlink.PARENT_FOLDER not in sw.tree
+
+
+# -- a wing's many joins ----------------------------------------------------
+
+
+def wing_sections():
+    return [
+        curve("section", "w_s01"),
+        curve("section_te", "w_s01_te"),
+        curve("section", "w_s02"),
+        curve("section_te", "w_s02_te"),
+        curve("wing_le", "w_le"),
+    ]
+
+
+WING_JOINS = [
+    (("w_s01", "w_s01_te"), "w_s01_joined"),
+    (("w_s02", "w_s02_te"), "w_s02_joined"),
+]
+
+
+def test_every_listed_join_is_made(tmp_path):
+    sw = FakeSolidWorks()
+    result = push(sw, wing_sections(), str(tmp_path), joins=WING_JOINS)
+    assert result.joined_all == ["w_s01_joined", "w_s02_joined"]
+    assert result.joined_new == 2
+    assert "2 joined" in result.summary()
+
+
+def test_joins_already_made_are_recognised(tmp_path):
+    sw = FakeSolidWorks()
+    push(sw, wing_sections(), str(tmp_path), joins=WING_JOINS)
+    sw.calls.clear()
+    result = push(sw, wing_sections(), str(tmp_path), joins=WING_JOINS)
+    assert indexes(sw.calls, "join") == []
+    assert result.joined_all == ["w_s01_joined", "w_s02_joined"]
+    assert result.joined_new == 0
+
+
+def test_one_failed_join_does_not_stop_the_others(tmp_path):
+    sw = FakeSolidWorks()
+    sw.rename_to = {"w_s01_joined": "CompCurve1"}
+    result = push(sw, wing_sections(), str(tmp_path), joins=WING_JOINS)
+    assert result.joined_all == ["w_s02_joined"]
+    assert result.failures == [("w_s01_joined", "SolidWorks named it 'CompCurve1' instead")]
+
+
+def test_a_join_missing_its_curve_is_reported(tmp_path):
+    sw = FakeSolidWorks()
+    sw.insert_fails = {"w_s02_te"}
+    result = push(sw, wing_sections(), str(tmp_path), joins=WING_JOINS)
+    assert ("w_s02_joined", "cannot join without w_s02_te") in result.failures
+    assert result.joined_all == ["w_s01_joined"]
+
+
+def test_wing_folders_and_rib_folders_keep_to_their_own_parents(tmp_path):
+    sw = FakeSolidWorks(features=["rib_airfoil", "rib_2_airfoil", "w_le", "w_te", "w_s01"])
+    swlink.arrange(sw, [group("rib", "rib_airfoil"), group("rib_2", "rib_2_airfoil")])
+    swlink.arrange(sw, [group("w", "w_le", "w_te", "w_s01")], parent="Wing Curves")
+    sw.calls.clear()
+
+    again_ribs = swlink.arrange(sw, [group("rib", "rib_airfoil"), group("rib_2", "rib_2_airfoil")])
+    again_wing = swlink.arrange(sw, [group("w", "w_le", "w_te", "w_s01")], parent="Wing Curves")
+
+    assert again_ribs.made == [] and again_wing.made == []
+    assert sw.tree["Airfoil Curves"] == ["rib", "rib_2"]
+    assert sw.tree["Wing Curves"] == ["w"]
+
+
+# -- never select anything while a sketch is open -----------------------------
+
+
+def test_nothing_is_pushed_while_a_sketch_is_open(tmp_path, curves):
+    """Selecting from outside mid-sketch has crashed SolidWorks outright."""
+    sw = FakeSolidWorks()
+    sw.sketching = True
+    with pytest.raises(LinkError, match="sketch is open"):
+        push(sw, curves, str(tmp_path))
+    assert sw.calls == []
+
+
+def test_the_tree_is_left_alone_while_a_sketch_is_open():
+    sw = FakeSolidWorks(features=["rib_airfoil"])
+    sw.sketching = True
+    result = swlink.arrange(sw, [group("rib", "rib_airfoil")])
+    assert sw.calls == []
+    assert result.failures and "sketch is open" in result.failures[0][1]

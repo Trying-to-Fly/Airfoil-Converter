@@ -47,10 +47,23 @@ class SolidWorks(Protocol):
     def folders(self) -> Dict[str, List[str]]: ...
     def insert_folder(self, names: Sequence[str], folder: str) -> str: ...
     def delete_folder(self, folder: str) -> None: ...
+    def editing_sketch(self) -> bool: ...
 
 
 class LinkError(SolidWorksError):
     """The push could not go ahead at all."""
+
+
+SKETCH_OPEN = (
+    "A sketch is open for editing in SolidWorks. Close it first: changing the "
+    "part's selection from outside while one is open can crash SolidWorks."
+)
+
+
+def _refuse_while_sketching(sw: SolidWorks) -> None:
+    """Joining and foldering select features, which is not safe mid-sketch."""
+    if sw.editing_sketch():
+        raise LinkError(SKETCH_OPEN)
 
 
 @dataclass
@@ -65,6 +78,8 @@ class PushResult:
     rebuilt: bool = False
     joined: str = ""      # the joined curve, whether or not this push made it
     joined_now: bool = False   # ...and whether this push is what made it
+    joined_all: List[str] = field(default_factory=list)   # every join, for a wing's many
+    joined_new: int = 0   # ...and how many of them this push made
     arranged: Optional["ArrangeResult"] = None   # what the tree tidy-up did
 
     @property
@@ -79,7 +94,9 @@ class PushResult:
             parts.append(f"{len(self.refreshed)} refreshed")
         if self.unchanged:
             parts.append(f"{len(self.unchanged)} unchanged")
-        if self.joined_now:
+        if self.joined_new > 1:
+            parts.append(f"{self.joined_new} joined")
+        elif self.joined_now:
             parts.append(f"joined as {self.joined}")
         if self.rebuilt:
             parts.append("rebuilt")
@@ -125,8 +142,14 @@ def push(
     insert_missing: bool = True,
     force: Collection[str] = (),
     join_as: str = "",
+    joins: Sequence[Tuple[Tuple[str, ...], str]] = (),
 ) -> PushResult:
-    """Write the curves and put them into the open part."""
+    """Write the curves and put them into the open part.
+
+    ``join_as`` names the one composite a rib makes of its airfoil and its
+    trailing-edge line. ``joins`` lists any number of ``(sources, name)``
+    composites outright, which is what a wing of such sections needs.
+    """
     if not curves:
         raise LinkError("There are no curves to send.")
 
@@ -143,6 +166,8 @@ def push(
         raise LinkError(
             f"{document.title} is not a part, and a curve can only go into a part."
         )
+
+    _refuse_while_sketching(sw)
 
     result = PushResult(part=document.title)
     changed, result.hashes = write_files(curves, folder)
@@ -172,8 +197,16 @@ def push(
     # After the rebuild, so the composite is built on curves that already hold
     # the new points, and outside the block above, so it is still made on a
     # push where nothing else needed doing.
-    if join_as and insert_missing:
-        _join(sw, result, curves, join_as)
+    wanted = list(joins)
+    if join_as:
+        sources = joinable(curves)
+        if sources:
+            wanted.insert(0, (sources, join_as))
+    if wanted and insert_missing:
+        present = set(sw.feature_names())
+        curve_names = {f.name for f in sw.curve_features()}
+        for sources, name in wanted:
+            _join(sw, result, tuple(sources), name, present, curve_names)
     return result
 
 
@@ -219,24 +252,27 @@ def _apply(
         result.rebuilt = bool(sw.rebuild())
 
 
-def _join(sw: SolidWorks, result: PushResult, curves: Sequence[Curve], join_as: str) -> None:
-    """Make the one selectable curve, if it is not there already.
+def _join(
+    sw: SolidWorks,
+    result: PushResult,
+    sources: Tuple[str, ...],
+    join_as: str,
+    present: Collection[str],
+    curve_names: Collection[str],
+) -> None:
+    """Make one selectable curve, if it is not there already.
 
     A composite is derived from its inputs, so it follows them whenever they
     are reloaded and only ever has to be made once.
     """
-    sources = joinable(curves)
-    if not sources:
-        return
-    if join_as in set(sw.feature_names()):
+    if join_as in present:
         # Already there, from an earlier push. Report it anyway, so a record
         # made before it existed still learns the name and stops calling it a
         # stray.
-        result.joined = join_as
+        _joined(result, join_as, made=False)
         return
 
-    present = {f.name for f in sw.curve_features()}
-    absent = [name for name in sources if name not in present]
+    absent = [name for name in sources if name not in curve_names]
     if absent:
         result.failures.append((join_as, f"cannot join without {', '.join(absent)}"))
         return
@@ -250,8 +286,16 @@ def _join(sw: SolidWorks, result: PushResult, curves: Sequence[Curve], join_as: 
     if kept != join_as:
         result.failures.append((join_as, f"SolidWorks named it {kept!r} instead"))
         return
-    result.joined = kept
-    result.joined_now = True
+    _joined(result, kept, made=True)
+
+
+def _joined(result: PushResult, name: str, made: bool) -> None:
+    if not result.joined:
+        result.joined = name
+        result.joined_now = made
+    result.joined_all.append(name)
+    if made:
+        result.joined_new += 1
 
 
 # -- the shape of the tree --------------------------------------------------
@@ -352,6 +396,9 @@ def arrange(
     deletes is a folder, which is a row in the tree and not geometry.
     """
     result = ArrangeResult()
+    if sw.editing_sketch():
+        result.failures.append(("folders", SKETCH_OPEN))
+        return result
     present = set(sw.feature_names())
     folders = sw.folders()
 

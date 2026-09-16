@@ -680,6 +680,28 @@ def trailing_edge_line(points: Sequence[Point2]) -> List[Point2]:
 # ------------------------------------------------------------------ offsetting
 
 
+# Points of an exported curve closer together than this, in mm, are one point.
+# A spline forced through two all but coincident points ties a knot in itself,
+# and SolidWorks refuses the file.
+MIN_STEP = 0.01
+
+
+def thin_curve(points: Sequence[Sequence[float]], min_step: float = MIN_STEP) -> List:
+    """Drop points that crowd the one before, keeping both ends where they are."""
+    pts = list(points)
+    if len(pts) <= 2:
+        return pts
+    kept = [pts[0]]
+    for p in pts[1:-1]:
+        if math.dist(p, kept[-1]) >= min_step:
+            kept.append(p)
+    last = pts[-1]
+    while len(kept) > 1 and math.dist(last, kept[-1]) < min_step:
+        kept.pop()
+    kept.append(last)
+    return kept
+
+
 def _cross2(a: Point2, b: Point2) -> float:
     return a[0] * b[1] - a[1] * b[0]
 
@@ -786,6 +808,14 @@ def _raw_offset(loop: Sequence[Point2], distance: float, arc_step: float) -> Lis
             # gap, which a true offset fills with an arc of radius |distance|.
             angle = math.atan2(turn, _dot2(e0, e1))
             steps = max(1, math.ceil(abs(angle) / arc_step))
+            if steps == 1:
+                # A turn this slight takes one point, midway round the arc: an
+                # "arc" of two points a hair apart makes a curve file that
+                # SolidWorks will not import.
+                c, sn = math.cos(angle / 2.0), math.sin(angle / 2.0)
+                rx, ry = n0[0] * c - n0[1] * sn, n0[0] * sn + n0[1] * c
+                out.append((cur[0] + rx * distance, cur[1] + ry * distance))
+                continue
             for k in range(steps + 1):
                 c, s = math.cos(angle * k / steps), math.sin(angle * k / steps)
                 rx, ry = n0[0] * c - n0[1] * s, n0[0] * s + n0[1] * c
