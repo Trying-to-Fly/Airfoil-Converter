@@ -47,8 +47,9 @@ LOFT_SUFFIX = "_loft"
 COPY_SUFFIX = " lofted"
 BODY_FEATURE_TYPES = (LOFT_TYPE_NAME, LOFT_SURFACE_TYPE_NAME)
 
-# The order a hand-made loft lists its guides in does not change its shape, but
-# a fixed order keeps one run comparable with the next.
+# The order the guides are given in can change the loft: on SolidWorks 2026 it
+# moved one wing's inner surface by up to 0.04 mm, and its outer not at all. A
+# fixed order keeps one run comparable with the next.
 _GUIDE_ORDER = {ROLE_WING_LE: 0, ROLE_WING_SURFACE: 1, ROLE_WING_TE: 2,
                 ROLE_WING_TE_UPPER: 2, ROLE_WING_TE_LOWER: 3}
 
