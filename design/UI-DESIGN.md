@@ -381,6 +381,65 @@ window opens at the height the screen's work area actually has, and a
 scrollbar appears beside the strip only while there is something to scroll.
 Nothing inside the strip scrolls on its own.
 
+### Wing tab
+
+`wing_tab.py` is `canvas/Wing.dc.html`, built from the same panels and
+controls as the Airfoil tab. Both tabs are pages of the one strip, under a tab
+row, and share the flyout; the SolidWorks bar's dot, readout and Curves button
+are drawn once per tab from the one link (`_sw_header`). What follows is where
+the built tab differs from the page, and why.
+
+**Some hints wrap.** The page's own render at 460 px runs four lines off the
+panel: *starts a wing offset from this one*, the two Ends hints and the
+Offset hint. The Ends hints are shortened to *carries on, as at a
+centreline* and *a flat face, moved by an offset*, which fit on one line.
+The other two wrap where the row runs out rather than being cut, so those
+rows are two lines tall. The straight-edge note, *a line from
+the root rib to the tip rib*, fits once the field is the width the row gives
+it.
+
+**Sentences with names in them are text widgets.** A Tk label has one face,
+and the SolidWorks line, the checked block's rows and footer, and the tracker's
+details set curve names and numbers in mono inside a sentence. Those are
+read-only `Text` widgets (`widgets.RichText`) that grow to the lines they wrap
+to. As on the Airfoil tab, 500 lands on normal and 600 on bold.
+
+**The planform is 412 px, not 436.** 436 is wider than the block it sits in —
+the page's SVG overflows it — so it is drawn to the block's inner width. It
+stretches the span to the width and the chord to the height; it shows where
+the ribs and sections are, not the wing to scale. The *solved in 3D* label is
+kept on the canvas when the bracket is short.
+
+**The wall bar turns red outside ±5 %.** The page draws it green over the
+±5 % band; a green bar outside the band would say the wall is fine when the
+band says it is not.
+
+**Check and Loft use the tracker too.** The page shows the tracker for an
+export only. A check shows it with its one row, *Work out*, and Loft on its
+own with one row, *Loft*, so that nothing the tab does runs without a row
+saying so. An export with no SolidWorks names its second row *Write files*,
+and the *Loft* row is there only when *Loft in SolidWorks after export* is
+ticked and there is a part to loft in. The footer about a loft already in
+the part is shown only when the tracker has a *Loft* row.
+
+**A failed phase stays on screen.** The page folds the tracker back when the
+work ends. A failure does not fold: the tracker is titled *Stopped*, the reason
+is on the row that failed in red, and it stays until the next Check, Export or
+Loft, or until another wing is opened. A block after an export reads
+*Exported* rather than *Checked*.
+
+**The rib list does not scroll.** It is part of the page, as the page asks,
+so a part with many ribs makes the strip longer. The state column is 84 px,
+and widens on a taken-over row to fit *taken over · no settings*. A
+taken-over rib cannot be ticked, so **All** leaves it alone and the readout
+does not count it — *4 of 4 ticked*, as on the page, with the fifth row
+there. The list stays in record order.
+
+**The flyout's wing rows are unchanged.** The page shows `2.5 mm inward` in
+the state column; `ui_text.wing_place` still says `wing, 2.5 mm inward`, which
+the 84 px column cuts short. Changing it changes the Wing dropdown's labels
+and a test that pins the wording, so it is left for a decision of its own.
+
 The fonts are registered from `src/airfoil_converter/assets/fonts`, which
 ships empty: see the README there. `tests/test_ui_text.py` covers every line
 of derived text — the readouts, the tracker rows, the flyout's card — on a

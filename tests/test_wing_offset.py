@@ -277,6 +277,45 @@ def test_the_result_is_described_in_plain_lines(straight_wing):
     assert any("Trailing edge moves" in line for line in lines)
 
 
+def test_the_planform_is_the_wing_seen_from_above(straight_wing):
+    build = wing_build.build_wing(
+        straight_wing.wing_spec(offset="2"), straight_wing.sidecar(), "w", check=True
+    )
+    plan = wing_build.planform(build, samples=10)
+    assert (plan.start, plan.end) == pytest.approx((0.0, 300.0))
+    assert len(plan.le) == len(plan.te) == 11
+    # Unswept and untapered: the edges run straight, a chord apart.
+    assert {round(a, 6) for _, a in plan.le} == {round(plan.le[0][1], 6)}
+    assert abs(plan.te[0][1] - plan.le[0][1]) == pytest.approx(200.0)
+    assert [s for s, _, _ in plan.ribs] == pytest.approx([0.0, 300.0])
+    # The offset sections stand inside the chord, and none past the tip.
+    assert plan.sections
+    low, high = sorted((plan.le[0][1], plan.te[0][1]))
+    for s, a, b in plan.sections:
+        assert 0.0 <= s <= 300.0
+        assert low < a < high and low < b < high
+
+
+def test_the_result_panel_reads_the_build_itself(straight_wing):
+    from airfoil_converter import ui_text
+
+    build = wing_build.build_wing(
+        straight_wing.wing_spec(offset="2"), straight_wing.sidecar(), "w", check=True
+    )
+    rows = {row.label: ui_text.plain(row.runs) for row in ui_text.result_rows(build)}
+    assert rows["Ribs"] == "2 over 300.0 mm of span"
+    assert rows["Shape between"] == "thickness blended root to tip"
+    assert rows["Sections"].startswith(f"{len(build.offset.sections)}")
+    assert rows["Wall"].startswith(f"{build.offset.report.thinnest:.2f} \u2013 ")
+    detail = ui_text.plain(ui_text.work_detail(build))
+    assert detail.startswith(f"{len(build.offset.sections)} sections · wall ")
+
+    plain = wing_build.build_wing(straight_wing.wing_spec(), straight_wing.sidecar(), "w")
+    lines = [ui_text.plain(row.runs) for row in ui_text.result_rows(plain)]
+    assert lines == wing_build.describe(plain)
+    assert ui_text.plain(ui_text.work_detail(plain)) == "2 ribs · 32 surface guides"
+
+
 # -- ribs that lean with the dihedral ----------------------------------------
 
 

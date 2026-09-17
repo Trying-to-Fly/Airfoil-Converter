@@ -246,6 +246,10 @@ class ConverterApp(ttk.Frame):
         # "", "done" or "stopped": what the idle pick row has to say for itself.
         self._pick_outcome = ""
         self._flyout_open = True
+        # Every tab's SolidWorks bar shows the one link: see _sw_header.
+        self._sw_dots: List[widgets.Dot] = []
+        self._curves_buttons: List[widgets.Button] = []
+        self._sw_dot_color = theme.FAINT
 
         # The link to SolidWorks. None until the first look, and dropped again
         # whenever a call fails, so a reopened session is picked up on its own.
@@ -407,19 +411,66 @@ class ConverterApp(ttk.Frame):
         body.grid(row=0, column=0, sticky="nsew", padx=theme.px(12), pady=theme.px(12))
         body.columnconfigure(0, weight=1, minsize=theme.px(STRIP_WIDTH))
 
+        # The tabs share the strip and the flyout: each is a page gridded in
+        # the same cell under the tab row, and only the open one is shown.
+        self.tab_row = widgets.TabRow(body, self.show_tab)
+        self.tab_row.grid(row=0, column=0, sticky="ew", pady=(0, theme.px(10)))
+        body.rowconfigure(1, weight=1)
+        self.page_holder = body
+        self._pages: Dict[str, tk.Misc] = {}
+        self._tab_shown: Dict[str, Callable[[], None]] = {}
+        self._open_tab = ""
+
+        page = tk.Frame(body, bg=theme.WINDOW)
+        page.columnconfigure(0, weight=1)
         row = 0
         for build in (
             self._build_source, self._build_shape, self._build_plane,
             self._build_placement, self._build_output, self._build_sw_bar,
         ):
-            build(body).grid(row=row, column=0, sticky="ew", pady=(0, theme.px(8)))
+            build(page).grid(row=row, column=0, sticky="ew", pady=(0, theme.px(8)))
             row += 1
 
         # The footer sits at the bottom of the window however tall it is: this
         # empty row takes whatever height is going spare.
-        body.rowconfigure(row, weight=1)
-        tk.Frame(body, bg=theme.WINDOW).grid(row=row, column=0, sticky="nsew")
-        self._build_footer(body).grid(row=row + 1, column=0, sticky="ew")
+        page.rowconfigure(row, weight=1)
+        tk.Frame(page, bg=theme.WINDOW).grid(row=row, column=0, sticky="nsew")
+        self._build_footer(page).grid(row=row + 1, column=0, sticky="ew")
+        self.add_page("Airfoil", page)
+        self.show_tab("Airfoil")
+
+    def add_page(self, name: str, page: tk.Misc,
+                 shown: Optional[Callable[[], None]] = None) -> None:
+        """Put another tab's page in the strip, under a tab of its own.
+
+        ``page`` must be a child of :attr:`page_holder`; ``shown`` is called
+        each time its tab is opened.
+        """
+        page.grid(row=1, column=0, sticky="nsew")
+        page.grid_remove()
+        self._pages[name] = page
+        if shown is not None:
+            self._tab_shown[name] = shown
+        self.tab_row.add(name)
+        self.tab_row.select(self._open_tab)
+
+    def show_tab(self, name: str) -> None:
+        if name not in self._pages:
+            return
+        changed = name != self._open_tab
+        self._open_tab = name
+        for other, page in self._pages.items():
+            if other == name:
+                page.grid()
+            else:
+                page.grid_remove()
+        self.tab_row.select(name)
+        if changed:
+            self._page.yview_moveto(0)
+        shown = self._tab_shown.get(name)
+        if shown is not None:
+            shown()
+        self._relayout()
 
     # -- the pieces every panel is made of
 
@@ -753,18 +804,31 @@ class ConverterApp(ttk.Frame):
 
     # -- the SolidWorks bar, whose header is the connection itself
 
-    def _build_sw_bar(self, parent: tk.Misc) -> widgets.Panel:
-        panel = widgets.Panel(parent, "SolidWorks")
+    def _sw_header(self, panel: widgets.Panel) -> None:
+        """The connection, in a panel's header: dot, document, Curves.
+
+        Every tab's SolidWorks bar has one, and all of them follow the one
+        link this window keeps — the dots and buttons are registered here so
+        that :meth:`_refresh_link_labels` and :meth:`_toggle_flyout` reach
+        each of them.
+        """
         slot = panel.header_slot()
-        self.sw_dot = widgets.Dot(slot, theme.FAINT, bg=theme.HEADER_BG)
-        self.sw_dot.grid(row=0, column=0, padx=(0, theme.px(6)))
+        dot = widgets.Dot(slot, theme.FAINT, bg=theme.HEADER_BG)
+        dot.grid(row=0, column=0, padx=(0, theme.px(6)))
         tk.Label(slot, textvariable=self.sw_headline, bg=theme.HEADER_BG,
                  fg=theme.READOUT, font=self.fonts.readout).grid(row=0, column=1)
-        self.curves_button = widgets.Button(
-            slot, "Hide curves", command=self._toggle_flyout, icon="sidebar",
-            height=20, bg=theme.HEADER_BG,
+        button = widgets.Button(
+            slot, "Hide curves" if self._flyout_open else "Curves",
+            command=self._toggle_flyout, icon="sidebar", height=20, bg=theme.HEADER_BG,
         )
-        self.curves_button.grid(row=0, column=2, padx=(theme.px(8), 0))
+        button.grid(row=0, column=2, padx=(theme.px(8), 0))
+        dot.set_color(self._sw_dot_color)
+        self._sw_dots.append(dot)
+        self._curves_buttons.append(button)
+
+    def _build_sw_bar(self, parent: tk.Misc) -> widgets.Panel:
+        panel = widgets.Panel(parent, "SolidWorks")
+        self._sw_header(panel)
 
         body = panel.body
         body.columnconfigure(1, weight=1)
@@ -933,7 +997,8 @@ class ConverterApp(ttk.Frame):
             self._flyout_edge.grid_remove()
             self.flyout.grid_remove()
             root.geometry(f"{max(width - delta, theme.px(STRIP_WIDTH + 24))}x{height}")
-        self.curves_button.set_text("Hide curves" if self._flyout_open else "Curves")
+        for button in self._curves_buttons:
+            button.set_text("Hide curves" if self._flyout_open else "Curves")
 
     # ----------------------------------------------------------- interaction
 
@@ -1557,9 +1622,9 @@ class ConverterApp(ttk.Frame):
         """
         headline, state = ui_text.link_headline(swcom.is_available(), self._snapshot)
         self.sw_headline.set(headline)
-        self.sw_dot.set_color(
-            {"ok": theme.OK, "bad": theme.ERROR}.get(state, theme.FAINT)
-        )
+        self._sw_dot_color = {"ok": theme.OK, "bad": theme.ERROR}.get(state, theme.FAINT)
+        for dot in self._sw_dots:
+            dot.set_color(self._sw_dot_color)
         self.sw_detail.set(
             ui_text.link_detail(self._snapshot, self._sidecar_path, self.sw_status.get())
         )
@@ -2373,30 +2438,21 @@ def _scale_to_dpi(root: tk.Tk) -> float:
 
 
 def build_window(root: tk.Tk, scale: float) -> "Tuple[ConverterApp, wing_tab.WingTab]":
-    """Two tabs: the converter as it always was, and the wing built from its ribs.
+    """Two tabs in one strip: the converter, and the wing built from its ribs.
 
-    The wing tab borrows the converter's link and record of the part.
+    The wing tab is a page of the converter's strip rather than a window of
+    its own, and it borrows the converter's link and record of the part.
     """
-    root.columnconfigure(0, weight=1)
-    root.rowconfigure(0, weight=1)
-    tabs = ttk.Notebook(root)
-    tabs.grid(row=0, column=0, sticky="nsew")
-    airfoil_page = tk.Frame(tabs, bg=theme.WINDOW)
-    app = ConverterApp(airfoil_page, scale=scale)
-    wing_page = wing_tab.WingTab(tabs, app)
-    tabs.add(airfoil_page, text="Airfoil")
-    tabs.add(wing_page, text="Wing")
+    app = ConverterApp(root, scale=scale)
+    wing_page = wing_tab.WingTab(app.page_holder, app)
     app._wing_tab = wing_page
+    app.add_page("Wing", wing_page, shown=wing_page.refresh)
 
     def show_wing(wing_id: str) -> None:
-        tabs.select(wing_page)
+        app.show_tab("Wing")
         wing_page.open_wing(wing_id)
 
     app._show_wing = show_wing
-    tabs.bind(
-        "<<NotebookTabChanged>>",
-        lambda _e: wing_page.refresh() if tabs.select() == str(wing_page) else None,
-    )
     return app, wing_page
 
 

@@ -341,6 +341,47 @@ def _turn(a: Point2, b: Point2, c: Point2) -> float:
     return math.degrees(math.acos(cos))
 
 
+@dataclass
+class Planform:
+    """The wing seen from above, as the Result panel draws it.
+
+    Every position is ``(station, across)``: along the span, and along the
+    root rib's chord, in the wing's own millimetres. ``ribs`` and
+    ``sections`` are ``(station, leading edge, trailing edge)``.
+    """
+
+    start: float
+    end: float
+    le: List[Tuple[float, float]]
+    te: List[Tuple[float, float]]
+    ribs: List[Tuple[float, float, float]]
+    sections: List[Tuple[float, float, float]]
+    steep_from: Optional[float] = None
+
+
+def planform(build: WingBuild, samples: int = 48) -> Planform:
+    """The outline from the edge curves, the ribs, and the offset wing's sections.
+
+    A section rounding a closed end stands past the wing, not on it, so it is
+    left out: the drawing is of the span the ribs cover.
+    """
+    loft = build.model.loft
+    start, end = loft.start, loft.end
+    stations = [start + (end - start) * k / samples for k in range(samples + 1)]
+    le = [(s, loft.le_guide.at(s)[0]) for s in stations]
+    te = [(s, loft.te_guide.at(s)[0]) for s in stations]
+    ribs = [(sec.station, sec.le[0], sec.te[0]) for sec in build.model.sections]
+    sections: List[Tuple[float, float, float]] = []
+    steep = None
+    if build.offset is not None:
+        sections = [
+            (sec.station.station, sec.le[0], sec.te[0])
+            for sec in build.offset.sections if not sec.station.rim
+        ]
+        steep = build.offset.steep_from
+    return Planform(start, end, le, te, ribs, sections, steep)
+
+
 def describe(build: WingBuild) -> List[str]:
     """What the Result panel shows, a line each."""
     model = build.model
