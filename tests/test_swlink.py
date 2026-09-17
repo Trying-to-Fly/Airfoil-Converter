@@ -30,9 +30,15 @@ class FakeSolidWorks:
         self.join_fails = False
         self.tree = {}           # folder name -> the names it holds
         self.folder_fails = set()
+        self.sketching = False
+        self.joined_from = {}    # composite name -> the curves it joins
+        self.rename_fails = False
 
     def active_document(self):
         return self.doc
+
+    def editing_sketch(self):
+        return self.sketching
 
     def curve_features(self):
         return [FeatureInfo(name=n, type_name="CurveInFile") for n in self.curves]
@@ -59,7 +65,19 @@ class FakeSolidWorks:
             raise SolidWorksError("SolidWorks would not join them")
         kept = self.rename_to.get(name, name)
         self.composites.append(kept)
+        self.joined_from[kept] = list(sources)
         return kept
+
+    def composite_sources(self, name):
+        return list(self.joined_from.get(name, ()))
+
+    def rename_feature(self, current, new):
+        self.calls.append(("rename", current, new))
+        if self.rename_fails:
+            raise SolidWorksError("no")
+        self.composites[self.composites.index(current)] = new
+        self.joined_from[new] = self.joined_from.pop(current)
+        return new
 
     def set_rebuild_suppressed(self, suppressed):
         self.calls.append(("suppress", suppressed))
@@ -352,6 +370,7 @@ def test_a_second_push_does_not_join_again(tmp_path):
 
     result = push(sw, curves, str(tmp_path), join_as="rib_airfoil_joined")
     assert indexes(sw.calls, "join") == []
+    assert indexes(sw.calls, "rename") == []
     assert result.joined_now is False
     # Still named, so a record made before it existed learns about it.
     assert result.joined == "rib_airfoil_joined"
@@ -415,6 +434,7 @@ def test_a_composite_from_an_earlier_run_is_recognised_not_remade(tmp_path):
     """Otherwise the app calls its own curve a stray and never records it."""
     sw = FakeSolidWorks(features=["rib_airfoil", "rib_airfoil_te", "rib_camber"])
     sw.composites.append("rib_airfoil_joined")
+    sw.joined_from["rib_airfoil_joined"] = ["rib_airfoil", "rib_airfoil_te"]
 
     result = push(sw, te_pair(), str(tmp_path), join_as="rib_airfoil_joined")
     assert result.joined == "rib_airfoil_joined"
@@ -550,3 +570,135 @@ def test_a_renamed_parent_keeps_its_name_when_a_rib_is_added():
 
     assert sw.tree["Sections"] == ["rib", "rib_2"]
     assert swlink.PARENT_FOLDER not in sw.tree
+
+
+# -- a wing's many joins ----------------------------------------------------
+
+
+def wing_sections():
+    return [
+        curve("section", "w_s01"),
+        curve("section_te", "w_s01_te"),
+        curve("section", "w_s02"),
+        curve("section_te", "w_s02_te"),
+        curve("wing_le", "w_le"),
+    ]
+
+
+WING_JOINS = [
+    (("w_s01", "w_s01_te"), "w_s01_joined"),
+    (("w_s02", "w_s02_te"), "w_s02_joined"),
+]
+
+
+def test_every_listed_join_is_made(tmp_path):
+    sw = FakeSolidWorks()
+    result = push(sw, wing_sections(), str(tmp_path), joins=WING_JOINS)
+    assert result.joined_all == ["w_s01_joined", "w_s02_joined"]
+    assert result.joined_new == 2
+    assert "2 joined" in result.summary()
+
+
+def test_joins_already_made_are_recognised(tmp_path):
+    sw = FakeSolidWorks()
+    push(sw, wing_sections(), str(tmp_path), joins=WING_JOINS)
+    sw.calls.clear()
+    result = push(sw, wing_sections(), str(tmp_path), joins=WING_JOINS)
+    assert indexes(sw.calls, "join") == []
+    assert result.joined_all == ["w_s01_joined", "w_s02_joined"]
+    assert result.joined_new == 0
+
+
+def test_one_failed_join_does_not_stop_the_others(tmp_path):
+    sw = FakeSolidWorks()
+    sw.rename_to = {"w_s01_joined": "CompCurve1"}
+    result = push(sw, wing_sections(), str(tmp_path), joins=WING_JOINS)
+    assert result.joined_all == ["w_s02_joined"]
+    assert result.failures == [("w_s01_joined", "SolidWorks named it 'CompCurve1' instead")]
+
+
+def test_a_join_missing_its_curve_is_reported(tmp_path):
+    sw = FakeSolidWorks()
+    sw.insert_fails = {"w_s02_te"}
+    result = push(sw, wing_sections(), str(tmp_path), joins=WING_JOINS)
+    assert ("w_s02_joined", "cannot join without w_s02_te") in result.failures
+    assert result.joined_all == ["w_s01_joined"]
+
+
+def test_wing_folders_and_rib_folders_keep_to_their_own_parents(tmp_path):
+    sw = FakeSolidWorks(features=["rib_airfoil", "rib_2_airfoil", "w_le", "w_te", "w_s01"])
+    swlink.arrange(sw, [group("rib", "rib_airfoil"), group("rib_2", "rib_2_airfoil")])
+    swlink.arrange(sw, [group("w", "w_le", "w_te", "w_s01")], parent="Wing Curves")
+    sw.calls.clear()
+
+    again_ribs = swlink.arrange(sw, [group("rib", "rib_airfoil"), group("rib_2", "rib_2_airfoil")])
+    again_wing = swlink.arrange(sw, [group("w", "w_le", "w_te", "w_s01")], parent="Wing Curves")
+
+    assert again_ribs.made == [] and again_wing.made == []
+    assert sw.tree["Airfoil Curves"] == ["rib", "rib_2"]
+    assert sw.tree["Wing Curves"] == ["w"]
+
+
+# -- never select anything while a sketch is open -----------------------------
+
+
+def test_nothing_is_pushed_while_a_sketch_is_open(tmp_path, curves):
+    """Selecting from outside mid-sketch has crashed SolidWorks outright."""
+    sw = FakeSolidWorks()
+    sw.sketching = True
+    with pytest.raises(LinkError, match="sketch is open"):
+        push(sw, curves, str(tmp_path))
+    assert sw.calls == []
+
+
+def test_the_tree_is_left_alone_while_a_sketch_is_open():
+    sw = FakeSolidWorks(features=["rib_airfoil"])
+    sw.sketching = True
+    result = swlink.arrange(sw, [group("rib", "rib_airfoil")])
+    assert sw.calls == []
+    assert result.failures and "sketch is open" in result.failures[0][1]
+
+
+def test_a_join_whose_pieces_changed_is_made_again(tmp_path):
+    """A section that came to a corner is two halves now.
+
+    The old join is renamed, never deleted: a loft built on it would go with it.
+    """
+    sw = FakeSolidWorks()
+    push(sw, [curve("section", "w_root"), curve("section_te", "w_root_te")], str(tmp_path),
+         joins=[(("w_root", "w_root_te"), "w_root_joined")])
+    sw.calls.clear()
+    halves = [curve("section_upper", "w_root_upper"), curve("section_lower", "w_root_lower"),
+              curve("section_te", "w_root_te")]
+    wanted = ("w_root_upper", "w_root_lower", "w_root_te")
+    result = push(sw, halves, str(tmp_path), joins=[(wanted, "w_root_joined")])
+    assert ("rename", "w_root_joined", "w_root_joined_old") in sw.calls
+    assert indexes(sw.calls, "rename")[0] < indexes(sw.calls, "join")[0]
+    assert ("join", wanted, "w_root_joined") in sw.calls
+    assert sw.joined_from["w_root_joined_old"] == ["w_root", "w_root_te"]
+    assert result.joined_all == ["w_root_joined"] and not result.failures
+    assert result.remade == [("w_root_joined", "w_root_joined_old")]
+    assert "pick them again" in result.summary()
+
+
+def test_an_old_join_already_moved_aside_is_not_overwritten(tmp_path):
+    sw = FakeSolidWorks()
+    sw.composites += ["w_root_joined", "w_root_joined_old"]
+    sw.joined_from.update({"w_root_joined": ["w_root", "w_root_te"],
+                           "w_root_joined_old": ["x"]})
+    sw.curves += ["w_root", "w_root_te"]
+    push(sw, [curve("section_upper", "w_root_upper"), curve("section_te", "w_root_te")],
+         str(tmp_path), joins=[(("w_root_upper", "w_root_te"), "w_root_joined")])
+    assert ("rename", "w_root_joined", "w_root_joined_old2") in sw.calls
+
+
+def test_a_join_that_cannot_be_moved_aside_is_reported(tmp_path):
+    sw = FakeSolidWorks()
+    push(sw, [curve("section", "w_root"), curve("section_te", "w_root_te")], str(tmp_path),
+         joins=[(("w_root", "w_root_te"), "w_root_joined")])
+    sw.rename_fails = True
+    result = push(sw, [curve("section_upper", "w_root_upper"), curve("section_te", "w_root_te")],
+                  str(tmp_path), joins=[(("w_root_upper", "w_root_te"), "w_root_joined")])
+    assert result.failures == [("w_root_joined", "no")]
+    assert result.joined_all == []
+    assert len(indexes(sw.calls, "join")) == 1   # only the first push's

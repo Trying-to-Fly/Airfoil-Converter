@@ -1,0 +1,488 @@
+<title>Wing Tab Workbench</title>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Libre+Franklin:wght@400;500;600&family=JetBrains+Mono:wght@400;500&display=swap">
+<style>
+:root{
+  --pg:#f6f6f6;--pg-ink:#1f1f1f;--pg-muted:#6e6e6e;--pg-rule:#d9d9d9;--pg-card:#ffffff;--pg-head:#505050;
+  /* the app's own tokens: theme.py, §3 of design/UI-DESIGN.md — a light Windows window, drawn the same on any host */
+  --win:#f0f0f0;--white:#ffffff;--hbg:#f5f5f5;--sec:#f8f8f8;--trk:#fafafa;--dis:#f4f4f4;--track:#ebebeb;--rowsel:#e9e9e9;
+  --rule:#e3e3e3;--bsoft:#d8d8d8;--border:#c6c6c6;--tborder:#cfcfcf;--goff:#b5b5b5;--faint:#9c9c9c;--ro:#8f8f8f;--muted:#6e6e6e;
+  --htext:#505050;--label:#3c3c3c;--ink:#1f1f1f;--accent:#2b2b2b;--ok:#1a7f37;--err:#b42318;--untracked:#777777;
+  --sans:'Libre Franklin','Segoe UI',system-ui,sans-serif;--mono:'JetBrains Mono',Consolas,ui-monospace,monospace;
+}
+@media (prefers-color-scheme:dark){:root:not([data-theme="light"]){--pg:#1a1a1a;--pg-ink:#e8e8e8;--pg-muted:#9d9d9d;--pg-rule:#383838;--pg-card:#232323;--pg-head:#bdbdbd}}
+:root[data-theme="dark"]{--pg:#1a1a1a;--pg-ink:#e8e8e8;--pg-muted:#9d9d9d;--pg-rule:#383838;--pg-card:#232323;--pg-head:#bdbdbd}
+*{box-sizing:border-box}
+body{background:var(--pg);color:var(--pg-ink);font:14px/1.5 var(--sans);padding-block:28px 48px;padding-inline:16px}
+.wrap{max-width:1360px;margin:0 auto}
+h1{font-size:22px;font-weight:600;margin:0 0 4px;text-wrap:balance}
+.lede{max-width:66ch;color:var(--pg-muted);margin:0 0 22px}
+.lede b{color:var(--pg-ink);font-weight:600}
+h2{font-size:11.5px;font-weight:600;text-transform:uppercase;letter-spacing:.06em;color:var(--pg-head);margin:34px 0 10px}
+.boards{display:flex;gap:28px;overflow-x:auto;padding-bottom:10px;align-items:flex-start;scroll-snap-type:x proximity}
+figure{margin:0;flex:none;scroll-snap-align:start}
+figcaption{font-size:12.5px;color:var(--pg-muted);margin:0 0 8px;display:flex;gap:10px;align-items:baseline}
+figcaption b{color:var(--pg-ink);font-weight:600}
+figcaption code{font:11.5px var(--mono);color:var(--pg-muted)}
+.win{display:flex;background:var(--win);border:1px solid var(--pg-rule);box-shadow:0 1px 3px rgba(0,0,0,.10)}
+
+/* ---- the strip ---- */
+.strip{width:460px;flex:none;padding:12px;display:flex;flex-direction:column;gap:8px;font:13px/1.35 var(--sans);color:var(--ink);min-height:1180px}
+.tabs{display:flex;gap:18px;height:28px;border-bottom:1px solid var(--bsoft);margin-bottom:2px}
+.tab{display:flex;align-items:center;padding:0 2px;color:var(--muted);font-size:12.5px}
+.tab.on{color:var(--ink);font-weight:600;box-shadow:inset 0 -2px 0 var(--accent)}
+.panel{background:var(--white);border:1px solid var(--bsoft);border-radius:2px}
+.panel>header{height:26px;background:var(--hbg);border-bottom:1px solid var(--rule);display:flex;align-items:center;gap:8px;padding:0 12px}
+.panel h3{margin:0;font-size:11.5px;font-weight:600;text-transform:uppercase;letter-spacing:.06em;color:var(--htext)}
+.ro{margin-left:auto;font-size:11.5px;color:var(--ro);white-space:nowrap}
+.ro .dot{display:inline-block;width:7px;height:7px;border-radius:50%;background:var(--ok);margin-right:6px;vertical-align:1px}
+.body{padding:8px 12px;display:flex;flex-direction:column;gap:6px}
+.row{display:flex;align-items:center;gap:8px;min-height:26px}
+.row.top{align-items:flex-start}
+.lbl{width:118px;flex:none;font-size:12.5px;color:var(--label)}
+.lbl.off{color:var(--faint)}
+.hint{font-size:12px;color:var(--muted);white-space:nowrap}
+.grow{flex:1 1 0;min-width:0}
+.fld{height:26px;border:1px solid var(--border);border-radius:2px;background:var(--white);padding:0 8px;display:flex;align-items:center;gap:6px;font:12.5px var(--mono);color:var(--ink);white-space:nowrap;overflow:hidden}
+.fld .u{margin-left:auto;font:11.5px var(--sans);color:var(--ro)}
+.fld.ph{color:var(--faint)}
+.fld.off{background:var(--dis);border-color:var(--rule);color:var(--faint)}
+.fld.sans{font-family:var(--sans)}
+.dd{justify-content:space-between}
+.dd svg{flex:none;margin-right:-2px;color:var(--muted)}
+.w84{width:84px;flex:none}.w140{width:140px;flex:none}.w150{width:150px;flex:none}.w170{width:170px;flex:none}
+.seg{display:flex;border:1px solid var(--bsoft);border-radius:2px;background:var(--track);padding:2px;gap:2px}
+.seg span{flex:1;height:22px;display:flex;align-items:center;justify-content:center;font-size:12px;color:var(--htext);border-radius:2px;white-space:nowrap;padding:0 6px}
+.seg .on{background:var(--white);box-shadow:0 0 0 1px var(--border);color:var(--ink);font-weight:600}
+.seg.mono span{font-family:var(--mono)}
+.seg.off span{color:var(--goff)}
+.seg.off .on{background:var(--dis);box-shadow:0 0 0 1px var(--rule);color:var(--goff);font-weight:600}
+.cb{display:inline-flex;align-items:center;gap:7px;font-size:12.5px}
+.cb i{width:15px;height:15px;border:1px solid var(--ro);border-radius:2px;background:var(--white);display:inline-flex;align-items:center;justify-content:center;color:#fff;flex:none}
+.cb.on i{background:var(--accent);border-color:var(--accent)}
+.cb.off{color:var(--faint)}
+.cb.off i{background:var(--dis);border-color:var(--bsoft)}
+.btn{height:26px;padding:0 10px;border:1px solid var(--border);border-radius:2px;background:var(--sec);font:500 13px var(--sans);color:var(--ink);display:inline-flex;align-items:center;gap:6px;white-space:nowrap}
+.btn.t{height:24px}
+.btn.h{height:20px;font-size:12px;padding:0 8px}
+.btn.off{color:var(--faint);border-color:var(--rule);background:var(--dis)}
+.btn.pri{height:32px;padding:0 18px;background:var(--accent);border-color:var(--accent);color:#fff;font-weight:600}
+.btn.pri.off{background:#8a8a8a;border-color:#8a8a8a}
+.btn svg{flex:none}
+.rule{height:1px;background:var(--track)}
+/* rib list, styled as the tree in the flyout */
+.list{border:1px solid var(--bsoft);background:var(--white)}
+.list .lh{height:22px;background:var(--hbg);display:flex;align-items:center;padding:0 8px 0 31px;font-size:11px;text-transform:uppercase;letter-spacing:.04em;color:var(--muted)}
+.list .lh .st{margin-left:auto;width:84px}
+.lr{display:flex;align-items:center;height:22px;padding:0 8px;gap:8px;font:12px var(--mono)}
+.lr .st{margin-left:auto;width:84px;flex:none;font:600 11.5px var(--mono);color:var(--ink)}
+.lr.off{color:var(--faint)}
+.lr.off .st{font-weight:400;color:var(--faint);font-family:var(--sans)}
+.tools{display:flex;align-items:center;gap:6px}
+.tools .hint{margin-left:auto}
+/* the result block and the export tracker: the pick tracker's own device */
+.blk{background:var(--trk);border:1px solid var(--tborder);border-radius:2px;padding:8px 10px;display:flex;flex-direction:column;gap:5px}
+.blk .t{display:flex;align-items:center;gap:8px;min-height:22px}
+.blk .t b{font-size:11px;font-weight:600;text-transform:uppercase;letter-spacing:.06em;color:var(--accent)}
+.blk .t b code{font:500 11px var(--mono);text-transform:none;letter-spacing:0}
+.blk .t small{font-size:11px;color:var(--muted)}
+.blk .t .btn{margin-left:auto}
+.kv{display:flex;gap:8px;align-items:flex-start;font-size:12px;line-height:18px}
+.kv .k{width:108px;flex:none;color:var(--muted)}
+.kv .v{color:var(--ink)}
+.kv .v code{font:12px var(--mono)}
+.kv .v .n{font:500 12px var(--mono)}
+.kv.big .v{font-size:13px;font-weight:600}
+.kv.big .v .n{font-size:13px}
+.blk .foot{font-size:11.5px;color:var(--muted);line-height:1.4;margin-top:2px}
+.blk .foot code{font:11.5px var(--mono);color:var(--ink)}
+.tr{display:flex;align-items:center;height:24px;gap:8px;font-size:12.5px}
+.tr .g{width:16px;height:16px;border-radius:50%;flex:none;display:flex;align-items:center;justify-content:center}
+.tr.done .g{background:var(--ok);color:#fff}
+.tr.act .g{border:2px solid var(--accent)}
+.tr.act .g::after{content:"";width:6px;height:6px;border-radius:50%;background:var(--accent)}
+.tr.pend .g{border:1.5px solid var(--goff)}
+.tr .nm{width:88px;flex:none}
+.tr.act .nm{font-weight:600}
+.tr .d{font-size:12px;color:var(--label);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.tr .d code{font:12px var(--mono)}
+.tr.pend .nm,.tr.pend .d{color:var(--faint)}
+.tr.done .d code{color:var(--ink)}
+/* footer */
+.sfoot{margin-top:auto;display:flex;align-items:center;gap:10px;padding-top:6px}
+.sfoot .s{display:flex;align-items:center;gap:8px;font-size:12.5px;color:var(--ok);flex:1;min-width:0;overflow:hidden;white-space:nowrap;text-overflow:ellipsis}
+.sfoot .s i{width:8px;height:8px;border-radius:50%;background:var(--ok);flex:none}
+.sfoot .s.busy{color:var(--label)}
+.sfoot .s.busy i{background:var(--label)}
+svg.pf text{font:10.5px var(--sans);fill:var(--muted)}
+svg.pf .mono{font-family:var(--mono)}
+/* ---- the flyout ---- */
+.fly{width:360px;flex:none;background:var(--sec);border-left:1px solid var(--bsoft);padding:12px;display:flex;flex-direction:column;gap:8px;font:13px/1.35 var(--sans);color:var(--ink)}
+.fly .fh{height:26px;display:flex;align-items:center}
+.fly .fh h3{margin:0;font-size:11.5px;font-weight:600;text-transform:uppercase;letter-spacing:.06em;color:var(--htext)}
+.fly .fh .btn{margin-left:auto}
+.fly .conn b{font-weight:600;font-size:12.5px}
+.fly .conn div{font-size:11.5px;color:var(--muted)}
+.fly .conn code{font:11.5px var(--mono)}
+.fly .tools .hint{margin-left:auto;font-size:11.5px}
+.tree{flex:1;background:var(--white);border:1px solid var(--bsoft);display:flex;flex-direction:column;min-height:560px}
+.tree .th{height:22px;background:var(--hbg);display:flex;align-items:center;padding:0 8px 0 24px;font-size:11px;text-transform:uppercase;letter-spacing:.04em;color:var(--muted)}
+.tree .th .st{margin-left:auto;width:84px}
+.tn{height:20px;display:flex;align-items:center;gap:6px;padding:0 8px;font:12px var(--mono)}
+.tn .st{margin-left:auto;width:84px;flex:none;font:11.5px var(--mono)}
+.tn.rec .st{font-weight:600}
+.tn.sel{background:var(--rowsel)}
+.tn.ok{color:var(--ok)}.tn.ok .st{color:var(--ok)}
+.tn.bad{color:var(--err)}.tn.bad .st{color:var(--err)}
+.tn.un{color:var(--untracked)}
+.tn .car{width:10px;flex:none;color:var(--ro)}
+.tn.d1{padding-left:24px}.tn.d2{padding-left:40px}.tn.d3{padding-left:56px}
+.tn.ellip{color:var(--faint);font-family:var(--sans);font-size:11.5px}
+.card{background:var(--white);border:1px solid var(--bsoft);padding:8px 10px;display:flex;flex-direction:column;gap:4px}
+.card .n{display:flex;align-items:center;font-weight:600;font-size:12.5px}
+.card .n span{margin-left:auto;color:var(--ok);font-weight:500;font-size:12px}
+.card .l{font-size:11.5px;color:var(--label);line-height:1.4}
+.card .h{font-size:11.5px;color:var(--muted);line-height:1.4}
+/* ---- notes under the boards ---- */
+.notes{max-width:1000px}
+table{border-collapse:collapse;width:100%;font-size:13px}
+th,td{text-align:left;vertical-align:top;padding:8px 10px;border-bottom:1px solid var(--pg-rule);line-height:1.45}
+th{font-size:11px;text-transform:uppercase;letter-spacing:.06em;color:var(--pg-head);font-weight:600}
+td:first-child{font-weight:600;width:130px;white-space:nowrap}
+td code,li code,p code{font:12px var(--mono)}
+.tblwrap{overflow-x:auto;background:var(--pg-card);border:1px solid var(--pg-rule);border-radius:2px}
+.notes ul{padding-left:18px;margin:0}
+.notes li{margin:4px 0;max-width:80ch}
+.notes p{max-width:80ch;margin:6px 0}
+.cols{display:grid;grid-template-columns:repeat(auto-fit,minmax(300px,1fr));gap:24px}
+@media (prefers-reduced-motion:no-preference){.boards{scroll-behavior:smooth}}
+</style>
+
+<div class="wrap">
+<h1>The Wing tab, in the workbench</h1>
+<p class="lede">The Wing tab on <b>wing-offset</b> is plain ttk today, laid out two columns wide "until its own design pass". This is that pass: the same 460 px Graphite strip the Airfoil tab already has, one column, panels in the order the work happens, and two things the tab was missing: a proper <b>Result</b> for Check, and a per-phase tracker for Export. Nothing here changes what the form means; every field maps to a variable the tab already has (table at the bottom).</p>
+
+<div class="boards">
+
+<!-- ============================ A ============================ -->
+<figure>
+<figcaption><b>A</b> New wing, before a check <code>460 px · strip only</code></figcaption>
+<div class="win"><div class="strip">
+<div class="tabs"><div class="tab">Airfoil</div><div class="tab on">Wing</div></div>
+
+<section class="panel"><header><h3>Wing</h3><span class="ro">new wing</span></header><div class="body">
+ <div class="row"><span class="lbl">Wing</span><div class="fld dd sans grow">New wing<svg width="12" height="12" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><path d="M4 6l4 4 4-4"/></svg></div></div>
+ <div class="row"><span class="lbl"></span><span class="btn t">New wing</span><span class="btn t">Make offset copy</span><span class="hint">starts a wing offset from this one</span></div>
+ <div class="row"><span class="lbl">Name</span><div class="fld grow">wing</div></div>
+</div></section>
+
+<section class="panel"><header><h3>Ribs</h3><span class="ro">4 of 4 ticked</span></header><div class="body">
+ <div class="list">
+  <div class="lh">Rib<span class="st">Leading edge</span></div>
+  <div class="lr"><span class="cb on"><i><svg width="11" height="11" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M3.5 8.5l3 3 6-7"/></svg></i></span>sd7037-il<span class="st">0, 0, 0</span></div>
+  <div class="lr"><span class="cb on"><i><svg width="11" height="11" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M3.5 8.5l3 3 6-7"/></svg></i></span>sd7037-il (2)<span class="st">0, 0, 350</span></div>
+  <div class="lr"><span class="cb on"><i><svg width="11" height="11" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M3.5 8.5l3 3 6-7"/></svg></i></span>sd7037-il (3)<span class="st">0, 0, 700</span></div>
+  <div class="lr"><span class="cb on"><i><svg width="11" height="11" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M3.5 8.5l3 3 6-7"/></svg></i></span>sd7037-il (4)<span class="st">0, 0, 1000</span></div>
+  <div class="lr off"><span class="cb off"><i></i></span>Curve7<span class="st">taken over · no settings</span></div>
+ </div>
+ <div class="tools"><span class="btn t">Refresh</span><span class="btn t">All</span><span class="btn t">None</span><span class="hint">the root and the tip at least</span></div>
+</div></section>
+
+<section class="panel"><header><h3>Edges</h3><span class="ro">LE from a file · TE straight</span></header><div class="body">
+ <div class="row"><span class="lbl">Leading edge</span><div class="seg w170"><span class="on">Curve file</span><span>Straight line</span></div><span class="hint">runs through every rib</span></div>
+ <div class="row"><span class="lbl"></span><div class="fld grow">D:\Wings\wing_le.sldcrv</div><span class="btn"><svg width="14" height="14" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="M2 4.5A1.5 1.5 0 0 1 3.5 3h3l1.5 1.5h4.5A1.5 1.5 0 0 1 14 6v5.5a1.5 1.5 0 0 1-1.5 1.5h-9A1.5 1.5 0 0 1 2 11.5z"/></svg>Browse</span></div>
+ <div class="row"><span class="lbl">Trailing edge</span><div class="seg w170"><span>Curve file</span><span class="on">Straight line</span></div><span class="hint">corner to corner</span></div>
+ <div class="row"><span class="lbl"></span><div class="fld off sans grow">a line from the root rib to the tip rib</div><span class="btn off"><svg width="14" height="14" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="M2 4.5A1.5 1.5 0 0 1 3.5 3h3l1.5 1.5h4.5A1.5 1.5 0 0 1 14 6v5.5a1.5 1.5 0 0 1-1.5 1.5h-9A1.5 1.5 0 0 1 2 11.5z"/></svg>Browse</span></div>
+</div></section>
+
+<section class="panel"><header><h3>Ends</h3><span class="ro">root open · tip closed</span></header><div class="body">
+ <div class="row"><span class="lbl">Root</span><div class="seg w140"><span class="on">Open</span><span>Closed</span></div><span class="hint">the skin carries on, as at a centreline</span></div>
+ <div class="row"><span class="lbl">Tip</span><div class="seg w140"><span>Open</span><span class="on">Closed</span></div><span class="hint">a flat face, which an offset moves too</span></div>
+ <div class="row"><span class="lbl"></span><span class="cb"><i></i>The root is the end further from the origin</span></div>
+</div></section>
+
+<section class="panel"><header><h3>Offset</h3><span class="ro">none · the wing itself</span></header><div class="body">
+ <div class="row"><span class="lbl">Distance</span><div class="fld ph w84">none<span class="u">mm</span></div><div class="seg w140"><span class="on">Inward</span><span>Outward</span></div></div>
+ <div class="row"><span class="lbl off">Profiles</span><div class="seg off grow"><span class="on">Root and tip only</span><span>All sections</span></div></div>
+ <div class="row"><span class="lbl">Thickness</span><div class="seg grow"><span class="on">Blended root to tip</span><span>Airfoil scaled to chord</span></div></div>
+ <div class="row" style="min-height:0"><span class="lbl"></span><span class="hint">Blank exports the wing's own edges and 32 surface guides.</span></div>
+</div></section>
+
+<section class="panel"><header><h3>Output</h3><span class="ro">Curve Through XYZ Points</span></header><div class="body">
+ <div class="row"><span class="lbl">Format</span><div class="seg mono w150"><span class="on">.sldcrv</span><span>.txt</span></div></div>
+ <div class="row"><span class="lbl">Folder</span><div class="fld grow">D:\Wings</div><span class="btn"><svg width="14" height="14" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="M2 4.5A1.5 1.5 0 0 1 3.5 3h3l1.5 1.5h4.5A1.5 1.5 0 0 1 14 6v5.5a1.5 1.5 0 0 1-1.5 1.5h-9A1.5 1.5 0 0 1 2 11.5z"/></svg>Browse</span></div>
+</div></section>
+
+<section class="panel"><header><h3>SolidWorks</h3><span class="ro"><span class="dot"></span>2026 — WingRib.SLDPRT</span><span class="btn h"><svg width="13" height="13" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><rect x="2" y="3" width="12" height="10" rx="1"/><path d="M10 3v10"/></svg>Curves</span></header><div class="body">
+ <div class="row" style="min-height:20px;align-items:flex-start"><svg width="15" height="15" viewBox="0 0 16 16" fill="none" stroke="#505050" stroke-width="1.5" stroke-linecap="round" style="flex:none;margin-top:2px"><circle cx="8" cy="8" r="6.2"/><path d="M8 7.2v4"/><path d="M8 5v.2"/></svg><span style="font-size:12.5px;line-height:1.4">Export will make <code style="font:12.5px var(--mono)">wing_le</code>, <code style="font:12.5px var(--mono)">wing_te</code> and 32 surface guides under <b>Wing Curves</b>.</span></div>
+ <div class="row" style="min-height:20px"><span class="cb on"><i><svg width="11" height="11" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M3.5 8.5l3 3 6-7"/></svg></i>Insert new curves into the open part</span></div>
+ <div class="row" style="min-height:20px"><span class="cb"><i></i>Loft in SolidWorks after export</span></div>
+</div></section>
+
+<section class="panel"><header><h3>Result</h3><span class="ro">not checked yet</span><span class="btn h">Check</span><span class="btn h off">Loft</span></header><div class="body">
+ <div class="row" style="min-height:20px"><span class="hint" style="white-space:normal">Check works the wing out without exporting it, and says the wall it expects.</span></div>
+</div></section>
+
+<div class="sfoot"><div class="s"><i></i>4 ribs in the part. Export will make a new wing.</div><span class="btn pri">Export</span></div>
+</div></div>
+</figure>
+
+<!-- ============================ B ============================ -->
+<figure>
+<figcaption><b>B</b> An offset wing, just checked <code>460 px · editing wing_inner</code></figcaption>
+<div class="win"><div class="strip">
+<div class="tabs"><div class="tab">Airfoil</div><div class="tab on">Wing</div></div>
+
+<section class="panel"><header><h3>Wing</h3><span class="ro">editing wing_inner</span></header><div class="body">
+ <div class="row"><span class="lbl">Wing</span><div class="fld dd sans grow">wing_inner — wing, 2.5 mm inward<svg width="12" height="12" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><path d="M4 6l4 4 4-4"/></svg></div></div>
+ <div class="row"><span class="lbl"></span><span class="btn t">New wing</span><span class="btn t">Make offset copy</span></div>
+ <div class="row"><span class="lbl">Name</span><div class="fld off grow">wing_inner</div><span class="hint">keeps its curves' names</span></div>
+</div></section>
+
+<section class="panel"><header><h3>Ribs</h3><span class="ro">4 of 4 ticked</span></header><div class="body">
+ <div class="list">
+  <div class="lh">Rib<span class="st">Leading edge</span></div>
+  <div class="lr"><span class="cb on"><i><svg width="11" height="11" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M3.5 8.5l3 3 6-7"/></svg></i></span>sd7037-il<span class="st">0, 0, 0</span></div>
+  <div class="lr"><span class="cb on"><i><svg width="11" height="11" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M3.5 8.5l3 3 6-7"/></svg></i></span>sd7037-il (2)<span class="st">0, 0, 350</span></div>
+  <div class="lr"><span class="cb on"><i><svg width="11" height="11" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M3.5 8.5l3 3 6-7"/></svg></i></span>sd7037-il (3)<span class="st">0, 0, 700</span></div>
+  <div class="lr"><span class="cb on"><i><svg width="11" height="11" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M3.5 8.5l3 3 6-7"/></svg></i></span>sd7037-il (4)<span class="st">0, 0, 1000</span></div>
+  <div class="lr off"><span class="cb off"><i></i></span>Curve7<span class="st">taken over · no settings</span></div>
+ </div>
+ <div class="tools"><span class="btn t">Refresh</span><span class="btn t">All</span><span class="btn t">None</span><span class="hint">the root and the tip at least</span></div>
+</div></section>
+
+<section class="panel"><header><h3>Edges</h3><span class="ro">LE from a file · TE straight</span></header><div class="body">
+ <div class="row"><span class="lbl">Leading edge</span><div class="seg w170"><span class="on">Curve file</span><span>Straight line</span></div><span class="hint">runs through every rib</span></div>
+ <div class="row"><span class="lbl"></span><div class="fld grow">D:\Wings\wing_le.sldcrv</div><span class="btn"><svg width="14" height="14" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="M2 4.5A1.5 1.5 0 0 1 3.5 3h3l1.5 1.5h4.5A1.5 1.5 0 0 1 14 6v5.5a1.5 1.5 0 0 1-1.5 1.5h-9A1.5 1.5 0 0 1 2 11.5z"/></svg>Browse</span></div>
+ <div class="row"><span class="lbl">Trailing edge</span><div class="seg w170"><span>Curve file</span><span class="on">Straight line</span></div><span class="hint">corner to corner</span></div>
+ <div class="row"><span class="lbl"></span><div class="fld off sans grow">a line from the root rib to the tip rib</div><span class="btn off"><svg width="14" height="14" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="M2 4.5A1.5 1.5 0 0 1 3.5 3h3l1.5 1.5h4.5A1.5 1.5 0 0 1 14 6v5.5a1.5 1.5 0 0 1-1.5 1.5h-9A1.5 1.5 0 0 1 2 11.5z"/></svg>Browse</span></div>
+</div></section>
+
+<section class="panel"><header><h3>Ends</h3><span class="ro">root open · tip closed</span></header><div class="body">
+ <div class="row"><span class="lbl">Root</span><div class="seg w140"><span class="on">Open</span><span>Closed</span></div><span class="hint">the skin carries on, as at a centreline</span></div>
+ <div class="row"><span class="lbl">Tip</span><div class="seg w140"><span>Open</span><span class="on">Closed</span></div><span class="hint">a flat face, which an offset moves too</span></div>
+ <div class="row"><span class="lbl"></span><span class="cb"><i></i>The root is the end further from the origin</span></div>
+</div></section>
+
+<section class="panel"><header><h3>Offset</h3><span class="ro">2.5 mm inward</span></header><div class="body">
+ <div class="row"><span class="lbl">Distance</span><div class="fld w84">2.5<span class="u">mm</span></div><div class="seg w140"><span class="on">Inward</span><span>Outward</span></div></div>
+ <div class="row"><span class="lbl">Profiles</span><div class="seg grow"><span class="on">Root and tip only</span><span>All sections</span></div></div>
+ <div class="row"><span class="lbl">Thickness</span><div class="seg grow"><span>Blended root to tip</span><span class="on">Airfoil scaled to chord</span></div></div>
+ <div class="row" style="min-height:0"><span class="lbl"></span><span class="hint">Root and tip go in, held by 30 guides worked out through every section.</span></div>
+</div></section>
+
+<section class="panel"><header><h3>Output</h3><span class="ro">Curve Through XYZ Points</span></header><div class="body">
+ <div class="row"><span class="lbl">Format</span><div class="seg mono w150"><span class="on">.sldcrv</span><span>.txt</span></div></div>
+ <div class="row"><span class="lbl">Folder</span><div class="fld grow">D:\Wings</div><span class="btn"><svg width="14" height="14" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="M2 4.5A1.5 1.5 0 0 1 3.5 3h3l1.5 1.5h4.5A1.5 1.5 0 0 1 14 6v5.5a1.5 1.5 0 0 1-1.5 1.5h-9A1.5 1.5 0 0 1 2 11.5z"/></svg>Browse</span></div>
+</div></section>
+
+<section class="panel"><header><h3>SolidWorks</h3><span class="ro"><span class="dot"></span>2026 — WingRib.SLDPRT</span><span class="btn h"><svg width="13" height="13" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><rect x="2" y="3" width="12" height="10" rx="1"/><path d="M10 3v10"/></svg>Curves</span></header><div class="body">
+ <div class="row" style="min-height:20px;align-items:flex-start"><svg width="15" height="15" viewBox="0 0 16 16" fill="none" stroke="#505050" stroke-width="1.5" stroke-linecap="round" style="flex:none;margin-top:2px"><circle cx="8" cy="8" r="6.2"/><path d="M8 7.2v4"/><path d="M8 5v.2"/></svg><span style="font-size:12.5px;line-height:1.4">Export will update the 36 curves of <code style="font:12.5px var(--mono)">wing_inner</code> in place.</span></div>
+ <div class="row" style="min-height:20px"><span class="cb on"><i><svg width="11" height="11" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M3.5 8.5l3 3 6-7"/></svg></i>Insert new curves into the open part</span></div>
+ <div class="row" style="min-height:20px"><span class="cb on"><i><svg width="11" height="11" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M3.5 8.5l3 3 6-7"/></svg></i>Loft in SolidWorks after export</span></div>
+</div></section>
+
+<section class="panel"><header><h3>Result</h3><span class="ro">checked · 36 curves linked</span><span class="btn h">Check</span><span class="btn h">Loft</span></header><div class="body">
+ <div class="blk">
+  <div class="t"><b>Checked · <code>wing_inner</code></b><small>2.5 mm inward · nothing exported</small></div>
+  <svg class="pf" viewBox="0 0 436 132" width="436" height="132" role="img" aria-label="Planform: four ribs across a 1000 mm span, with the nine stations the offset wing is worked out through">
+   <!-- the wing's outline, LE hooking back toward the tip -->
+   <path d="M18 12 C 220 12, 380 20, 418 60 L 418 115 L 18 122 Z" fill="#f5f5f5" stroke="#505050" stroke-width="1.2" stroke-linejoin="round"/>
+   <!-- the offset wing's stations, dashed -->
+   <g stroke="#8f8f8f" stroke-width="1" stroke-dasharray="3 2.5">
+    <path d="M74 14v106.5"/><path d="M130 15v105.5"/><path d="M186 17v104"/><path d="M242 20v101"/><path d="M354 33v84"/><path d="M394 46v70"/>
+   </g>
+   <!-- the ribs -->
+   <g stroke="#1f1f1f" stroke-width="1.4">
+    <path d="M18 12v110"/><path d="M158 14v105.5"/><path d="M298 22v95"/><path d="M418 60v55"/>
+   </g>
+   <!-- where the 3D solve starts -->
+   <path d="M262 6v4 M262 8h156 M418 6v4" fill="none" stroke="#b5b5b5" stroke-width="1"/>
+   <text x="340" y="5" text-anchor="middle" style="font-size:9.5px">solved in 3D</text>
+   <text x="18" y="131" class="mono">0</text>
+   <text x="418" y="131" text-anchor="end" class="mono">1000 mm</text>
+   <text x="118" y="131">ribs</text><path d="M104 127.5v-6" stroke="#1f1f1f" stroke-width="1.4"/>
+   <text x="162" y="131">offset sections</text><path d="M152 127.5v-6" stroke="#8f8f8f" stroke-width="1" stroke-dasharray="3 2.5"/>
+  </svg>
+  <div class="kv"><span class="k">Ribs</span><span class="v"><span class="n">4</span> over <span class="n">1000.0 mm</span> of span</span></div>
+  <div class="kv"><span class="k">Shape between</span><span class="v">airfoil scaled to the chord</span></div>
+  <div class="kv"><span class="k">Sections</span><span class="v"><span class="n">9</span>, solved in 3D from <span class="n">610 mm</span> where the edges sweep past 20°</span></div>
+  <div class="kv"><span class="k">Trailing edge</span><span class="v">moves <span class="n">2.5 mm</span> at the root, <span class="n">2.6 mm</span> at the tip</span></div>
+  <div class="kv big"><span class="k" style="padding-top:1px">Wall</span><span class="v"><span class="n">2.45 – 2.52 mm</span> <span style="font-weight:400;color:var(--muted);font-size:12px">as modelled · −2.0 % / +0.8 %</span></span></div>
+  <div class="kv"><span class="k"></span>
+   <svg width="240" height="30" viewBox="0 0 240 30" role="img" aria-label="Wall from 2.45 to 2.52 mm against 2.5 mm asked, on a scale from 2.25 to 2.75">
+    <rect x="65" y="6" width="110" height="10" fill="#ebebeb"/>
+    <path d="M10 11H230" stroke="#c6c6c6" stroke-width="1"/>
+    <rect x="98" y="8" width="30.8" height="6" rx="3" fill="#1a7f37"/>
+    <path d="M120 3v16" stroke="#1f1f1f" stroke-width="1.5"/>
+    <g style="font:10px var(--mono);fill:#6e6e6e"><text x="10" y="28">2.25</text><text x="120" y="28" text-anchor="middle">2.5 asked</text><text x="230" y="28" text-anchor="end">2.75</text></g>
+   </svg>
+  </div>
+  <div class="foot">Loft <code>wing_inner_root_joined</code> and <code>wing_inner_tip_joined</code> with <code>wing_inner_le</code>, <code>wing_inner_te</code> and the 30 surface guides. <b>Loft</b> does it here as <code>wing_inner_loft</code>.</div>
+ </div>
+</div></section>
+
+<div class="sfoot"><div class="s"><i></i>Checked. Nothing was exported.</div><span class="btn pri">Export</span></div>
+</div></div>
+</figure>
+
+<!-- ============================ C ============================ -->
+<figure>
+<figcaption><b>C</b> Exporting, with the curve list open <code>460 + 360 px</code></figcaption>
+<div class="win"><div class="strip">
+<div class="tabs"><div class="tab">Airfoil</div><div class="tab on">Wing</div></div>
+
+<section class="panel"><header><h3>Wing</h3><span class="ro">editing wing_inner</span></header><div class="body">
+ <div class="row"><span class="lbl">Wing</span><div class="fld dd sans off grow">wing_inner — wing, 2.5 mm inward<svg width="12" height="12" viewBox="0 0 16 16" fill="none" stroke="#b5b5b5" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><path d="M4 6l4 4 4-4"/></svg></div></div>
+ <div class="row"><span class="lbl"></span><span class="btn t off">New wing</span><span class="btn t off">Make offset copy</span></div>
+ <div class="row"><span class="lbl">Name</span><div class="fld off grow">wing_inner</div><span class="hint">keeps its curves' names</span></div>
+</div></section>
+
+<section class="panel"><header><h3>Ribs</h3><span class="ro">4 of 4 ticked</span></header><div class="body">
+ <div class="list">
+  <div class="lh">Rib<span class="st">Leading edge</span></div>
+  <div class="lr"><span class="cb on"><i><svg width="11" height="11" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M3.5 8.5l3 3 6-7"/></svg></i></span>sd7037-il<span class="st">0, 0, 0</span></div>
+  <div class="lr"><span class="cb on"><i><svg width="11" height="11" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M3.5 8.5l3 3 6-7"/></svg></i></span>sd7037-il (2)<span class="st">0, 0, 350</span></div>
+  <div class="lr"><span class="cb on"><i><svg width="11" height="11" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M3.5 8.5l3 3 6-7"/></svg></i></span>sd7037-il (3)<span class="st">0, 0, 700</span></div>
+  <div class="lr"><span class="cb on"><i><svg width="11" height="11" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M3.5 8.5l3 3 6-7"/></svg></i></span>sd7037-il (4)<span class="st">0, 0, 1000</span></div>
+  <div class="lr off"><span class="cb off"><i></i></span>Curve7<span class="st">taken over · no settings</span></div>
+ </div>
+ <div class="tools"><span class="btn t off">Refresh</span><span class="btn t off">All</span><span class="btn t off">None</span><span class="hint">the root and the tip at least</span></div>
+</div></section>
+
+<section class="panel"><header><h3>Edges</h3><span class="ro">LE from a file · TE straight</span></header><div class="body">
+ <div class="row"><span class="lbl">Leading edge</span><div class="seg w170"><span class="on">Curve file</span><span>Straight line</span></div><span class="hint">runs through every rib</span></div>
+ <div class="row"><span class="lbl"></span><div class="fld grow">D:\Wings\wing_le.sldcrv</div><span class="btn"><svg width="14" height="14" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="M2 4.5A1.5 1.5 0 0 1 3.5 3h3l1.5 1.5h4.5A1.5 1.5 0 0 1 14 6v5.5a1.5 1.5 0 0 1-1.5 1.5h-9A1.5 1.5 0 0 1 2 11.5z"/></svg>Browse</span></div>
+ <div class="row"><span class="lbl">Trailing edge</span><div class="seg w170"><span>Curve file</span><span class="on">Straight line</span></div><span class="hint">corner to corner</span></div>
+ <div class="row"><span class="lbl"></span><div class="fld off sans grow">a line from the root rib to the tip rib</div><span class="btn off"><svg width="14" height="14" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="M2 4.5A1.5 1.5 0 0 1 3.5 3h3l1.5 1.5h4.5A1.5 1.5 0 0 1 14 6v5.5a1.5 1.5 0 0 1-1.5 1.5h-9A1.5 1.5 0 0 1 2 11.5z"/></svg>Browse</span></div>
+</div></section>
+
+<section class="panel"><header><h3>Ends</h3><span class="ro">root open · tip closed</span></header><div class="body">
+ <div class="row"><span class="lbl">Root</span><div class="seg w140"><span class="on">Open</span><span>Closed</span></div><span class="hint">the skin carries on, as at a centreline</span></div>
+ <div class="row"><span class="lbl">Tip</span><div class="seg w140"><span>Open</span><span class="on">Closed</span></div><span class="hint">a flat face, which an offset moves too</span></div>
+ <div class="row"><span class="lbl"></span><span class="cb"><i></i>The root is the end further from the origin</span></div>
+</div></section>
+
+<section class="panel"><header><h3>Offset</h3><span class="ro">2.5 mm inward</span></header><div class="body">
+ <div class="row"><span class="lbl">Distance</span><div class="fld w84">2.5<span class="u">mm</span></div><div class="seg w140"><span class="on">Inward</span><span>Outward</span></div></div>
+ <div class="row"><span class="lbl">Profiles</span><div class="seg grow"><span class="on">Root and tip only</span><span>All sections</span></div></div>
+ <div class="row"><span class="lbl">Thickness</span><div class="seg grow"><span>Blended root to tip</span><span class="on">Airfoil scaled to chord</span></div></div>
+ <div class="row" style="min-height:0"><span class="lbl"></span><span class="hint">Root and tip go in, held by 30 guides worked out through every section.</span></div>
+</div></section>
+
+<section class="panel"><header><h3>Output</h3><span class="ro">Curve Through XYZ Points</span></header><div class="body">
+ <div class="row"><span class="lbl">Format</span><div class="seg mono w150"><span class="on">.sldcrv</span><span>.txt</span></div></div>
+ <div class="row"><span class="lbl">Folder</span><div class="fld grow">D:\Wings</div><span class="btn"><svg width="14" height="14" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="M2 4.5A1.5 1.5 0 0 1 3.5 3h3l1.5 1.5h4.5A1.5 1.5 0 0 1 14 6v5.5a1.5 1.5 0 0 1-1.5 1.5h-9A1.5 1.5 0 0 1 2 11.5z"/></svg>Browse</span></div>
+</div></section>
+
+<section class="panel"><header><h3>SolidWorks</h3><span class="ro"><span class="dot"></span>2026 — WingRib.SLDPRT</span><span class="btn h"><svg width="13" height="13" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><rect x="2" y="3" width="12" height="10" rx="1"/><path d="M10 3v10"/></svg>Hide curves</span></header><div class="body">
+ <div class="row" style="min-height:20px;align-items:flex-start"><svg width="15" height="15" viewBox="0 0 16 16" fill="none" stroke="#505050" stroke-width="1.5" stroke-linecap="round" style="flex:none;margin-top:2px"><circle cx="8" cy="8" r="6.2"/><path d="M8 7.2v4"/><path d="M8 5v.2"/></svg><span style="font-size:12.5px;line-height:1.4">Export will update the 36 curves of <code style="font:12.5px var(--mono)">wing_inner</code> in place.</span></div>
+ <div class="row" style="min-height:20px"><span class="cb on"><i><svg width="11" height="11" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M3.5 8.5l3 3 6-7"/></svg></i>Insert new curves into the open part</span></div>
+ <div class="row" style="min-height:20px"><span class="cb on"><i><svg width="11" height="11" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M3.5 8.5l3 3 6-7"/></svg></i>Loft in SolidWorks after export</span></div>
+</div></section>
+
+<section class="panel"><header><h3>Result</h3><span class="ro">exporting</span><span class="btn h off">Check</span><span class="btn h off">Loft</span></header><div class="body">
+ <div class="blk">
+  <div class="t"><b>Exporting <code>wing_inner</code></b><small>step 2 of 3</small></div>
+  <div class="tr done"><span class="g"><svg width="10" height="10" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"><path d="M3.5 8.5l3 3 6-7"/></svg></span><span class="nm">Work out</span><span class="d">9 sections · wall <code>2.45 – 2.52 mm</code></span></div>
+  <div class="tr act"><span class="g"></span><span class="nm">Send curves</span><span class="d">36 curves to <code>WingRib.SLDPRT</code>, under Wing Curves</span></div>
+  <div class="tr pend"><span class="g"></span><span class="nm">Loft</span><span class="d"><code>wing_inner_loft</code> through 2 profiles and 32 guides</span></div>
+  <div class="foot">A loft already in the part is left as it is, since it follows its curves. Delete it to loft again.</div>
+ </div>
+</div></section>
+
+<div class="sfoot"><div class="s busy"><i></i>Sending 36 curves to SolidWorks…</div><span class="btn pri off">Export</span></div>
+</div>
+
+<div class="fly">
+ <div class="fh"><h3>SolidWorks · Curves in the part</h3><span class="btn h">Hide</span></div>
+ <div class="conn"><b>SolidWorks 2026 — WingRib.SLDPRT</b><div>Settings kept beside the part in <code>WingRib.airfoils.json</code></div></div>
+ <div class="tools"><span class="btn t">Refresh</span><span class="btn t">New curve</span><span class="hint">58 rows</span></div>
+ <div class="tree">
+  <div class="th">Curve<span class="st">State</span></div>
+  <div class="tn rec ok"><span class="car"><svg width="10" height="10" viewBox="0 0 16 16" fill="none" stroke="#8f8f8f" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M6 4l4 4-4 4"/></svg></span>sd7037-il<span class="st">0, 0, 0</span></div>
+  <div class="tn rec ok"><span class="car"><svg width="10" height="10" viewBox="0 0 16 16" fill="none" stroke="#8f8f8f" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M6 4l4 4-4 4"/></svg></span>sd7037-il (2)<span class="st">0, 0, 350</span></div>
+  <div class="tn rec ok"><span class="car"><svg width="10" height="10" viewBox="0 0 16 16" fill="none" stroke="#8f8f8f" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M6 4l4 4-4 4"/></svg></span>sd7037-il (3)<span class="st">0, 0, 700</span></div>
+  <div class="tn rec ok"><span class="car"><svg width="10" height="10" viewBox="0 0 16 16" fill="none" stroke="#8f8f8f" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M6 4l4 4-4 4"/></svg></span>sd7037-il (4)<span class="st">0, 0, 1000</span></div>
+  <div class="tn"><span class="car"><svg width="10" height="10" viewBox="0 0 16 16" fill="none" stroke="#8f8f8f" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M4 6l4 4 4-4"/></svg></span>Wing Curves<span class="st"></span></div>
+  <div class="tn d1 rec ok"><span class="car"><svg width="10" height="10" viewBox="0 0 16 16" fill="none" stroke="#8f8f8f" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M6 4l4 4-4 4"/></svg></span>wing<span class="st">wing</span></div>
+  <div class="tn d1 rec ok sel"><span class="car"><svg width="10" height="10" viewBox="0 0 16 16" fill="none" stroke="#8f8f8f" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M4 6l4 4 4-4"/></svg></span>wing_inner<span class="st">2.5 mm inward</span></div>
+  <div class="tn d2 ok sel">wing_inner_root_upper<span class="st">linked</span></div>
+  <div class="tn d2 ok sel">wing_inner_root_lower<span class="st">linked</span></div>
+  <div class="tn d2 ok sel">wing_inner_root_joined<span class="st">linked</span></div>
+  <div class="tn d2 ok sel">wing_inner_tip_upper<span class="st">linked</span></div>
+  <div class="tn d2 ok sel">wing_inner_tip_lower<span class="st">linked</span></div>
+  <div class="tn d2 ok sel">wing_inner_tip_joined<span class="st">linked</span></div>
+  <div class="tn d2 ok sel">wing_inner_le<span class="st">linked</span></div>
+  <div class="tn d2 ok sel">wing_inner_te<span class="st">linked</span></div>
+  <div class="tn d2 ok sel">wing_inner_upper_02<span class="st">linked</span></div>
+  <div class="tn d2 ok sel">wing_inner_upper_3p5<span class="st">linked</span></div>
+  <div class="tn d2 ok sel">wing_inner_upper_05<span class="st">linked</span></div>
+  <div class="tn d2 ok sel">wing_inner_upper_7p5<span class="st">linked</span></div>
+  <div class="tn d2 ok sel">wing_inner_upper_10<span class="st">linked</span></div>
+  <div class="tn d2 ok sel">wing_inner_upper_15<span class="st">linked</span></div>
+  <div class="tn d2 ok sel">wing_inner_upper_20<span class="st">linked</span></div>
+  <div class="tn d2 ok sel">wing_inner_upper_25<span class="st">linked</span></div>
+  <div class="tn d2 ok sel">wing_inner_upper_30<span class="st">linked</span></div>
+  <div class="tn d2 ok sel">wing_inner_upper_40<span class="st">linked</span></div>
+  <div class="tn d2 ok sel">wing_inner_upper_50<span class="st">linked</span></div>
+  <div class="tn d2 ok sel">wing_inner_upper_60<span class="st">linked</span></div>
+  <div class="tn d2 ok sel">wing_inner_upper_75<span class="st">linked</span></div>
+  <div class="tn d2 ok sel">wing_inner_upper_90<span class="st">linked</span></div>
+  <div class="tn d2 ok sel">wing_inner_upper_95<span class="st">linked</span></div>
+  <div class="tn d2 ok sel">wing_inner_lower_02<span class="st">linked</span></div>
+  <div class="tn d2 ok sel">wing_inner_lower_3p5<span class="st">linked</span></div>
+  <div class="tn d2 ellip">…</div>
+ </div>
+ <div class="card">
+  <div class="n">wing_inner<span>36 curves linked</span></div>
+  <div class="l">4 ribs · LE from a file, TE straight · root open, tip closed · offset 2.5 mm inward</div>
+  <div class="h">A wing. Click it to open it on the Wing tab.</div>
+ </div>
+</div>
+</div>
+</figure>
+
+</div>
+
+<div class="notes">
+<h2>What was decided</h2>
+<div class="tblwrap"><table>
+<thead><tr><th>Decision</th><th>Chosen</th><th>Instead of</th></tr></thead>
+<tbody>
+<tr><td>Layout</td><td>The same 460 px strip as the Airfoil tab, one column, titled panels with readouts, in the order the work happens: Wing, Ribs, Edges, Ends, Offset, Output, SolidWorks, Result. When a screen is shorter than the strip it scrolls as a page, as the Airfoil tab already does (UI-DESIGN §11).</td><td>The ttk tab's two columns, sized to the strip with its flyout open, and its own scrolling rib canvas.</td></tr>
+<tr><td>Tabs</td><td>A tab row above the panels, <b>Airfoil · Wing</b>: 28 px, the open tab in 600 weight with a 2 px accent underline. It is navigation, so it is not drawn as a segmented control.</td><td>ttk's notebook tabs, which take the system theme and not the Graphite one.</td></tr>
+<tr><td>Ribs</td><td>A list drawn like the flyout's tree: a checkbox, the rib's name in mono and its leading edge in the 84 px state column in 600 weight. A taken-over rib is a disabled row that says <i>taken over · no settings</i>. Refresh, All and None are 24 px toolbar buttons under it; the count is the panel's readout.</td><td>Plain Checkbuttons on a white canvas, the count beside the buttons, and a three-line paragraph above.</td></tr>
+<tr><td>Edges</td><td>A 170 px segment <b>Curve file · Straight line</b> per edge, the path field and Browse on the row under it. With a straight line the field is disabled and says what the line runs through, <i>a line from the root rib to the tip rib</i>, so a blank disabled field never looks like something forgotten.</td><td>A radio row with the entry under it, blank when disabled.</td></tr>
+<tr><td>Ends</td><td><b>Open · Closed</b> segments, 140 px, each with its one-line hint on the same row; the readout says <i>root open · tip closed</i>. The swap-ends checkbox stays as it is.</td><td>Radio pairs and a two-line paragraph below them.</td></tr>
+<tr><td>Offset</td><td>The Airfoil tab's own Offset row (84 px field, placeholder <i>none</i>, Inward · Outward) so the two tabs read alike. <b>Profiles</b> and <b>Thickness</b> are full-width segments; Profiles greys out while the distance is blank, since it only says what an offset wing exports. The paragraph becomes one hint line that changes with the state: what a blank exports, or how many guides the offset gets.</td><td>Three radio rows and a four-line paragraph.</td></tr>
+<tr><td>Result</td><td>A panel of its own, with <b>Check</b> and <b>Loft</b> as 20 px header buttons (like <i>Curves</i> in the SolidWorks bar). After a check the body is a block in the pick tracker's style: a planform of the ribs and the offset wing's stations, then the lines <code>describe()</code> already produces as label and value pairs, with the <b>wall</b> set large and drawn as a range on a meter against the distance asked. Its footer names the profiles and guides to pick, which today is a sentence in the status line.</td><td>A wrapping label with a Check button beside it, and the loft instructions ellipsised in the footer.</td></tr>
+<tr><td>Export progress</td><td>A tracker like the pick tracker, one row per phase: <b>Work out</b>, <b>Send curves</b>, <b>Loft</b> (the third row only when <i>Loft after export</i> is ticked). A finished row keeps what it found; the active row carries the progress message. Buttons are disabled while it runs, as today.</td><td>One status line that changes three times.</td></tr>
+<tr><td>SolidWorks bar</td><td>Shared with the Airfoil tab: the same dot, document and Curves button. Its body says what Export will do to the part in the wing's terms, and holds <b>Insert new curves</b> (the shared setting) and <b>Loft in SolidWorks after export</b>, since both are things done to the part.</td><td>The loft checkbox in the footer, away from everything else about SolidWorks.</td></tr>
+<tr><td>Footer</td><td>The status line and the primary <b>Export</b> only, exactly as the Airfoil tab.</td><td>Status, a checkbox and three buttons in one row.</td></tr>
+</tbody></table></div>
+
+<h2>How it maps to the tab</h2>
+<div class="cols">
+<div>
+<p>Every control is a variable the tab already has; nothing new is stored.</p>
+<ul>
+<li><b>Wing</b>: <code>record_choice</code> is the dropdown, <code>new_wing</code> and <code>offset_copy</code> the two buttons, <code>wing_name</code> the field (disabled while editing, as <code>_show_choice</code> already does).</li>
+<li><b>Ribs</b>: <code>_rib_ticks</code> and <code>rib_label</code> give the rows; the name and the leading edge are its two halves. <code>ribs_text</code> becomes the readout.</li>
+<li><b>Edges</b>: <code>le_mode</code>, <code>le_path</code>, <code>te_mode</code>, <code>te_path</code>; <code>_sync_edges</code> also sets the disabled field's text.</li>
+<li><b>Ends</b>: <code>root_end</code>, <code>tip_end</code>, <code>swap_ends</code>.</li>
+<li><b>Offset</b>: <code>offset</code>, <code>offset_dir</code>, <code>profiles</code>, <code>thickness</code>.</li>
+<li><b>Output</b>: <code>extension</code>, <code>folder</code>. <b>SolidWorks</b>: the host's <code>insert_missing</code> and this tab's <code>loft_after</code>.</li>
+</ul>
+</div>
+<div>
+<p>The derived text goes in <code>ui_text</code> beside the readouts that exist, so it stays testable without a window.</p>
+<ul>
+<li>New readouts for Wing, Ribs, Edges, Ends and Offset, the way <code>plane_readout</code> and <code>wing_place</code> already work.</li>
+<li>The checked block reads <code>WingBuild</code> directly rather than <code>describe()</code>'s joined string: <code>model.span</code>, <code>rib_names</code>, the section count, <code>steep_from</code>, <code>te_shift</code> and the <code>WallReport</code>; the planform samples the model's edge curves.</li>
+<li>The tracker's rows are <code>_start</code> (opens it), <code>_collect_job</code> (ticks <i>Work out</i>), <code>_collect_push</code> (ticks <i>Send curves</i>) and <code>_collect_loft</code> (ticks <i>Loft</i>), with <code>LoftResult.describe()</code> as the last row's detail. <code>_idle</code> collapses it back.</li>
+<li><b>Open</b>: the rib list shows record order. Ordering by station would mean reading each rib's leading edge along the span, which the tab does not do today. And the mock leaves <i>Blended</i> as the default; the Test 2 lofts came out closer with <i>Scaled</i>, which is still to be decided.</li>
+</ul>
+</div>
+</div>
+</div>
+</div>

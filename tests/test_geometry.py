@@ -952,3 +952,30 @@ def test_loaded_plane_mode_still_pitches_and_flips():
 def test_loaded_plane_mode_needs_a_frame():
     with pytest.raises(GeometryError, match="no plane to keep it on"):
         g.plane_frame(g.LOADED)
+
+
+# -- curves SolidWorks will import -----------------------------------------
+
+
+def test_thinning_drops_points_that_crowd_the_one_before():
+    pts = [(0.0, 0.0), (1.0, 0.0), (1.000001, 0.0), (2.0, 0.0), (2.005, 0.0), (2.02, 0.0),
+           (3.0, 0.0)]
+    assert g.thin_curve(pts) == [(0.0, 0.0), (1.0, 0.0), (2.0, 0.0), (2.02, 0.0), (3.0, 0.0)]
+
+
+def test_thinning_keeps_both_ends():
+    pts = [(0.0, 0.0), (1.0, 0.0), (2.0, 0.0), (2.001, 0.0)]
+    assert g.thin_curve(pts) == [(0.0, 0.0), (1.0, 0.0), (2.001, 0.0)]
+    closed = [(0.0, 0.0), (1.0, 0.0), (1.0, 1.0), (0.0, 0.0)]
+    assert g.thin_curve(closed) == closed
+
+
+def test_an_offset_puts_no_two_points_a_hair_apart():
+    """A slight turn used to become an arc of two points almost on top of each
+    other, which makes a curve file SolidWorks refuses."""
+    loop = [(math.cos(t) * (3 + 0.02 * math.sin(7 * t)), math.sin(t))
+            for t in [2 * math.pi * k / 180 for k in range(180)]]
+    for distance in (-0.3, 0.3):
+        out = g.clean_loop(g.offset_airfoil(g.auto_close(loop), distance))
+        steps = [math.dist(a, b) for a, b in zip(out, out[1:])]
+        assert min(steps) > 1e-4

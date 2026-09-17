@@ -164,6 +164,8 @@ class Fonts:
         self.mono_bold = sized(mono, 12.5, bold=True)
         self.mono_small = sized(mono, 12)
         self.mono_tiny = sized(mono, 11.5)
+        self.mono_tiny_bold = sized(mono, 11.5, bold=True)
+        self.mono_micro = sized(mono, 10)
 
 
 _fonts: Optional[Fonts] = None

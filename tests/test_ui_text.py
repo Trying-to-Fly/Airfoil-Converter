@@ -200,3 +200,209 @@ def test_several_in_trouble_are_counted_rather_than_listed():
         store.CurveState(feature="b", state=store.MISSING),
     ]
     assert ui_text.curves_linked(states) == ("2 need attention", False)
+
+
+# -- wings ------------------------------------------------------------------
+
+
+def test_a_wing_is_summed_up_in_one_line():
+    from airfoil_converter.export import WingSpec
+
+    spec = WingSpec(ribs=("a", "b", "c"), le_source="le.sldcrv", offset="2")
+    assert ui_text.wing_summary(spec) == (
+        "3 ribs · LE from a file, TE straight · root open, tip closed · offset 2 mm inward"
+    )
+    assert ui_text.wing_summary(WingSpec()).endswith("no offset")
+
+
+def test_a_wing_says_what_it_is_where_a_rib_says_where_it_stands():
+    from airfoil_converter.export import OFFSET_OUTWARD, WingSpec
+
+    assert ui_text.wing_place(WingSpec()) == "wing"
+    assert ui_text.wing_place(WingSpec(offset="1.5", offset_dir=OFFSET_OUTWARD)) == (
+        "wing, 1.5 mm outward"
+    )
+
+
+# -- the Wing tab --------------------------------------------------------------
+
+from types import SimpleNamespace as NS  # noqa: E402
+
+from airfoil_converter import export, wing  # noqa: E402
+
+
+def test_the_wing_panel_says_which_wing_export_is_aimed_at():
+    assert ui_text.wing_readout("") == "new wing"
+    assert ui_text.wing_readout("wing_inner") == "editing wing_inner"
+
+
+def test_a_rib_row_is_its_name_and_its_leading_edge():
+    rib = store.ExportRecord(export_id="r", stem="sd7037-il", name_index=2,
+                             settings=ExportSpec(leading_edge=("0", "0", "350")).to_dict())
+    assert ui_text.rib_columns(rib) == ("sd7037-il (2)", "0, 0, 350")
+    floats = store.ExportRecord(export_id="f", stem="r", settings=ExportSpec(
+        leading_edge=("-350.0", "0.0", "-8.845895220737566")).to_dict())
+    assert ui_text.rib_columns(floats) == ("r", "-350, 0, -8.8459")
+    adopted = store.ExportRecord(export_id="a", stem="Curve7", adopted=True)
+    assert ui_text.rib_columns(adopted) == ("Curve7", "taken over · no settings")
+
+
+def test_the_ribs_readout_counts_the_ticks():
+    assert ui_text.ribs_readout(4, 4) == "4 of 4 ticked"
+    assert ui_text.ribs_readout(0, 0) == "no ribs yet"
+    assert ui_text.ribs_readout(0, 0, have_record=False) == "no part's record open"
+
+
+def test_the_edges_and_ends_read_out_in_a_line():
+    assert ui_text.edges_readout(True, False) == "LE from a file · TE straight"
+    assert ui_text.edges_readout(False, True) == "LE straight · TE from a file"
+    assert ui_text.ends_readout(wing.OPEN, wing.CLOSED) == "root open · tip closed"
+    assert ui_text.END_HINTS[wing.OPEN] == "carries on, as at a centreline"
+    assert ui_text.END_HINTS[wing.CLOSED] == "a flat face, moved by an offset"
+
+
+def test_the_offset_readout_says_none_or_how_far():
+    assert ui_text.offset_readout("", "Inward") == "none · the wing itself"
+    assert ui_text.offset_readout(" 2.5 ", "Inward") == "2.5 mm inward"
+
+
+def test_the_guide_counts_come_from_the_wing_itself():
+    fractions = wing.SURFACE_GUIDES
+    assert ui_text.surface_guide_count(False) == 2 * len(fractions)
+    assert ui_text.surface_guide_count(True) == 2 * len(
+        [f for f in fractions if f >= wing.OFFSET_GUIDES_FROM]
+    )
+    assert ui_text.surface_guide_count(False) == 32
+    assert ui_text.surface_guide_count(True) == 30
+
+
+def test_the_offset_hint_follows_the_settings():
+    assert ui_text.offset_hint("", export.PROFILES_ENDS) == (
+        "Blank exports the wing's own edges and 32 surface guides."
+    )
+    assert ui_text.offset_hint("2.5", export.PROFILES_ENDS) == (
+        "Root and tip go in, held by 30 guides worked out through every section."
+    )
+    assert "Every section" in ui_text.offset_hint("2.5", export.PROFILES_ALL)
+
+
+def test_the_export_line_names_what_a_new_wing_will_make():
+    runs = ui_text.export_line("wing", 1)
+    assert ui_text.plain(runs) == (
+        "Export will make wing_le, wing_te and 32 surface guides under Wing Curves."
+    )
+    assert ("wing_le", ui_text.MONO) in runs and ("Wing Curves", ui_text.STRONG) in runs
+    assert ui_text.plain(ui_text.export_line("wing", 2, te_line=True)) == (
+        "Export will make wing_2_le, wing_2_te_upper, wing_2_te_lower and 32 surface "
+        "guides under Wing Curves."
+    )
+    assert ui_text.plain(ui_text.export_line("wing_inner", 1, offset=True)) == (
+        "Export will make wing_inner's root and tip, wing_inner_le, wing_inner_te and "
+        "30 surface guides under Wing Curves."
+    )
+    assert ui_text.plain(ui_text.export_line("w", 1, offset=True, all_sections=True)) == (
+        "Export will make w's sections, w_le and w_te under Wing Curves."
+    )
+    assert "once it has a name" in ui_text.plain(ui_text.export_line(" ", 1))
+
+
+def test_the_export_line_for_a_wing_being_edited():
+    runs = ui_text.export_line("ignored", 1, editing="wing_inner", live=36)
+    assert ui_text.plain(runs) == "Export will update the 36 curves of wing_inner in place."
+    assert ("wing_inner", ui_text.MONO) in runs
+    assert ui_text.plain(ui_text.export_line("", 1, editing="w")) == (
+        "Export will update w in place."
+    )
+
+
+def test_the_result_readout():
+    assert ui_text.result_readout("idle") == "not checked yet"
+    assert ui_text.result_readout("checked", "36 curves linked") == (
+        "checked · 36 curves linked"
+    )
+    assert ui_text.result_readout("checked") == "checked"
+    assert ui_text.result_readout("exporting") == "exporting"
+    assert ui_text.result_subtitle(-2.5, False) == "2.5 mm inward · nothing exported"
+    assert ui_text.result_subtitle(1.0, True) == "1 mm outward · exported"
+
+
+def test_the_wall_is_a_range_and_how_far_it_strays():
+    assert ui_text.wall_text(2.45, 2.52, -2.5) == (
+        "2.45 \u2013 2.52 mm", "as modelled · \u22122.0 % / +0.8 %"
+    )
+
+
+def _fake_build(steep_from=610.0, outside=0, rims=0):
+    """What result_rows reads off a WingBuild, and nothing else."""
+    sections = [NS(station=NS(rim="")) for _ in range(9 - rims)]
+    sections += [NS(station=NS(rim="tip")) for _ in range(rims)]
+    offset = NS(
+        offset=-2.5, sections=sections, steep_from=steep_from, te_shift=(2.5, 2.6),
+        report=NS(thinnest=2.45, thickest=2.52, outside=outside),
+    )
+    model = NS(sections=[None] * 4, span=1000.0,
+               loft=NS(thickness=export.THICKNESS_SCALED))
+    curves = [NS(role=export.ROLE_WING_SURFACE)] * 30
+    return NS(offset=offset, model=model, curves=curves)
+
+
+def test_the_checked_block_has_a_row_for_each_thing_found():
+    rows = ui_text.result_rows(_fake_build())
+    text = {row.label: ui_text.plain(row.runs) for row in rows}
+    assert text == {
+        "Ribs": "4 over 1000.0 mm of span",
+        "Shape between": "airfoil scaled to the chord",
+        "Sections": "9, solved in 3D from 610 mm where the edges sweep past 20\u00b0",
+        "Trailing edge": "moves 2.5 mm at the root, 2.6 mm at the tip",
+        "Wall": "2.45 \u2013 2.52 mm  as modelled · \u22122.0 % / +0.8 %",
+    }
+    wall = rows[-1]
+    assert wall.big and wall.runs[0] == ("2.45 \u2013 2.52 mm", ui_text.STRONG)
+
+
+def test_a_wall_with_points_outside_says_so_in_red():
+    rows = ui_text.result_rows(_fake_build(steep_from=None, outside=3, rims=2))
+    assert rows[-1].error and "3 checked points" in ui_text.plain(rows[-1].runs)
+    sections = ui_text.plain(rows[2].runs)
+    assert sections == "9, 2 of them rounding a closed end"
+
+
+def test_the_loft_footer_names_the_profiles_and_counts_the_guides():
+    runs = ui_text.loft_footer(
+        ["wing_inner_root_joined", "wing_inner_tip_joined"],
+        ["wing_inner_le", "wing_inner_te"], 30, "wing_inner_loft",
+    )
+    assert ui_text.plain(runs) == (
+        "Loft wing_inner_root_joined and wing_inner_tip_joined with wing_inner_le, "
+        "wing_inner_te and the 30 surface guides. Loft does it here as wing_inner_loft."
+    )
+    assert ("wing_inner_loft", ui_text.MONO) in runs
+    many = ui_text.plain(ui_text.loft_footer(["s1", "s2", "s3"], ["le", "te"], 0, "w_loft"))
+    assert many.startswith("Loft s1 to s3 (3 sections, in order) with le and te.")
+
+
+def test_the_export_tracker_counts_its_steps():
+    rows = [ui_text.PhaseRow("Work out", "done", ()),
+            ui_text.PhaseRow("Send curves", "active", ()),
+            ui_text.PhaseRow("Loft", "pending", ())]
+    assert ui_text.phase_title(rows) == "step 2 of 3"
+    done = [ui_text.PhaseRow("Work out", "done", ())]
+    assert ui_text.phase_title(done) == "step 1 of 1"
+
+
+def test_the_tracker_rows_say_what_each_phase_did():
+    assert ui_text.plain(ui_text.work_detail(_fake_build())) == (
+        "9 sections · wall 2.45 \u2013 2.52 mm"
+    )
+    assert ui_text.plain(ui_text.send_detail(36, "WingRib.SLDPRT")) == (
+        "36 curves to WingRib.SLDPRT, under Wing Curves"
+    )
+    assert ui_text.plain(ui_text.send_detail(36, "", pushed=False, folder="D:/W")) == (
+        "36 files written to D:/W"
+    )
+    assert ui_text.plain(ui_text.loft_detail("wing_inner_loft", 2, 32)) == (
+        "wing_inner_loft through 2 profiles and 32 guides"
+    )
+    assert ui_text.plain(ui_text.loft_detail("w_loft")) == (
+        "w_loft through its profiles and guides"
+    )

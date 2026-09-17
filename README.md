@@ -9,6 +9,9 @@ and keeps them there: change a setting, press **Export** again, and the same
 feature refreshes in place, so a loft built on it rebuilds without a single
 reference being re-picked. See *Driving SolidWorks* below.
 
+A **Wing** tab lofts exported ribs into a wing along two edge curves, and can
+offset the whole wing — sections and edges together. See *Wings* below.
+
 It also reads curve files back in, so a section you already have — one this app
 wrote, or one exported from SolidWorks — can be re-placed, rescaled, pitched, or
 offset without going back to the CSV.
@@ -275,10 +278,14 @@ Two things worth knowing:
   opposite of the `XY` / `XZ` / `YZ` convention. **Flip up direction** is the
   cure and stays live in 3-point mode.
 
-Picking clears the selection in SolidWorks each time it reads it. That is what
-tells one click from the last one still being selected, and it is why a click
-visibly deselects itself. **Cancel** leaves every field exactly as it was, and a
-pick nobody finishes gives up after a minute and a half.
+Picking only reads the selection in SolidWorks; it never changes it. A click
+counts when the selection changes, so whatever was already selected when the
+pick started is ignored, and to use the same thing twice, click empty space in
+between. (Earlier builds cleared the selection after each read, and doing that
+while a sketch was open crashed SolidWorks.) For the same reason, **Export**
+refuses to run while a sketch is open for editing: joining curves and filing
+them in folders both select features. **Cancel** leaves every field exactly as
+it was, and a pick nobody finishes gives up after a minute and a half.
 
 ### Names
 
@@ -408,6 +415,158 @@ The exported `.sldcrv` files are no longer output you can throw away. A refresh
 re-reads them by path, so moving or deleting them breaks the link. Keep them
 where they land.
 
+## Wings
+
+The **Wing** tab lofts ribs you have already exported into a wing, and can
+offset the whole wing at once: its sections, its leading edge and its trailing
+edge together, so the result is a true offset of the wing and not just of each
+rib.
+
+1. Export every rib on the **Airfoil** tab first. The wing reads each rib's
+   settings from the part's record, so the part must be saved.
+2. On the **Wing** tab, select the ribs the wing is lofted through.
+3. Give each edge a **curve file**, or make it a **straight line** from the root
+   rib to the tip rib.
+4. Say whether each **end** is open or closed (see below).
+5. Pick how the **thickness** runs between ribs (see *Shape between ribs*).
+6. Leave **Offset** blank and **Export**: the wing's edge curves and its
+   surface guides go into the part beside the ribs. Loft the ribs with all of
+   them as guide curves.
+7. Press **Make offset copy**, enter a distance, pick *Inward* or *Outward*, and
+   **Export** again: the offset wing's root and tip, its edges and its surface
+   guides go in beside it. Loft its root and tip the same way.
+
+**Check** works the wing out without exporting anything and says what it found,
+including the wall thickness it expects. Loft the curves yourself afterwards;
+the status line lists what to pick.
+
+### Shape between ribs
+
+A loft through two ribs and two edge curves makes up its own mind about the
+shape in between — and it is not the airfoil scaled to the chord. Measured on a
+real one, SolidWorks blends the two profiles *in millimetres*, straight from
+root to tip, and only stretches them along the chord to meet the edges; on a
+1000 mm wing tapering 275 to 136.5 mm along a curved leading edge that left the
+middle 3 mm thinner than the airfoil scaled would be. An offset worked out for
+one shape and lofted in the other runs into its own skin.
+
+So the app decides the shape, and holds both lofts to it with **surface
+guides**: curves along the upper and lower surface at 1, 2, 3.5, 5, 7.5, 10,
+15, 20, 25, 30, 40, 50, 60, 75, 90 and 95 % of the chord, named
+`wing_upper_01`, `wing_upper_3p5` … `wing_lower_95`. SolidWorks sags between
+guides — up to 0.15 mm with them 10 to 25 % apart — and this spacing holds a
+real loft to 0.05 mm over 99 % of the skin. An offset wing's guides start at
+2 %: nearer an inward offset's nose SolidWorks will not loft through them.
+
+A rib is modelled as SolidWorks draws it: a Curve Through XYZ Points is a
+natural cubic spline through the points, spaced by the distance between them,
+and straight lines between the same points cut up to 0.18 mm inside it at the
+nose. An offset wing's profile that comes to a corner — an inward offset deeper
+than the nose radius — would loop a spline round it, so every profile of an offset
+wing is written in two halves meeting at its nose (`wing_inner_root_upper`,
+`…_lower`), corner or not: a loft will not join profiles cut into different
+numbers of pieces. The joined curve is still the one to pick.
+
+**Loft** on the Wing tab builds the chosen wing's loft in the open part —
+`wing_loft`, `wing_inner_loft` — through every profile and guide it exported;
+tick *Loft in SolidWorks after export* to have it done after each export. A
+loft already there is left alone, since it follows its curves; delete it to
+loft again. Where SolidWorks will not make the solid, a surface loft is made
+instead and the status line says so. Each passes through a point
+of every profile the loft is given, so the loft accepts it. **Thickness** says
+which shape they hold:
+
+- **Blended root to tip** — what a loft through the ribs makes on its own. The
+  default, so a wing already lofted that way keeps its look.
+- **Airfoil scaled to chord** — the same airfoil, in proportion, all along the
+  span.
+
+Loft the outer wing *and* the offset wing with their surface guides. Without
+them the lofts take their own shape, and the wall between is not the one
+worked out.
+
+### What a wing needs
+
+- **Ribs at distinct stations along the span.** They need not be parallel: a
+  vertical root beside outer ribs square to the dihedral is fine, and so is
+  twist. Two ribs may lean on each other by up to 30°, as long as neither
+  reaches through the other's plane. Between two ribs the wing's stations turn
+  smoothly from one rib's plane to the next, and the offset is measured in 3D
+  against those planes, so a leaning rib is offset as truly as a square one.
+- **Edges that pass through every rib**, within 0.1 mm — a loft will not take a
+  guide curve that misses a profile. A straight edge only works if the ribs in
+  between line up on it; a curved leading edge needs a curve file.
+- **Ribs that finish their trailing edge alike.** An offset wing follows them.
+  With *Close with TE line*, the trailing-edge curve may cross the straight line
+  anywhere along it. *Split upper/lower*, and *Leave open* with a blunt trailing
+  edge, cannot make a wing: neither leaves a point for the edge to run through.
+
+The root is the end nearer the part's origin; tick *The root is the end further
+from the origin* if yours is the other way round.
+
+### Open and closed ends
+
+- **Open**: the skin carries on past this end — a centreline the wing is
+  mirrored about, or a joint. The offset wing ends where the wing does.
+- **Closed**: the wing ends in a flat face, and that face is skin too. An
+  inward offset moves the end in by the offset; an outward one moves it out and
+  rounds the edge with three extra sections.
+
+A half wing mirrored at the centreline is open at the root and closed at the tip,
+which is the default.
+
+### How the offset is worked out
+
+A flat offset of each rib is only a true offset where the skin runs straight
+along the span. Where the wing is swept, tapered or raised, the skin leans out
+of the rib's plane and a flat offset leaves the wall thinner than asked — at a
+tip whose leading edge hooks back, down to nothing. So:
+
+- Where the edges sweep less than 20°, each point is offset further in the
+  rib's plane by exactly what the lean of the skin there needs.
+- Where they sweep harder, each point is solved against the true 3D distance to
+  the skin around it, and trimmed wherever another stretch of skin comes closer.
+
+The offset shape does not change in a straight line along the span, so **the
+offset wing is worked out through sections of its own**: at least every 140 mm,
+more wherever an edge's sweep turns, and more again wherever the blend between
+two of them would stray off the wall — a few times as many as the wing has
+ribs, crowded toward a hooked tip. Its edge curves and surface guides are drawn
+through all of them.
+
+**Profiles** says what is exported:
+
+- **Root and tip only** (the default) — the offset wing's two end profiles,
+  `wing_inner_root` and `wing_inner_tip`, with its edges and surface guides.
+  The sections between shape the guides and are not exported.
+- **All sections** — every section, numbered root to tip, `wing_inner_s01`,
+  `wing_inner_s02`, …, with the edges but no surface guides. The number of
+  sections depends on the offset where an end is closed; when an export would
+  change it, the app asks first, because the loft needs its profiles picked
+  again, and sections no longer made are left in the part, unused.
+
+With *Close with TE line*, each exported profile also gets its straight line
+and a joined curve, `wing_inner_root_joined`; loft those.
+
+### A blunt trailing edge
+
+A trailing edge closed by a line is a face, so the wing gets an edge curve
+along each corner, `wing_te_upper` and `wing_te_lower`, instead of one down the
+middle. A straight-line trailing edge runs corner to corner. A trailing-edge
+curve file only says where the trailing edge runs along the span: it has to
+meet each rib's trailing-edge line, or that line carried on up to 1 mm past a
+corner, and the two corner curves follow it through each rib's own corners.
+
+**How close it gets.** The app checks the wall between the two wings as it
+models them. For a 1000 mm half wing whose leading edge hooks back to 84° at the
+tip, it comes out within about 3% of the offset inward (2.5 mm: 2.45–2.52 mm),
+and within 7% outward, where the last millimetre or so at the tip's nose runs a
+little thick. That is only as true as the lofts follow their guides, so measure
+the real wall on the lofts in SolidWorks — a section view and **Measure** —
+before you rely on it.
+
+The wing's curves go in folders like the ribs', gathered under **Wing Curves**.
+
 ## Building the executable
 
 ```
@@ -434,10 +593,15 @@ src/airfoil_converter/
   geometry.py   # plane frames, 2D<->3D transform, trailing-edge handling, offsetting
   writer.py     # .sldcrv / .txt output
   export.py     # the form as data, and the curves it produces
+  wing.py       # a wing stood up from its ribs: axes, edge curves, the loft between
+  wing_offset.py # offsetting the whole wing, and measuring the wall it leaves
+  wing_build.py # a wing's settings -> the curves it puts in the part
   store.py      # what the app remembers about a part's curves
   swcom.py      # the only module that talks to SolidWorks
   swlink.py     # insert, refresh, rebuild -- in that order
+  swloft.py     # loft a wing in SolidWorks and write each loft to STEP
   gui.py        # tkinter window: the panels, the handlers, the poll
+  wing_tab.py   # the Wing tab
   theme.py      # every colour, size and face the window uses
   widgets.py    # the controls the design asks for, drawn by hand
   ui_text.py    # the readouts and tracker rows, worked out without a window

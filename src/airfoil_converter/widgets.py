@@ -255,6 +255,12 @@ class Field(tk.Frame):
         self.entry.bind("<FocusIn>", lambda _e: self._paint_border(), add="+")
         self.entry.bind("<FocusOut>", lambda _e: self._paint_border(), add="+")
 
+        # What a disabled field says instead of its value: a straight edge on
+        # the Wing tab has no file, and a blank grey field reads as one
+        # somebody forgot. Sans, because it is a sentence and not a path.
+        self._note = tk.Label(self, text="", bg=theme.DISABLED_BG, fg=theme.FAINT,
+                              font=f.hint, anchor="w")
+
     # -- placeholder
 
     def set_placeholder(self, text: str) -> None:
@@ -296,7 +302,19 @@ class Field(tk.Frame):
         if self._placeholder is not None:
             self._placeholder.configure(bg=bg)
             self._show_placeholder()
+        self._show_note()
         self._paint_border()
+
+    def set_note(self, text: str) -> None:
+        """Say ``text`` over the field while it is disabled; ``""`` says nothing."""
+        self._note.configure(text=text)
+        self._show_note()
+
+    def _show_note(self) -> None:
+        if self._note.cget("text") and not self._enabled:
+            self._note.place(in_=self.entry, x=0, y=0, relwidth=1.0, relheight=1.0)
+        else:
+            self._note.place_forget()
 
     def set_marked(self, marked: bool) -> None:
         """Mark a field as filled by a pick, per §6: an ink border, not a tint."""
@@ -448,8 +466,19 @@ class Check(tk.Frame):
         self.label.grid(row=0, column=1, padx=(px(7), 0))
         for widget in (self.canvas, self.label):
             widget.bind("<Button-1>", lambda _e: self._toggle())
-        variable.trace_add("write", lambda *_: self._paint())
+        # The variable can outlive the box — the Wing tab rebuilds its rib
+        # rows over the same ticks — so the box stops listening when it goes.
+        self._trace = variable.trace_add("write", lambda *_: self._paint())
+        self.bind("<Destroy>", self._forget_variable, add="+")
         self._paint()
+
+    def _forget_variable(self, event: tk.Event) -> None:
+        if event.widget is not self:
+            return
+        try:
+            self.variable.trace_remove("write", self._trace)
+        except tk.TclError:
+            pass
 
     def _toggle(self) -> None:
         if not self._enabled:
@@ -658,3 +687,345 @@ class Outline(tk.Canvas):
             flat.append(middle - (y - (min(ys) + span_y / 2.0)) * scale)
         self.create_line(*flat, fill=theme.HEADER_TEXT, width=max(1, px(1)),
                          capstyle="round", joinstyle="round")
+
+
+# ------------------------------------------------------------------ the tabs
+
+
+class TabRow(tk.Frame):
+    """``Airfoil · Wing`` above the panels: navigation, so not a segmented control.
+
+    28 px, a rule along the bottom, the open tab in ink and bold with a 2 px
+    accent underline, the others muted.
+    """
+
+    def __init__(self, parent: tk.Misc, command: Callable[[str], None],
+                 bg: str = theme.WINDOW) -> None:
+        super().__init__(parent, bg=bg, bd=0, highlightthickness=0, height=px(28))
+        self.pack_propagate(False)
+        self.command = command
+        self._bg = bg
+        self._tabs: Dict[str, Tuple[tk.Label, tk.Frame]] = {}
+        Rule(self, theme.BORDER_SOFT).pack(side="bottom", fill="x")
+        self._bar = tk.Frame(self, bg=bg)
+        self._bar.pack(side="top", fill="both", expand=True)
+        self._current = ""
+
+    def add(self, name: str) -> None:
+        f = theme.fonts()
+        cell = tk.Frame(self._bar, bg=self._bg)
+        cell.pack(side="left", fill="y", padx=(px(18) if self._tabs else 0, 0))
+        line = tk.Frame(cell, bg=self._bg, height=max(1, px(2)))
+        line.pack(side="bottom", fill="x")
+        label = tk.Label(cell, text=name, bg=self._bg, fg=theme.MUTED, font=f.label,
+                         padx=px(2), cursor="hand2")
+        label.pack(side="top", fill="both", expand=True)
+        for widget in (cell, label):
+            widget.bind("<Button-1>", lambda _e, n=name: self.command(n))
+        self._tabs[name] = (label, line)
+        self._paint()
+
+    def select(self, name: str) -> None:
+        self._current = name
+        self._paint()
+
+    def _paint(self) -> None:
+        f = theme.fonts()
+        for name, (label, line) in self._tabs.items():
+            on = name == self._current
+            label.configure(fg=theme.INK if on else theme.MUTED,
+                            font=f.label_bold if on else f.label)
+            line.configure(bg=theme.ACCENT if on else self._bg)
+
+
+# ------------------------------------------------------- text in two faces
+
+
+class RichText(tk.Text):
+    """A wrapping line of runs, some of them mono: ``Export will make wing_le``.
+
+    A Tk label has one font. A read-only text widget has as many as it has
+    tags, so a sentence can set its curve names in mono the way the design
+    does; it grows to as many lines as the words take at its width.
+
+    ``styles`` maps a run's style to ``(font, colour)``; the ``""`` style is
+    the sentence itself.
+    """
+
+    def __init__(self, parent: tk.Misc, styles: Dict[str, Tuple[object, str]],
+                 bg: str = theme.WHITE,
+                 on_resize: Optional[Callable[[], None]] = None) -> None:
+        _, base_color = styles[""]
+        # A line is as tall as the widget's own font, so that is the tallest
+        # of the faces, or a line set in it would lose its descenders.
+        base_font = max((font for font, _ in styles.values()),
+                        key=lambda font: font.metrics("linespace"))
+        # Called when the text wraps to a different number of lines, which
+        # happens only once it has been laid out: a page that fixes its own
+        # height has to be told.
+        self.on_resize = on_resize
+        super().__init__(
+            parent, bd=0, highlightthickness=0, relief="flat", bg=bg,
+            fg=base_color, font=base_font, wrap="word", width=1, height=1,
+            padx=0, pady=0, cursor="arrow", takefocus=0,
+            selectbackground=bg, selectforeground=base_color,
+            inactiveselectbackground=bg, insertwidth=0,
+            spacing1=0, spacing2=0, spacing3=0,
+        )
+        for style, (font, color) in styles.items():
+            self.tag_configure(style or "plain", font=font, foreground=color)
+        self._lines = 1
+        self._runs: Tuple[Tuple[str, str], ...] = ()
+        self.configure(state="disabled")
+        self.bind("<Configure>", lambda _e: self._fit(), add="+")
+
+    def set_runs(self, runs: Sequence[Tuple[str, str]]) -> None:
+        runs = tuple((text, style) for text, style in runs)
+        if runs == self._runs:
+            return
+        self._runs = runs
+        self.configure(state="normal")
+        self.delete("1.0", "end")
+        for text, style in runs:
+            self.insert("end", text, style or "plain")
+        self.configure(state="disabled")
+        self._fit()
+
+    def set_color(self, color: str, style: str = "") -> None:
+        self.tag_configure(style or "plain", foreground=color)
+
+    def _fit(self) -> None:
+        """As many lines as the text wraps to at the width it has been given."""
+        try:
+            counted = self.count("1.0", "end-1c", "displaylines")
+        except tk.TclError:
+            return
+        if isinstance(counted, tuple):
+            counted = counted[0] if counted else 0
+        lines = max(1, int(counted or 0) + 1)
+        if lines != self._lines:
+            self._lines = lines
+            self.configure(height=lines)
+            if self.on_resize is not None:
+                self.on_resize()
+
+
+# ----------------------------------------------------------- the rib list
+
+
+class CheckList(Box):
+    """A list drawn like the flyout's tree, with a box on each row.
+
+    A 22 px header row, then 22 px rows: the box, the name in mono, and a
+    state column. A row without a variable cannot be ticked and says why in
+    its state column, in faint.
+    """
+
+    STATE_WIDTH = 84
+
+    def __init__(self, parent: tk.Misc, heading: str, state_heading: str,
+                 empty: str = "") -> None:
+        super().__init__(parent, bg=theme.WHITE, border=theme.BORDER_SOFT)
+        f = theme.fonts()
+        self.columnconfigure(0, weight=1)
+        self._empty = empty
+        header = tk.Frame(self, bg=theme.HEADER_BG, height=px(22))
+        header.grid(row=0, column=0, sticky="ew")
+        header.pack_propagate(False)
+        # The heading stands over the names, past the box and its gap.
+        tk.Label(header, text=heading.upper(), bg=theme.HEADER_BG, fg=theme.MUTED,
+                 font=f.tiny).pack(side="left", padx=(px(8 + 15 + 7), 0))
+        holder = tk.Frame(header, bg=theme.HEADER_BG, width=px(self.STATE_WIDTH))
+        holder.pack(side="right", fill="y", padx=(0, px(8)))
+        holder.pack_propagate(False)
+        tk.Label(holder, text=state_heading.upper(), bg=theme.HEADER_BG,
+                 fg=theme.MUTED, font=f.tiny, anchor="w").pack(side="left")
+        self.rows = tk.Frame(self, bg=theme.WHITE)
+        self.rows.grid(row=1, column=0, sticky="ew", pady=(0, px(2)))
+        self._checks: List[Check] = []
+        # What a row that cannot be ticked shows. One for the list's lifetime:
+        # a Tk variable made per row would be left for the garbage collector,
+        # which may run on a worker thread, where Tk must not be called.
+        self._off = tk.BooleanVar(self, value=False)
+
+    def set_rows(self, rows: Sequence[Tuple[str, str, Optional[tk.BooleanVar]]]) -> None:
+        """``(name, state, variable)`` for each row; a ``None`` variable is a row
+        that cannot be ticked."""
+        f = theme.fonts()
+        for child in self.rows.winfo_children():
+            child.destroy()
+        self._checks = []
+        if not rows and self._empty:
+            tk.Label(self.rows, text=self._empty, bg=theme.WHITE, fg=theme.FAINT,
+                     font=f.hint, anchor="w", justify="left",
+                     wraplength=px(400)).pack(fill="x", padx=px(8), pady=px(4))
+            return
+        for name, state, variable in rows:
+            row = tk.Frame(self.rows, bg=theme.WHITE, height=px(22))
+            row.pack(fill="x")
+            row.pack_propagate(False)
+            live = variable is not None
+            check = Check(row, variable if live else self._off, name)
+            check.label.configure(font=f.mono_small)
+            if not live:
+                check.set_enabled(False)
+            else:
+                self._checks.append(check)
+            check.pack(side="left", padx=(px(8), 0))
+            label = tk.Label(row, text=state, bg=theme.WHITE,
+                             fg=theme.INK if live else theme.FAINT,
+                             font=f.mono_tiny_bold if live else f.tiny, anchor="w")
+            width = max(px(self.STATE_WIDTH), label.winfo_reqwidth())
+            holder = tk.Frame(row, bg=theme.WHITE, width=width)
+            holder.pack(side="right", fill="y", padx=(px(8), px(8)))
+            holder.pack_propagate(False)
+            label.pack(in_=holder, side="left")
+            label.lift(holder)
+
+    def set_enabled(self, enabled: bool) -> None:
+        for check in self._checks:
+            check.set_enabled(enabled)
+
+
+# ---------------------------------------------------- the checked wing
+
+
+def _fmt(value: float) -> str:
+    return f"{round(value, 3):g}"
+
+
+class Planform(tk.Canvas):
+    """The wing from above: its outline, its ribs, and the offset wing's sections.
+
+    Drawn from :func:`wing_build.planform`. The span is stretched to the
+    width and the chord to the height, as a plot is; it is a picture of
+    where things are along the span, not a scale drawing.
+    """
+
+    HEIGHT = 132
+
+    def __init__(self, parent: tk.Misc, width: int = 412,
+                 bg: str = theme.TRACKER_BG) -> None:
+        super().__init__(parent, width=px(width), height=px(self.HEIGHT), bg=bg,
+                         highlightthickness=0, bd=0)
+        self._width = width
+
+    def show(self, plan) -> None:
+        f = theme.fonts()
+        self.delete("all")
+        if plan is None:
+            return
+        left, right = px(18), px(self._width - 18)
+        top, bottom = px(20), px(self.HEIGHT - 20)
+        span = (plan.end - plan.start) or 1.0
+
+        def x(s: float) -> float:
+            return left + (s - plan.start) / span * (right - left)
+
+        across = [a for _, a in plan.le + plan.te]
+        across += [v for _, a, b in plan.ribs + plan.sections for v in (a, b)]
+        low, high = min(across), max(across)
+        size = (high - low) or 1.0
+        # The leading edge goes at the top, whichever way the chord runs.
+        forward = sum(a for _, a in plan.te) >= sum(a for _, a in plan.le)
+
+        def y(a: float) -> float:
+            t = (a - low) / size if forward else (high - a) / size
+            return top + t * (bottom - top)
+
+        outline: List[float] = []
+        for s, a in plan.le:
+            outline += [x(s), y(a)]
+        for s, a in reversed(plan.te):
+            outline += [x(s), y(a)]
+        self.create_polygon(*outline, fill=theme.HEADER_BG, outline=theme.HEADER_TEXT,
+                            width=max(1.0, 1.2 * theme.px(1)), joinstyle="round")
+        dash = (px(3) or 1, px(2) or 1)
+        for s, a, b in plan.sections:
+            self.create_line(x(s), y(a), x(s), y(b), fill=theme.READOUT, width=1, dash=dash)
+        for s, a, b in plan.ribs:
+            self.create_line(x(s), y(a), x(s), y(b), fill=theme.INK,
+                             width=max(1.0, 1.4 * theme.px(1)))
+
+        if plan.steep_from is not None and plan.start <= plan.steep_from < plan.end:
+            x0, x1 = x(plan.steep_from), right
+            level = px(14)
+            color = theme.GLYPH_OFF
+            self.create_line(x0, level - px(2), x0, level + px(2), fill=color)
+            self.create_line(x0, level, x1, level, fill=color)
+            self.create_line(x1, level - px(2), x1, level + px(2), fill=color)
+            text = "solved in 3D"
+            half = f.tiny.measure(text) / 2
+            middle = min(max((x0 + x1) / 2, half + px(2)), px(self._width - 2) - half)
+            self.create_text(middle, level - px(3), text=text, anchor="s",
+                             fill=theme.MUTED, font=f.tiny)
+
+        base = px(self.HEIGHT - 2)
+        self.create_text(left, base, text="0", anchor="sw", fill=theme.MUTED,
+                         font=f.mono_micro)
+        self.create_text(right, base, text=f"{span:.0f} mm", anchor="se",
+                         fill=theme.MUTED, font=f.mono_micro)
+        mid = px(90)
+        swatch = (base - px(9), base - px(2))
+        self.create_line(mid, swatch[0], mid, swatch[1], fill=theme.INK,
+                         width=max(1.0, 1.4 * theme.px(1)))
+        gap = px(10)  # between a sample line and the word it stands for
+        end = self.bbox(self.create_text(mid + gap, base, text="ribs", anchor="sw",
+                                         fill=theme.MUTED, font=f.tiny))[2]
+        if plan.sections:
+            at = end + px(18)
+            self.create_line(at, swatch[0], at, swatch[1], fill=theme.READOUT,
+                             width=1, dash=dash)
+            self.create_text(at + gap, base, text="offset sections", anchor="sw",
+                             fill=theme.MUTED, font=f.tiny)
+
+
+class WallMeter(tk.Canvas):
+    """The wall as a range, against the distance asked for.
+
+    The scale runs 10 % either side of the distance; the grey band is 5 %
+    either side, and the bar is the wall from its thinnest to its thickest.
+    A bar that leaves the band is drawn in the error colour.
+    """
+
+    WIDTH = 240
+    HEIGHT = 30
+
+    def __init__(self, parent: tk.Misc, bg: str = theme.TRACKER_BG) -> None:
+        super().__init__(parent, width=px(self.WIDTH), height=px(self.HEIGHT), bg=bg,
+                         highlightthickness=0, bd=0)
+
+    def show(self, thinnest: float, thickest: float, asked: float) -> None:
+        f = theme.fonts()
+        self.delete("all")
+        asked = abs(asked)
+        if not asked:
+            return
+        low, high = asked * 0.9, asked * 1.1
+        left, right = px(10), px(self.WIDTH - 10)
+
+        def x(value: float) -> float:
+            value = min(max(value, low), high)
+            return left + (value - low) / (high - low) * (right - left)
+
+        middle = px(11)
+        self.create_rectangle(x(asked * 0.95), px(6), x(asked * 1.05), px(16),
+                              fill=theme.TRACK, outline="")
+        self.create_line(left, middle, right, middle, fill=theme.BORDER, width=1)
+        inside = asked * 0.95 <= thinnest and thickest <= asked * 1.05
+        bar = px(6)
+        a, b = x(thinnest), x(thickest)
+        # A round-capped line runs past its ends by half its width.
+        a, b = min(a + bar / 2, (a + b) / 2), max(b - bar / 2, (a + b) / 2)
+        self.create_line(a, middle, b, middle, width=bar, capstyle="round",
+                         fill=theme.OK if inside else theme.ERROR)
+        mark = x(asked)
+        self.create_line(mark, px(3), mark, px(19), fill=theme.INK,
+                         width=max(1.0, 1.5 * theme.px(1)))
+        base = px(self.HEIGHT)
+        self.create_text(left, base, text=_fmt(low), anchor="sw", fill=theme.MUTED,
+                         font=f.mono_micro)
+        self.create_text(right, base, text=_fmt(high), anchor="se", fill=theme.MUTED,
+                         font=f.mono_micro)
+        self.create_text(mark, base, text=f"{_fmt(asked)} asked", anchor="s",
+                         fill=theme.MUTED, font=f.mono_micro)

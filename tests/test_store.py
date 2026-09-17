@@ -367,3 +367,69 @@ def test_a_record_the_part_already_holds_is_not_carried_in_twice():
 
     assert store.carry_over(side, [record], ["rib_airfoil"]) == []
     assert side.exports == [record]
+
+
+# -- wings ------------------------------------------------------------------
+
+
+def wing_record(**overrides):
+    from airfoil_converter.export import WingSpec
+
+    base = dict(
+        export_id="wing-1",
+        stem="w",
+        settings=WingSpec(ribs=("exp-1", "exp-2"), offset="2").to_dict(),
+        station_count=19,
+        curves=[
+            CurveRecord(role="section", feature="w_s01", file="w_s01.sldcrv"),
+            CurveRecord(role="section_joined", feature="w_s01_joined", file=""),
+            CurveRecord(role="wing_le", feature="w_le", file="w_le.sldcrv"),
+        ],
+    )
+    base.update(overrides)
+    return store.WingRecord(**base)
+
+
+def test_a_sidecar_without_wings_is_still_schema_one():
+    text = store.to_json(sidecar_with(CurveRecord(role="airfoil", feature="rib_airfoil", file="x")))
+    assert '"schemaVersion": 1' in text
+    assert '"wings"' not in text
+
+
+def test_a_sidecar_with_a_wing_is_schema_two_and_round_trips():
+    original = sidecar_with()
+    original.wings.append(wing_record())
+    text = store.to_json(original)
+    assert '"schemaVersion": 2' in text
+    back = store.from_json(text)
+    assert back.wings == original.wings
+    assert back.wings[0].spec.ribs == ("exp-1", "exp-2")
+    assert back.wings[0].spec.offset == "2"
+
+
+def test_a_wing_claims_its_curves_so_they_are_not_strays():
+    sidecar = sidecar_with()
+    sidecar.wings.append(wing_record())
+    states = store.reconcile(sidecar, ["w_s01", "w_s01_joined", "w_le"])
+    assert {s.feature: s.state for s in states} == {
+        "w_s01": store.LINKED, "w_s01_joined": store.LINKED, "w_le": store.LINKED,
+    }
+    assert {s.export_id for s in states} == {"wing-1"}
+
+
+def test_wing_curves_are_never_adopted_as_ribs():
+    assert store.adoptable(["w_le", "w_te", "w_s01", "w_s01_te", "w_s01_joined", "w_2_s03"]) == []
+
+
+def test_ribs_and_wings_share_the_name_count():
+    sidecar = sidecar_with()
+    sidecar.wings.append(wing_record(stem="rib", name_index=2))
+    assert sidecar.next_index("rib") == 3
+
+
+def test_a_wing_is_found_by_its_id_and_its_names_are_known():
+    sidecar = sidecar_with()
+    sidecar.wings.append(wing_record())
+    assert sidecar.find_wing("wing-1").stem == "w"
+    assert sidecar.find_wing("exp-1") is None
+    assert "w_s01_joined" in sidecar.all_feature_names()

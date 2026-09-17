@@ -7,9 +7,9 @@ import sys
 import tkinter as tk
 import uuid
 from tkinter import filedialog, font as tkfont, messagebox, ttk
-from typing import Any, Dict, List, Optional
+from typing import Any, Callable, Dict, List, Optional, Tuple
 
-from . import geometry, parser, pick, store, swcom, swlink, theme, ui_text, widgets, writer
+from . import geometry, pick, store, swcom, swlink, theme, ui_text, widgets, wing_tab, writer
 from .export import (
     MODE_2POINTS,
     MODE_3POINTS,
@@ -27,9 +27,12 @@ from .export import (
     feature_name,
     folder_name,
     joinable,
+    load_source,
+    section_from_dict,
+    section_to_dict,
 )
 from .geometry import GeometryError
-from .parser import AIRFOIL, AirfoilData, AirfoilParseError, parse_csv
+from .parser import AirfoilData, AirfoilParseError
 from . import __version__
 
 OK_COLOR = theme.OK
@@ -97,17 +100,20 @@ SPEC_VARS = (
 SPEC_COMPOUND = ("p1", "p2", "p3", "leading_edge", "le_manual")
 
 
-def _record_label(record: "Optional[store.ExportRecord]", export_id: str) -> str:
+def _record_label(record: "Optional[Any]", export_id: str) -> str:
     """Several ribs come off one aerofoil, so the stem alone does not tell them apart."""
     if record is None:
         return export_id
     return record.stem if record.name_index <= 1 else f"{record.stem} ({record.name_index})"
 
 
-def _record_place(record: "Optional[store.ExportRecord]") -> str:
+def _record_place(record: "Optional[Any]") -> str:
     """Where the leading edge sits, which is what distinguishes one rib from the next."""
     if record is None:
         return ""
+    if isinstance(record, store.WingRecord):
+        # A wing stands on its ribs; what tells one from the next is its offset.
+        return ui_text.wing_place(record.spec)
     if record.adopted:
         # Read back from the names in the part, which say nothing about where
         # the curves were put. A plausible ``0, 0, 0`` here would be a lie.
@@ -126,7 +132,7 @@ def _read_key(session) -> tuple:
         session.pid,
         document.title if document else "",
         document.path if document else "",
-        len(session.features()) if document and document.is_part else 0,
+        session.change_key() if document and document.is_part else (0, 0),
     )
 
 
@@ -137,12 +143,7 @@ def _read_snapshot(session) -> dict:
     if document is not None and document.is_part:
         curves = [f.name for f in session.curve_features()]
     return {
-        "key": (
-            session.pid,
-            document.title if document else "",
-            document.path if document else "",
-            len(session.features()) if document and document.is_part else 0,
-        ),
+        "key": _read_key(session),
         "version": session.label,
         "newer_than_tested": swcom.is_newer_than_tested(session.revision),
         "title": document.title if document else "",
@@ -170,9 +171,9 @@ def _picked_summary(session) -> str:
     return f"Read {got[0]} from SolidWorks."
 
 
-def _take_selection(session):
-    """What the user just clicked, taken so the next poll starts empty."""
-    return session.take_selection()
+def _read_selection(session):
+    """What is selected now. Left selected: see Session.read_selection."""
+    return session.read_selection()
 
 
 class ConverterApp(ttk.Frame):
@@ -245,6 +246,10 @@ class ConverterApp(ttk.Frame):
         # "", "done" or "stopped": what the idle pick row has to say for itself.
         self._pick_outcome = ""
         self._flyout_open = True
+        # Every tab's SolidWorks bar shows the one link: see _sw_header.
+        self._sw_dots: List[widgets.Dot] = []
+        self._curves_buttons: List[widgets.Button] = []
+        self._sw_dot_color = theme.FAINT
 
         # The link to SolidWorks. None until the first look, and dropped again
         # whenever a call fails, so a reopened session is picked up on its own.
@@ -262,6 +267,10 @@ class ConverterApp(ttk.Frame):
         # there is somewhere on disk to put them.
         self._homeless: List[store.ExportRecord] = []
         self._editing: str = ""          # the export id being edited, or ""
+        # The Wing tab, which borrows this link and this record, and what
+        # opens a wing on it when one is clicked in the list here.
+        self._wing_tab: Optional[Any] = None
+        self._show_wing: Optional[Callable[[str], None]] = None
         self._last_states: List[store.CurveState] = []
         self._restoring = False
         self._quiet_ticks = 0
@@ -269,7 +278,7 @@ class ConverterApp(ttk.Frame):
         # Pick mode: None unless the user is clicking things in SolidWorks.
         self._pick: Optional[pick.Pick] = None
         self._pick_ticks = 0
-        self._pick_answers = 0
+        self._pick_watch = pick.SelectionWatch()
 
         self.p_vars: List[List[tk.StringVar]] = [
             [tk.StringVar(value="0") for _ in range(3)] for _ in range(3)
@@ -402,19 +411,66 @@ class ConverterApp(ttk.Frame):
         body.grid(row=0, column=0, sticky="nsew", padx=theme.px(12), pady=theme.px(12))
         body.columnconfigure(0, weight=1, minsize=theme.px(STRIP_WIDTH))
 
+        # The tabs share the strip and the flyout: each is a page gridded in
+        # the same cell under the tab row, and only the open one is shown.
+        self.tab_row = widgets.TabRow(body, self.show_tab)
+        self.tab_row.grid(row=0, column=0, sticky="ew", pady=(0, theme.px(10)))
+        body.rowconfigure(1, weight=1)
+        self.page_holder = body
+        self._pages: Dict[str, tk.Misc] = {}
+        self._tab_shown: Dict[str, Callable[[], None]] = {}
+        self._open_tab = ""
+
+        page = tk.Frame(body, bg=theme.WINDOW)
+        page.columnconfigure(0, weight=1)
         row = 0
         for build in (
             self._build_source, self._build_shape, self._build_plane,
             self._build_placement, self._build_output, self._build_sw_bar,
         ):
-            build(body).grid(row=row, column=0, sticky="ew", pady=(0, theme.px(8)))
+            build(page).grid(row=row, column=0, sticky="ew", pady=(0, theme.px(8)))
             row += 1
 
         # The footer sits at the bottom of the window however tall it is: this
         # empty row takes whatever height is going spare.
-        body.rowconfigure(row, weight=1)
-        tk.Frame(body, bg=theme.WINDOW).grid(row=row, column=0, sticky="nsew")
-        self._build_footer(body).grid(row=row + 1, column=0, sticky="ew")
+        page.rowconfigure(row, weight=1)
+        tk.Frame(page, bg=theme.WINDOW).grid(row=row, column=0, sticky="nsew")
+        self._build_footer(page).grid(row=row + 1, column=0, sticky="ew")
+        self.add_page("Airfoil", page)
+        self.show_tab("Airfoil")
+
+    def add_page(self, name: str, page: tk.Misc,
+                 shown: Optional[Callable[[], None]] = None) -> None:
+        """Put another tab's page in the strip, under a tab of its own.
+
+        ``page`` must be a child of :attr:`page_holder`; ``shown`` is called
+        each time its tab is opened.
+        """
+        page.grid(row=1, column=0, sticky="nsew")
+        page.grid_remove()
+        self._pages[name] = page
+        if shown is not None:
+            self._tab_shown[name] = shown
+        self.tab_row.add(name)
+        self.tab_row.select(self._open_tab)
+
+    def show_tab(self, name: str) -> None:
+        if name not in self._pages:
+            return
+        changed = name != self._open_tab
+        self._open_tab = name
+        for other, page in self._pages.items():
+            if other == name:
+                page.grid()
+            else:
+                page.grid_remove()
+        self.tab_row.select(name)
+        if changed:
+            self._page.yview_moveto(0)
+        shown = self._tab_shown.get(name)
+        if shown is not None:
+            shown()
+        self._relayout()
 
     # -- the pieces every panel is made of
 
@@ -748,18 +804,31 @@ class ConverterApp(ttk.Frame):
 
     # -- the SolidWorks bar, whose header is the connection itself
 
-    def _build_sw_bar(self, parent: tk.Misc) -> widgets.Panel:
-        panel = widgets.Panel(parent, "SolidWorks")
+    def _sw_header(self, panel: widgets.Panel) -> None:
+        """The connection, in a panel's header: dot, document, Curves.
+
+        Every tab's SolidWorks bar has one, and all of them follow the one
+        link this window keeps — the dots and buttons are registered here so
+        that :meth:`_refresh_link_labels` and :meth:`_toggle_flyout` reach
+        each of them.
+        """
         slot = panel.header_slot()
-        self.sw_dot = widgets.Dot(slot, theme.FAINT, bg=theme.HEADER_BG)
-        self.sw_dot.grid(row=0, column=0, padx=(0, theme.px(6)))
+        dot = widgets.Dot(slot, theme.FAINT, bg=theme.HEADER_BG)
+        dot.grid(row=0, column=0, padx=(0, theme.px(6)))
         tk.Label(slot, textvariable=self.sw_headline, bg=theme.HEADER_BG,
                  fg=theme.READOUT, font=self.fonts.readout).grid(row=0, column=1)
-        self.curves_button = widgets.Button(
-            slot, "Hide curves", command=self._toggle_flyout, icon="sidebar",
-            height=20, bg=theme.HEADER_BG,
+        button = widgets.Button(
+            slot, "Hide curves" if self._flyout_open else "Curves",
+            command=self._toggle_flyout, icon="sidebar", height=20, bg=theme.HEADER_BG,
         )
-        self.curves_button.grid(row=0, column=2, padx=(theme.px(8), 0))
+        button.grid(row=0, column=2, padx=(theme.px(8), 0))
+        dot.set_color(self._sw_dot_color)
+        self._sw_dots.append(dot)
+        self._curves_buttons.append(button)
+
+    def _build_sw_bar(self, parent: tk.Misc) -> widgets.Panel:
+        panel = widgets.Panel(parent, "SolidWorks")
+        self._sw_header(panel)
 
         body = panel.body
         body.columnconfigure(1, weight=1)
@@ -928,7 +997,8 @@ class ConverterApp(ttk.Frame):
             self._flyout_edge.grid_remove()
             self.flyout.grid_remove()
             root.geometry(f"{max(width - delta, theme.px(STRIP_WIDTH + 24))}x{height}")
-        self.curves_button.set_text("Hide curves" if self._flyout_open else "Curves")
+        for button in self._curves_buttons:
+            button.set_text("Hide curves" if self._flyout_open else "Curves")
 
     # ----------------------------------------------------------- interaction
 
@@ -1070,16 +1140,6 @@ class ConverterApp(ttk.Frame):
         if path:
             self.out_folder.set(path)
 
-    def _load_curve(self, path: str) -> AirfoilData:
-        """Read a curve file back into a 2D section on the plane it was drawn on."""
-        section = geometry.flatten_curve(parser.parse_curve(path))
-        self.section = section
-        return AirfoilData(
-            name=os.path.splitext(os.path.basename(path))[0],
-            chord=section.chord,
-            sections={AIRFOIL: section.points},
-        )
-
     def _show_loaded(self, data: Optional[AirfoilData], curve: bool) -> None:
         """The Source panel's second line: the section, drawn and named.
 
@@ -1110,8 +1170,8 @@ class ConverterApp(ttk.Frame):
     def _load(self, path: str) -> None:
         self.section = None
         try:
-            curve = parser.is_curve_file(path)
-            data = self._load_curve(path) if curve else parse_csv(path)
+            data, self.section = load_source(path)
+            curve = self.section is not None
         except (AirfoilParseError, GeometryError) as exc:
             self.data = None
             self.loaded_text.set("No file loaded.")
@@ -1170,7 +1230,12 @@ class ConverterApp(ttk.Frame):
     # ------------------------------------------------------ the live link
 
     POLL_MS = 1000
-    SLOW_EVERY = 5  # a full walk this many quiet ticks apart, to catch renames
+    # A full read of the part's curves this many quiet ticks apart, to catch a
+    # rename, which moves neither the feature count nor the update stamp. It
+    # costs SolidWorks a few hundred milliseconds of its drawing thread, so it
+    # is only made while this window has the focus — and coming back to the
+    # window reads the part afresh anyway.
+    SLOW_EVERY = 5
 
     # A pick is a click being waited for, not a panel being kept fresh, so it
     # polls fast — and only while it is armed, which is why the panel's own
@@ -1212,7 +1277,7 @@ class ConverterApp(ttk.Frame):
                     self._ask_for_pick()
                 else:
                     self._quiet_ticks += 1
-                    if self._quiet_ticks >= self.SLOW_EVERY:
+                    if self._quiet_ticks >= self.SLOW_EVERY and self._window_has_focus():
                         self._quiet_ticks = 0
                         self._ask_for_snapshot()
                     else:
@@ -1221,6 +1286,13 @@ class ConverterApp(ttk.Frame):
             self._tick_trouble(exc)
 
         self.after(self.PICK_MS if self._pick is not None else self.POLL_MS, self._tick)
+
+    def _window_has_focus(self) -> bool:
+        try:
+            return self.focus_displayof() is not None
+        except (KeyError, tk.TclError):
+            # A combobox's drop-down list is not a widget tkinter knows by name.
+            return True
 
     def _tick_trouble(self, exc: BaseException) -> None:
         reason = f"{type(exc).__name__}: {exc}"
@@ -1252,7 +1324,7 @@ class ConverterApp(ttk.Frame):
             self._end_pick("Pick stopped: nothing was clicked.")
             return
         self._update_pick_title()
-        self._ask("pick", _take_selection)
+        self._ask("pick", _read_selection)
 
     def _refresh_panel(self) -> None:
         """The Refresh button, and every path that needs the truth now.
@@ -1290,7 +1362,7 @@ class ConverterApp(ttk.Frame):
             return
         self._pick = pick.Pick(steps)
         self._pick_ticks = 0
-        self._pick_answers = 0
+        self._pick_watch = pick.SelectionWatch()
         self._quiet_ticks = 0
         self._pick_outcome = ""
         self.pick_text.set(self._pick.says)
@@ -1322,12 +1394,12 @@ class ConverterApp(ttk.Frame):
     def _took_pick(self, picked) -> None:
         if self._pick is None:
             return
-        self._pick_answers += 1
-        if self._pick_answers == 1:
-            return  # whatever was already selected when the pick began
-        if picked is None:
-            return  # nothing clicked yet, which is most polls
-        self._pick.accept(picked)
+        # Whatever was selected when the pick began, and the same selection
+        # read again on every poll after, are not clicks.
+        clicked = self._pick_watch.fresh(picked)
+        if clicked is None:
+            return
+        self._pick.accept(clicked)
         self._after_pick_step()
 
     def _after_pick_step(self) -> None:
@@ -1550,9 +1622,9 @@ class ConverterApp(ttk.Frame):
         """
         headline, state = ui_text.link_headline(swcom.is_available(), self._snapshot)
         self.sw_headline.set(headline)
-        self.sw_dot.set_color(
-            {"ok": theme.OK, "bad": theme.ERROR}.get(state, theme.FAINT)
-        )
+        self._sw_dot_color = {"ok": theme.OK, "bad": theme.ERROR}.get(state, theme.FAINT)
+        for dot in self._sw_dots:
+            dot.set_color(self._sw_dot_color)
         self.sw_detail.set(
             ui_text.link_detail(self._snapshot, self._sidecar_path, self.sw_status.get())
         )
@@ -1700,7 +1772,7 @@ class ConverterApp(ttk.Frame):
                 strays.append(state)
 
         for export_id, states in by_export.items():
-            record = self._sidecar.find(export_id) if self._sidecar else None
+            record = self._find_record(export_id)
             worst = "linked" if all(not s.needs_attention for s in states) else "attention"
             node = self.curve_tree.insert(
                 "", "end", iid=export_id, text=_record_label(record, export_id), open=True,
@@ -1785,7 +1857,7 @@ class ConverterApp(ttk.Frame):
         if selected and self._sidecar is not None:
             export_id = selected[0].split("/")[0]
             if export_id not in ("__strays__", NEW_CURVE):
-                record = self._sidecar.find(export_id)
+                record = self._find_record(export_id)
 
         # The name is only editable on a curve that does not exist yet.
         # Renaming one that does would leave its old features behind in the
@@ -1814,6 +1886,13 @@ class ConverterApp(ttk.Frame):
         text, ok = ui_text.curves_linked(states)
         self.card_state.set(text)
         self.card_state_label.configure(fg=theme.OK if ok else theme.ERROR)
+        if isinstance(record, store.WingRecord):
+            try:
+                self.card_settings.set(ui_text.wing_summary(record.spec))
+            except Exception:  # noqa: BLE001 - a record written by a later version
+                self.card_settings.set("")
+            self.card_hint.configure(text="A wing. Click it to open it on the Wing tab.")
+            return
         if record.adopted:
             self.card_settings.set(ui_text.ADOPTED_SETTINGS)
             self.card_hint.configure(text=ui_text.ADOPTED_HINT)
@@ -1838,6 +1917,11 @@ class ConverterApp(ttk.Frame):
             return
         export_id = selected[0].split("/")[0]
         if export_id in ("__strays__", NEW_CURVE) or self._sidecar is None:
+            return
+        if self._sidecar.find_wing(export_id) is not None:
+            if self._show_wing is not None:
+                self._show_wing(export_id)
+            self._select_editing()
             return
         record = self._sidecar.find(export_id)
         if record is None or record.export_id == self._editing:
@@ -1902,13 +1986,7 @@ class ConverterApp(ttk.Frame):
                         ok=False,
                     )
             if record.loaded_section:
-                self.section = geometry.FlatSection(
-                    points=[tuple(p) for p in record.loaded_section["points"]],
-                    origin=tuple(record.loaded_section["origin"]),
-                    u=tuple(record.loaded_section["u"]),
-                    v=tuple(record.loaded_section["v"]),
-                    chord=record.loaded_section["chord"],
-                )
+                self.section = section_from_dict(record.loaded_section)
 
             spec = record.spec
             for name, attr in SPEC_VARS:
@@ -1996,8 +2074,19 @@ class ConverterApp(ttk.Frame):
         except OSError as exc:
             self._set_status(f"Could not write the output: {exc}", ok=False)
 
+    def busy(self) -> bool:
+        """Is either tab still waiting on SolidWorks for an export?"""
+        wing_push = self._wing_tab is not None and self._wing_tab.pushing
+        return self._pending_push is not None or wing_push
+
+    def _find_record(self, export_id: str) -> "Optional[Any]":
+        """A rib's record, or a wing's: the list shows both."""
+        if self._sidecar is None:
+            return None
+        return self._sidecar.find(export_id) or self._sidecar.find_wing(export_id)
+
     def _export_unsafe(self) -> None:
-        if self._pending_push is not None:
+        if self.busy():
             raise InputError("SolidWorks is still working on the last export.")
         if self.data is None:
             raise InputError("Load a CSV first.")
@@ -2284,13 +2373,7 @@ class ConverterApp(ttk.Frame):
     def _section_as_dict(self) -> Optional[Dict[str, Any]]:
         if self.section is None or self.plane_mode.get() != MODE_LOADED:
             return None
-        return {
-            "points": [list(p) for p in self.section.points],
-            "origin": list(self.section.origin),
-            "u": list(self.section.u),
-            "v": list(self.section.v),
-            "chord": self.section.chord,
-        }
+        return section_to_dict(self.section)
 
 
 def _declare_dpi_aware() -> None:
@@ -2354,6 +2437,25 @@ def _scale_to_dpi(root: tk.Tk) -> float:
     return factor
 
 
+def build_window(root: tk.Tk, scale: float) -> "Tuple[ConverterApp, wing_tab.WingTab]":
+    """Two tabs in one strip: the converter, and the wing built from its ribs.
+
+    The wing tab is a page of the converter's strip rather than a window of
+    its own, and it borrows the converter's link and record of the part.
+    """
+    app = ConverterApp(root, scale=scale)
+    wing_page = wing_tab.WingTab(app.page_holder, app)
+    app._wing_tab = wing_page
+    app.add_page("Wing", wing_page, shown=wing_page.refresh)
+
+    def show_wing(wing_id: str) -> None:
+        app.show_tab("Wing")
+        wing_page.open_wing(wing_id)
+
+    app._show_wing = show_wing
+    return app, wing_page
+
+
 def main() -> None:
     _declare_dpi_aware()
     # Windows will not use a font file it has not been told about, and Tk asks
@@ -2364,7 +2466,7 @@ def main() -> None:
     scale = _scale_to_dpi(root)
     root.configure(background=theme.WINDOW)
     root.minsize(int((STRIP_WIDTH + 24) * scale), int(480 * scale))
-    app = ConverterApp(root, scale=scale)
+    app, _wing = build_window(root, scale)
 
     # The strip can be taller than the screen. Open at the height the screen
     # has rather than at the height the form wants, or the footer — the status

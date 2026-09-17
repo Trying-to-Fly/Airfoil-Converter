@@ -197,6 +197,32 @@ class Pick:
         )
 
 
+class SelectionWatch:
+    """Tells a new click from a selection that is simply still there.
+
+    The app polls SolidWorks rather than being told, so the same selection is
+    read again and again. It cannot be cleared to mark it as used — doing that
+    from outside has crashed SolidWorks — so a click is recognised as the
+    selection *changing*: to something else, or to something again after
+    nothing. Whatever is already selected when the pick starts is not a click.
+    """
+
+    def __init__(self) -> None:
+        self._started = False
+        self._last: Optional[Picked] = None
+
+    def fresh(self, picked: Optional[Picked]) -> Optional[Picked]:
+        """The click this reading shows, or None if there is no new one."""
+        if not self._started:
+            self._started = True
+            self._last = picked
+            return None
+        if picked == self._last:
+            return None
+        self._last = picked
+        return picked
+
+
 def _nose_to_tail(line: PickedLine, nose: Optional[Vec3]) -> Vec3:
     """Which way along the line the chord runs.
 

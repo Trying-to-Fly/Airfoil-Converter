@@ -85,6 +85,29 @@ FOLDER_CONTAINING = 2
 # mark 1. At mark 0 it returns False and says nothing about why.
 COMPOSITE_SELECT_MARK = 1
 
+# A loft reads its profiles from selection mark 1 and its guide curves from
+# mark 2, as the Loft property page does.
+LOFT_PROFILE_MARK = 1
+LOFT_GUIDE_MARK = 2
+LOFT_TYPE_NAME = "Blend"
+LOFT_SURFACE_TYPE_NAME = "BlendRefSurface"
+
+# Values read out of the SolidWorks 2026 constant library (swconst.tlb) rather
+# than remembered: swGuideCurveInfluence_e, swFeatureSuppressionAction_e,
+# swInConfigurationOpts_e, swOpenDocOptions_e, swSaveAsOptions_e,
+# swDocumentTypes_e.
+GUIDE_TO_NEXT_GUIDE = 0
+GUIDE_TO_NEXT_SHARP = 1
+GUIDE_TO_NEXT_EDGE = 2
+GUIDE_GLOBAL = 3
+SUPPRESS = 0
+UNSUPPRESS = 1
+THIS_CONFIGURATION = 1
+SW_DOC_PART = 1
+OPEN_SILENT = 1
+SAVE_SILENT = 1
+SAVE_AS_COPY = 2
+
 # SolidWorks holds curve points in metres however the file is written, so
 # everything crossing this boundary is scaled. The file says "175.000000mm"
 # and the part reads back 0.175.
@@ -529,9 +552,40 @@ class Session:
             raise SolidWorksError("No document is open in SolidWorks.")
         return doc
 
+    def change_key(self) -> Tuple[int, int]:
+        """Two numbers that move when the active part does: its feature count and
+        its update stamp.
+
+        Asked every second, so it has to be cheap: two calls, under a
+        millisecond. Walking the tree instead took 650 ms of SolidWorks' own
+        thread on a part of 120 features — every call is served there, between
+        frames — and orbiting the model stuttered while the app was open. The
+        stamp stands still while the model is only looked at.
+        """
+        doc = self._active()
+        return int(call(doc, "GetFeatureCount")), int(call(doc, "GetUpdateStamp"))
+
     def features(self) -> List[FeatureInfo]:
-        """Every feature in the active document, subfeatures included."""
-        return self._walk(call(self._active(), "FirstFeature"))
+        """Every feature in the active document, subfeatures included.
+
+        Listed in one call, then asked two questions each; walking the tree
+        asks four, and takes nearly twice as long.
+        """
+        doc = self._active()
+        try:
+            listed = call(call(doc, "FeatureManager"), "GetFeatures", False)
+        except Exception:  # noqa: BLE001 - the walk below always works
+            listed = None
+        if not listed:
+            return self._walk(call(doc, "FirstFeature"))
+        out: List[FeatureInfo] = []
+        for feature in listed:
+            try:
+                type_name = str(call(feature, "GetTypeName2"))
+            except Exception:  # noqa: BLE001 - a feature that will not describe itself
+                type_name = "?"
+            out.append(FeatureInfo(name=str(call(feature, "Name")), type_name=type_name))
+        return out
 
     def curve_features(self) -> List[FeatureInfo]:
         return [f for f in self.features() if f.is_curve]
@@ -725,6 +779,31 @@ class Session:
         except Exception:  # noqa: BLE001
             return None
 
+    def _select_all(self, picks: Sequence[Tuple[str, int]], what: str) -> None:
+        """Select curves by name, each at its mark, rebuilding and retrying once.
+
+        Straight after a push SolidWorks sometimes cannot find a curve it has
+        just made; a rebuild settles it.
+        """
+        doc = self._active()
+        extension = call(doc, "Extension")
+        for attempt in range(2):
+            call(doc, "ClearSelection2", True)
+            missing = ""
+            for position, (curve, mark) in enumerate(picks):
+                if not call(
+                    extension, "SelectByID2", curve, "REFERENCECURVES",
+                    0.0, 0.0, 0.0, position > 0, mark, _null_dispatch(), 0,
+                ):
+                    missing = curve
+                    break
+            if not missing:
+                return
+            call(doc, "ClearSelection2", True)
+            if attempt == 0:
+                call(doc, "ForceRebuild3", False)
+        raise SolidWorksError(f"{missing} could not be selected {what}.")
+
     def insert_composite_curve(self, sources: Sequence[str], name: str) -> str:
         """Join several curves into one selectable curve, and name it.
 
@@ -738,16 +817,7 @@ class Session:
             raise SolidWorksError("A composite curve needs at least two curves to join.")
 
         doc = self._active()
-        extension = call(doc, "Extension")
-        call(doc, "ClearSelection2", True)
-        for position, source in enumerate(sources):
-            selected = call(
-                extension, "SelectByID2", source, "REFERENCECURVES",
-                0.0, 0.0, 0.0, position > 0, COMPOSITE_SELECT_MARK, _null_dispatch(), 0,
-            )
-            if not selected:
-                call(doc, "ClearSelection2", True)
-                raise SolidWorksError(f"{source} could not be selected to join.")
+        self._select_all([(source, COMPOSITE_SELECT_MARK) for source in sources], "to join")
 
         before = set(self.feature_names())
         made = call(doc, "InsertCompositeCurve")
@@ -764,6 +834,19 @@ class Session:
             )
         return self.rename_feature(created[0], name)
 
+    def composite_sources(self, name: str) -> List[str]:
+        """The curves a composite joins, by name, in the order it holds them."""
+        doc = self._active()
+        data = call(self._curve_feature(name), "GetDefinition")
+        if data is None or not call(data, "AccessSelections", doc, _null_dispatch()):
+            raise SolidWorksError(f"The curves {name} joins could not be read.")
+        try:
+            kinds = VARIANT(pythoncom.VT_BYREF | pythoncom.VT_VARIANT, None)
+            entities = call(data, "GetEntitiesToJoin", kinds) or ()
+            return [str(call(e, "Name")) for e in entities]
+        finally:
+            call(data, "ReleaseSelectionAccess")
+
     def set_rebuild_suppressed(self, suppressed: bool) -> None:
         """Hold the rebuild off while several curves are reloaded.
 
@@ -778,32 +861,169 @@ class Session:
         """Rebuild the active document. Called once, after the last curve."""
         return bool(call(self._active(), "ForceRebuild3", False))
 
+    # -- documents ------------------------------------------------------------
+
+    def open_part(self, path: str) -> DocInfo:
+        """Open a part (or bring it forward if it is open already) and make it active."""
+        path = os.path.abspath(path)
+        errors, warnings = _out_long(), _out_long()
+        doc = call(self._app, "OpenDoc6", path, SW_DOC_PART, OPEN_SILENT, "", errors, warnings)
+        if doc is None:
+            raise SolidWorksError(f"SolidWorks would not open {path} (error {errors.value}).")
+        title = str(call(doc, "GetTitle"))
+        call(self._app, "ActivateDoc3", title, False, 0, _out_long())
+        active = self.active_document()
+        if active is None or os.path.normcase(active.path) != os.path.normcase(path):
+            raise SolidWorksError(f"{title} opened, but did not become the active document.")
+        return active
+
+    def close_document(self, title: str) -> None:
+        """Close a document without saving it."""
+        call(self._app, "CloseDoc", title)
+
+    def save(self) -> None:
+        """Save the active document where it already is."""
+        doc = self._active()
+        errors, warnings = _out_long(), _out_long()
+        if not call(doc, "Save3", SAVE_SILENT, errors, warnings):
+            raise SolidWorksError(f"SolidWorks would not save {call(doc, 'GetTitle')} (error {errors.value}).")
+
+    # -- lofts and bodies -----------------------------------------------------
+    #
+    # A loft reads its inputs from the selection, the way a composite curve
+    # does: its profiles at mark 1, in order, and its guide curves at mark 2.
+    # The settings copied here are the ones a loft made by hand in the Loft
+    # property page carries, read back off such a loft rather than assumed.
+
+    def features_of_type(self, *type_names: str) -> List[str]:
+        return [f.name for f in self.features() if f.type_name in type_names]
+
+    def insert_loft(
+        self,
+        profiles: Sequence[str],
+        guides: Sequence[str],
+        name: str,
+        merge: bool = False,
+        keep_tangency: bool = True,
+        guide_influence: int = GUIDE_TO_NEXT_GUIDE,
+        solid: bool = True,
+    ) -> str:
+        """A loft through ``profiles`` in order, held by ``guides``, named ``name``.
+
+        A solid unless ``solid`` is off, when it is a surface: SolidWorks
+        refuses some solids whose surface it makes without complaint, and a
+        surface is all a measurement needs. A surface loft takes no guide
+        influence; it uses SolidWorks' own.
+        """
+        if len(profiles) < 2:
+            raise SolidWorksError("A loft needs at least two profiles.")
+        doc = self._active()
+        picks = [(p, LOFT_PROFILE_MARK) for p in profiles] + [(g, LOFT_GUIDE_MARK) for g in guides]
+        self._select_all(picks, "for the loft")
+
+        before = set(self.feature_names())
+        if not solid:
+            # Returns nothing either way; whether it worked shows in the tree.
+            call(doc, "InsertLoftRefSurface2", False, keep_tangency, False, 1.0, 0, 0)
+            made = True
+        else:
+            made = call(
+                call(doc, "FeatureManager"), "InsertProtrusionBlend2",
+                False,           # Closed
+                keep_tangency,   # KeepTangency: "Maintain tangency" in the page
+                False,           # ForceNonRational
+                1.0,             # TessToleranceFactor
+                0, 0,            # start and end constraints: none
+                1.0, 1.0,        # tangent lengths, unused with no constraint
+                False, False,    # tangent directions, likewise
+                False, 0.0, 0.0, 0,  # not a thin feature
+                merge,
+                False, True,     # feature scope: every body
+                guide_influence,
+            )
+        call(doc, "ClearSelection2", True)
+        created = [n for n in self.feature_names() if n not in before]
+        if made is None or made is False or not created:
+            kind = "solid" if solid else "surface"
+            raise SolidWorksError(
+                f"SolidWorks would not make a {kind} loft of {' to '.join(profiles)} "
+                f"along {len(guides)} guide curve(s)."
+            )
+        if len(created) != 1:
+            raise SolidWorksError(
+                f"The loft added {len(created)} features, so which one it is cannot be told."
+            )
+        return self.rename_feature(created[0], name)
+
+    def delete_feature(self, name: str) -> None:
+        """Delete one feature, leaving what it was built from."""
+        doc = self._active()
+        call(doc, "ClearSelection2", True)
+        if not call(self._curve_feature(name), "Select2", False, 0):
+            raise SolidWorksError(f"{name} could not be selected.")
+        deleted = call(call(doc, "Extension"), "DeleteSelection2", 0)
+        call(doc, "ClearSelection2", True)
+        if not deleted:
+            raise SolidWorksError(f"SolidWorks would not delete {name}.")
+
+    def set_suppressed(self, name: str, suppressed: bool) -> None:
+        action = SUPPRESS if suppressed else UNSUPPRESS
+        feature = self._curve_feature(name)
+        if not call(feature, "SetSuppression2", action, THIS_CONFIGURATION, None):
+            raise SolidWorksError(
+                f"SolidWorks would not {'suppress' if suppressed else 'unsuppress'} {name}."
+            )
+
+    def export_step(self, path: str) -> None:
+        """Write every visible body of the active part to a STEP file, as a copy.
+
+        The part stays the open document under its own name.
+        """
+        doc = self._active()
+        path = os.path.abspath(path)
+        errors, warnings = _out_long(), _out_long()
+        saved = call(
+            call(doc, "Extension"), "SaveAs", path, 0, SAVE_SILENT | SAVE_AS_COPY,
+            _null_dispatch(), errors, warnings,
+        )
+        if not saved or not os.path.exists(path):
+            raise SolidWorksError(f"SolidWorks would not write {path} (error {errors.value}).")
+
     # -- reading what the user clicked --------------------------------------
 
-    def clear_selection(self) -> None:
-        call(self._active(), "ClearSelection2", True)
+    def editing_sketch(self) -> bool:
+        """Is a sketch open for editing in the active document?
 
-    def take_selection(self) -> Optional[Picked]:
-        """What is selected right now, taken rather than merely read.
+        Selecting and deselecting from outside while one is open can crash
+        SolidWorks outright, so the operations that must select things refuse
+        to start then.
+        """
+        doc = self._active()
+        return _try(_try(doc, "SketchManager"), "ActiveSketch") is not None
 
-        Clearing after the read is what turns a selection into an event. The
-        app is polling, not being told, so without clearing it cannot tell one
-        click from the same thing still being selected a fifth of a second
-        later. Clearing also shows the user their click landed.
+    def read_selection(self) -> Optional[Picked]:
+        """What was most recently selected, read and left exactly as it is.
 
-        ``None`` means nothing was selected, which is the ordinary answer on
-        almost every poll.
+        **Never clear the selection here.** This is called while the user is
+        clicking in SolidWorks — often in a sketch, with the Point property
+        page open on the very point just clicked. ``ClearSelection2`` then
+        pulls that point out from under the page, and SolidWorks 2026 dies with
+        an access violation in its own ``ClearSelectionsNotify``: twice, on
+        2026-09-16, both times with this read and that clear as the last API
+        calls. Telling a new click from one still selected is done by the
+        caller instead, by noticing when the selection changes.
+
+        ``None`` means nothing is selected.
         """
         doc = self._active()
         manager = call(doc, "SelectionManager")
         if manager is None:
             return None
-        if int(call(manager, "GetSelectedObjectCount2", -1) or 0) < 1:
+        count = int(call(manager, "GetSelectedObjectCount2", -1) or 0)
+        if count < 1:
             return None
-        try:
-            return _interpret(manager, 1)
-        finally:
-            call(doc, "ClearSelection2", True)
+        # The last one is the latest click, when several are held with Ctrl.
+        return _interpret(manager, count)
 
 
 def connect() -> Session:
