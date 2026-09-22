@@ -552,6 +552,12 @@ def test_scale_factor_rejects_nonpositive_target():
         g.scale_factor(175.0, 0.0)
 
 
+@pytest.mark.parametrize("target", [math.inf, -math.inf, math.nan])
+def test_scale_factor_rejects_a_target_that_is_not_finite(target):
+    with pytest.raises(GeometryError, match="finite"):
+        g.scale_factor(175.0, target)
+
+
 # --------------------------------------------------------- trailing edge modes
 
 

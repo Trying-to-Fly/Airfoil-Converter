@@ -76,6 +76,13 @@ def test_a_negative_trailing_edge_thickness_is_refused():
         flat(te_thickness="-1").te_thickness_mm()
 
 
+@pytest.mark.parametrize("text", ["inf", "-inf", "nan"])
+def test_a_field_that_is_not_a_finite_number_is_refused(text):
+    """float() reads these, and a chord of inf comes out as a file of nan."""
+    with pytest.raises(InputError, match="Target chord must be a finite number"):
+        flat(target_chord=text).target_chord_mm()
+
+
 def test_a_field_that_is_not_a_number_names_itself():
     with pytest.raises(InputError, match="Angle of attack must be a number"):
         flat(pitch="steep").pitch_degrees()

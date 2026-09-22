@@ -20,6 +20,7 @@ from __future__ import annotations
 from dataclasses import asdict, dataclass, field, fields
 from typing import Any, Dict, List, Optional, Sequence, Tuple
 
+import math
 import os
 
 from . import geometry, parser, writer
@@ -70,9 +71,15 @@ class InputError(Exception):
 
 def parse_float(text: str, name: str) -> float:
     try:
-        return float(text.strip())
+        value = float(text.strip())
     except ValueError:
         raise InputError(f"{name} must be a number (got {text.strip()!r}).") from None
+    # float() reads "inf" and "nan" too, and neither is a length or an angle
+    # that anything downstream can do arithmetic with: a chord of inf comes
+    # out as a file of nan that SolidWorks refuses, recorded as written.
+    if not math.isfinite(value):
+        raise InputError(f"{name} must be a finite number (got {text.strip()!r}).")
+    return value
 
 
 @dataclass(frozen=True)

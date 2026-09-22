@@ -480,6 +480,8 @@ def flatten_curve(points: Sequence[Vec3], tol: float = PLANARITY_TOL) -> FlatSec
 def scale_factor(csv_chord: float, target_chord: float | None) -> float:
     if target_chord is None:
         return 1.0
+    if not math.isfinite(target_chord):
+        raise GeometryError("Target chord must be a finite number.")
     if csv_chord <= 0:
         raise GeometryError("CSV chord must be positive to rescale.")
     if target_chord <= 0:

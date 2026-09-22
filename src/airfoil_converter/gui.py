@@ -2,12 +2,13 @@
 
 from __future__ import annotations
 
+import dataclasses
 import os
 import sys
 import tkinter as tk
 import uuid
 from tkinter import filedialog, font as tkfont, messagebox, ttk
-from typing import Any, Callable, Dict, List, Optional, Tuple
+from typing import Any, Callable, Collection, Dict, List, Optional, Tuple
 
 from . import geometry, pick, store, swcom, swlink, theme, ui_text, widgets, wing_tab, writer
 from .export import (
@@ -263,6 +264,10 @@ class ConverterApp(ttk.Frame):
         self._snapshot: Optional[dict] = None
         self._sidecar: Optional[store.Sidecar] = None
         self._sidecar_path = ""
+        # Why the sidecar file must not be written this session, or "". Set
+        # when the file is there but could not be read — written by a newer
+        # version, say — because writing over it would destroy what it holds.
+        self._sidecar_held = ""
         # Records made against a document that has no path yet, kept until
         # there is somewhere on disk to put them.
         self._homeless: List[store.ExportRecord] = []
@@ -1140,6 +1145,14 @@ class ConverterApp(ttk.Frame):
         if path:
             self.out_folder.set(path)
 
+    def _unload(self) -> None:
+        """Take the loaded section off the form: there is nothing to export."""
+        self.data = None
+        self.section = None
+        self.loaded_text.set("No file loaded.")
+        self._show_loaded(None, curve=False)
+        self.plane_seg.set_option_enabled(MODE_LOADED, False)
+
     def _show_loaded(self, data: Optional[AirfoilData], curve: bool) -> None:
         """The Source panel's second line: the section, drawn and named.
 
@@ -1173,10 +1186,7 @@ class ConverterApp(ttk.Frame):
             data, self.section = load_source(path)
             curve = self.section is not None
         except (AirfoilParseError, GeometryError) as exc:
-            self.data = None
-            self.loaded_text.set("No file loaded.")
-            self._show_loaded(None, curve=False)
-            self.plane_seg.set_option_enabled(MODE_LOADED, False)
+            self._unload()
             self._set_status(str(exc), ok=False)
             return
 
@@ -1657,21 +1667,34 @@ class ConverterApp(ttk.Frame):
             if self._sidecar is None or self._sidecar_path or self._sidecar.part_path:
                 self._sidecar = store.Sidecar()
             self._sidecar_path = ""
+            self._sidecar_held = ""
             store.carry_over(self._sidecar, self._homeless, features)
             self._forget_stale_editing()
             return
 
+        sidecar_path = store.sidecar_path(path)
+        held = ""
         try:
-            self._sidecar_path = store.sidecar_path(path)
-            self._sidecar = store.load(self._sidecar_path) or store.Sidecar(
-                part_path=path, part_title=snapshot.get("title", "")
-            )
+            loaded = store.load(sidecar_path)
         except store.StoreError as exc:
-            self._sidecar = store.Sidecar(part_path=path)
+            loaded = None
+            if os.path.exists(sidecar_path):
+                # Still there, and unread: written by a newer version, or not
+                # readable at all. Whatever it holds, writing over it would
+                # destroy it, so nothing this session saves may go there.
+                held = str(exc)
             self._set_status(str(exc), ok=False)
+        # All three set only now. The records on show and the file they came
+        # from must never disagree, and a load that fails must not leave the
+        # last part's records standing against this part's path.
+        self._sidecar_path = sidecar_path
+        self._sidecar_held = held
+        self._sidecar = loaded or store.Sidecar(
+            part_path=path, part_title=snapshot.get("title", "")
+        )
 
         moved = store.carry_over(self._sidecar, self._homeless, features)
-        if moved:
+        if moved and self._sidecar_writable():
             ids = {record.export_id for record in moved}
             self._homeless = [r for r in self._homeless if r.export_id not in ids]
             self._save_sidecar()
@@ -1694,8 +1717,12 @@ class ConverterApp(ttk.Frame):
             self._editing = ""
             self._describe_editing()
 
+    def _sidecar_writable(self) -> bool:
+        """Is there a file to keep the records in, and may it be written?"""
+        return bool(self._sidecar_path) and not self._sidecar_held
+
     def _save_sidecar(self) -> None:
-        if self._sidecar is None or not self._sidecar_path:
+        if self._sidecar is None or not self._sidecar_writable():
             return
         self._sidecar.written_by = f"airfoil-converter {__version__}"
         self._sidecar.part_path = (self._snapshot or {}).get("path", "")
@@ -1707,6 +1734,11 @@ class ConverterApp(ttk.Frame):
 
     def _memory_note(self) -> str:
         """Said after an export that had nowhere to keep its settings."""
+        if self._sidecar_held:
+            return (
+                " The curve record beside this part could not be read, so what you "
+                "export is held in the app only and the file is left as it is."
+            )
         if self._sidecar_path:
             return ""
         return (
@@ -1738,7 +1770,7 @@ class ConverterApp(ttk.Frame):
                 "record or was not made by this app."
             )
             return
-        if not self._sidecar_path:
+        if not self._sidecar_writable():
             self._homeless.extend(made)
         self._save_sidecar()
         self._fill_tree()
@@ -1979,7 +2011,10 @@ class ConverterApp(ttk.Frame):
                     self.csv_path.set(record.source)
                     self._load(record.source)
                 else:
+                    # The form must not keep another file's section under this
+                    # record's name: Export would rebuild its curves from it.
                     self.csv_path.set(record.source)
+                    self._unload()
                     self._set_status(
                         f"The source file has moved: {record.source}. Browse to it "
                         "again before exporting.",
@@ -2089,6 +2124,11 @@ class ConverterApp(ttk.Frame):
         if self.busy():
             raise InputError("SolidWorks is still working on the last export.")
         if self.data is None:
+            source = self.csv_path.get().strip()
+            if source and not os.path.exists(source):
+                raise InputError(
+                    f"The source file has moved: {source}. Browse to it again before exporting."
+                )
             raise InputError("Load a CSV first.")
 
         folder = self.out_folder.get().strip()
@@ -2106,12 +2146,22 @@ class ConverterApp(ttk.Frame):
         spec = self._spec()
         curves = build_curves(self.data, spec, stem, self.section, index=index)
 
-        if record is not None and not self._confirm_orphans(record, curves):
+        # Only the curves an export writes can be orphaned by it. A joined
+        # curve is derived from two of those, so no change of settings ever
+        # stops producing it directly. The record is not marked until the
+        # export lands: what it says about the part has to stay true if the
+        # push fails.
+        orphans = (
+            swlink.orphaned([c.feature for c in record.written_curves()], curves)
+            if record is not None else []
+        )
+        if orphans and not self._confirm_orphans(record, orphans):
             return
 
         if not self._can_push():
             changed, hashes = swlink.write_files(curves, folder)
-            self._remember(record, curves, spec, stem, folder, index, hashes, pushed=False)
+            self._remember(record, curves, spec, stem, folder, index, hashes,
+                           pushed=False, retire=orphans)
             self._set_status(
                 f"Wrote {len(curves)} file(s). " + self._offline_reason()
                 + self._memory_note()
@@ -2122,13 +2172,16 @@ class ConverterApp(ttk.Frame):
         self._begin_push(
             curves, folder,
             join_as=join_as,
-            groups=self._tree_groups(record, curves, stem, index, join_as),
+            # A file rewritten while SolidWorks was closed is unchanged by this
+            # export, so the push has to be told the part has never read it.
+            force=store.stale_in_part(record) if record is not None else (),
+            groups=self._tree_groups(record, curves, stem, index, join_as, retiring=orphans),
             context=dict(record=record, curves=curves, spec=spec, stem=stem,
-                         folder=folder, index=index),
+                         folder=folder, index=index, retire=orphans),
         )
 
     def _tree_groups(self, record, curves, stem: str, index: int,
-                     join_as: str) -> "List[swlink.TreeGroup]":
+                     join_as: str, retiring: Collection[str] = ()) -> "List[swlink.TreeGroup]":
         """What the feature tree should look like once this export lands.
 
         Every record, not just this one: the parent folder holds all of them,
@@ -2143,9 +2196,10 @@ class ConverterApp(ttk.Frame):
         if joinable(curves):
             mine.append(join_as)
         if record is not None:
-            # A retired curve is still in the part, and still this rib's.
+            # A retired curve is still in the part, and still this rib's — as
+            # is one this export is about to retire.
             mine.extend(c.feature for c in record.curves
-                        if c.retired and c.feature not in mine)
+                        if (c.retired or c.feature in retiring) and c.feature not in mine)
         if mine:
             groups.append(swlink.TreeGroup(folder_name(stem, index), tuple(mine)))
         return groups
@@ -2200,14 +2254,14 @@ class ConverterApp(ttk.Frame):
     # then never completes — which is a hang, not an error.
 
     def _begin_push(self, curves, folder: str, join_as: str, groups,
-                    context: Dict[str, Any]) -> None:
+                    context: Dict[str, Any], force: Collection[str] = ()) -> None:
         assert self._worker is not None
         insert = self.insert_missing.get()
         self._push_context = context
 
         def work(session):
             result = swlink.push(
-                session, curves, folder, insert_missing=insert, join_as=join_as
+                session, curves, folder, insert_missing=insert, force=force, join_as=join_as
             )
             # The curves are in by now. Tidying the tree is the last thing, and
             # never the thing that loses a successful push: it reports its own
@@ -2243,6 +2297,7 @@ class ConverterApp(ttk.Frame):
             context["record"], context["curves"], context["spec"], context["stem"],
             context["folder"], context["index"], result.hashes,
             pushed=True, joined=result.joined or self._joined_name(context["record"]),
+            failed={name for name, _ in result.failures}, retire=context.get("retire", ()),
         )
         self._refresh_panel()
 
@@ -2284,32 +2339,20 @@ class ConverterApp(ttk.Frame):
             return f"{snapshot['title']} is not a part, so nothing was sent to it."
         return "Nothing was sent to SolidWorks."
 
-    def _confirm_orphans(self, record: "store.ExportRecord", curves) -> bool:
+    def _confirm_orphans(self, record: "store.ExportRecord", orphans: List[str]) -> bool:
         """Warn before leaving a feature behind that a loft may still use."""
-        # Only the curves an export writes can be orphaned by it. A joined
-        # curve is derived from two of those, so no change of settings ever
-        # stops producing it directly.
-        orphans = swlink.orphaned([c.feature for c in record.written_curves()], curves)
-        if not orphans:
-            return True
-
         listed = ", ".join(orphans)
         also = ""
         derived = [c.feature for c in record.live_curves() if c.is_derived]
         if derived:
             also = f"\n\n{', '.join(derived)} is built on it and will go into error too."
-        allowed = messagebox.askokcancel(
+        return messagebox.askokcancel(
             "A curve would be left behind",
             f"These settings no longer produce {listed}.\n\n"
             "Anything built on it will stop updating. The app will leave it in the "
             f"part rather than delete it.{also}\n\nGo ahead?",
             parent=self,
         )
-        if allowed:
-            for curve_record in record.curves:
-                if curve_record.feature in orphans:
-                    curve_record.retired = True
-        return allowed
 
     @staticmethod
     def _joined_name(record) -> str:
@@ -2321,7 +2364,14 @@ class ConverterApp(ttk.Frame):
         return ""
 
     def _remember(self, record, curves, spec, stem, folder, index, hashes,
-                  pushed: bool, joined: str = "") -> None:
+                  pushed: bool, joined: str = "", failed: Collection[str] = (),
+                  retire: Collection[str] = ()) -> None:
+        """Replace the record with what this export made of it.
+
+        ``failed`` names the curves SolidWorks would not take, which keep the
+        last push that worked; ``retire`` names the ones this export no longer
+        makes, which stay in the part and are marked so.
+        """
         if self._sidecar is None:
             return
         stamp = store.now()
@@ -2337,7 +2387,9 @@ class ConverterApp(ttk.Frame):
             loaded_section=self._section_as_dict(),
         )
         for curve_record in fresh.curves:
-            curve_record.last_pushed = stamp if pushed else ""
+            curve_record.last_pushed = store.push_stamp(
+                curve_record.feature, stamp, pushed, failed, record
+            )
 
         # The joined curve holds no points and has no file of its own: it is a
         # feature SolidWorks derives from two of ours. It is recorded so the
@@ -2346,13 +2398,23 @@ class ConverterApp(ttk.Frame):
             fresh.curves.append(
                 store.CurveRecord(
                     role=ROLE_JOINED, feature=joined, file="",
-                    last_written=stamp, last_pushed=stamp if pushed else "",
+                    last_written=stamp,
+                    last_pushed=store.push_stamp(joined, stamp, pushed, failed, record),
                 )
             )
         if record is not None:
             fresh.created = record.created or stamp
-            # Retired curves are carried forward: they are still in the part.
-            fresh.curves.extend(c for c in record.curves if c.retired)
+            known = {c.feature for c in fresh.curves}
+            for c in record.curves:
+                if c.feature in known:
+                    continue
+                if c.feature in retire:
+                    # Retired on a copy, not on the record: had the push
+                    # failed, the record would still have to say it is live.
+                    fresh.curves.append(dataclasses.replace(c, retired=True))
+                elif c.retired:
+                    # Still in the part, so still this rib's.
+                    fresh.curves.append(c)
             self._sidecar.exports[self._sidecar.exports.index(record)] = fresh
         else:
             self._sidecar.exports.append(fresh)
@@ -2361,7 +2423,7 @@ class ConverterApp(ttk.Frame):
         # saving the part later — or coming back to the document after looking
         # at another one — still finds it.
         self._homeless = [r for r in self._homeless if r.export_id != fresh.export_id]
-        if not self._sidecar_path:
+        if not self._sidecar_writable():
             self._homeless.append(fresh)
 
         self._editing = fresh.export_id

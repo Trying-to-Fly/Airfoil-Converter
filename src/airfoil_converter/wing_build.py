@@ -313,8 +313,16 @@ def split_at_nose(
     nose that a cut through a smooth one changes nothing to speak of.
     """
     pts = list(points)
+    # Only the front half is searched for the corner. A blunt trailing edge
+    # that has been auto-closed turns a right angle onto its closing line,
+    # and cutting there would leave the nose corner inside one piece — the
+    # very thing the cut is for — and name the pieces upper and lower of
+    # nothing.
+    reach = 0.5 * max((math.hypot(p[0] - nose[0], p[1] - nose[1]) for p in pts), default=0.0)
     sharpest, at = 0.0, -1
     for i in range(1, len(pts) - 1):
+        if math.hypot(pts[i][0] - nose[0], pts[i][1] - nose[1]) > reach:
+            continue
         turn = _turn(pts[i - 1], pts[i], pts[i + 1])
         if turn > sharpest:
             sharpest, at = turn, i

@@ -1085,10 +1085,6 @@ class Worker:
         self._jobs.put((work, outbox))
         return Call(outbox)
 
-    def forget_session(self) -> None:
-        """Drop the cached connection so the next call attaches afresh."""
-        self.submit(lambda _session: None)
-
     def shutdown(self, timeout: float = 5.0) -> None:
         self._jobs.put(None)
         self._thread.join(timeout)

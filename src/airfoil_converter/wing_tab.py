@@ -19,13 +19,14 @@ rather than keeping a second of each: one part, one record, one worker.
 from __future__ import annotations
 
 import copy
+import dataclasses
 import os
 import queue
 import threading
 import tkinter as tk
 import uuid
 from tkinter import filedialog, messagebox
-from typing import Any, Callable, Dict, List, Optional, Sequence
+from typing import Any, Callable, Collection, Dict, List, Optional, Sequence
 
 from . import store, swcom, swlink, swloft, theme, ui_text, widgets, wing, wing_build, writer
 from .export import (
@@ -123,15 +124,14 @@ def rib_label(record: store.ExportRecord) -> str:
     return f"{name}   LE {place}"
 
 
-def retire_missing(record, curves, joins) -> List[str]:
-    """Mark the curves a new export no longer makes. Returns their names."""
+def left_behind(record, curves, joins) -> List[str]:
+    """The curves a new export no longer makes.
+
+    They stay in the part, and are retired on the record once the export
+    lands — not before, so a push that fails leaves the record true.
+    """
     wanted = {c.feature for c in curves} | {name for _, name in joins}
-    gone = []
-    for curve in record.curves:
-        if not curve.retired and curve.feature not in wanted:
-            curve.retired = True
-            gone.append(curve.feature)
-    return gone
+    return [c.feature for c in record.live_curves() if c.feature not in wanted]
 
 
 class _Job:
@@ -1093,6 +1093,10 @@ class WingTab(tk.Frame):
                     "This part has never been saved, so there is nowhere to keep the wing. "
                     "Save the part first."
                 )
+            if self.host._sidecar_held:
+                # The record file is there but unread, and must not be written
+                # over: there is nowhere to keep the wing, as above.
+                raise InputError(f"There is nowhere to keep the wing. {self.host._sidecar_held}")
             folder = self.folder.get().strip()
             if not folder:
                 raise InputError("Choose an output folder.")
@@ -1267,8 +1271,7 @@ class WingTab(tk.Frame):
                     self._idle()
                     self._set_status("Export cancelled.")
                     return
-            wanted = {c.feature for c in build.curves} | {n for _, n in build.joins}
-            leaving = [c.feature for c in record.live_curves() if c.feature not in wanted]
+            leaving = left_behind(record, build.curves, build.joins)
             if leaving:
                 shown = ", ".join(leaving[:6]) + (" ..." if len(leaving) > 6 else "")
                 if not messagebox.askokcancel(
@@ -1280,7 +1283,7 @@ class WingTab(tk.Frame):
                     self._idle()
                     self._set_status("Export cancelled.")
                     return
-                retire_missing(record, build.curves, build.joins)
+            context = dict(context, retire=leaving)
 
         folder = context["folder"]
         if not self.host._can_push():
@@ -1303,9 +1306,13 @@ class WingTab(tk.Frame):
         groups = self._groups(record, build, context)
         insert = self.host.insert_missing.get()
         curves, joins = build.curves, build.joins
+        # A file rewritten while SolidWorks was closed is unchanged by this
+        # export, so the push has to be told the part has never read it.
+        force = store.stale_in_part(record) if record is not None else ()
 
         def work(session):
-            result = swlink.push(session, curves, folder, insert_missing=insert, joins=joins)
+            result = swlink.push(session, curves, folder, insert_missing=insert,
+                                 force=force, joins=joins)
             try:
                 result.arranged = swlink.arrange(session, groups, parent=wing_build.WING_FOLDER)
             except swcom.SolidWorksError as exc:
@@ -1331,7 +1338,11 @@ class WingTab(tk.Frame):
             ))
         mine = [c.feature for c in build.curves] + [name for _, name in build.joins]
         if record is not None:
-            mine.extend(c.feature for c in record.curves if c.retired and c.feature not in mine)
+            # A retired curve is still in the part, and still this wing's — as
+            # is one this export is about to retire.
+            retiring = context.get("retire", ())
+            mine.extend(c.feature for c in record.curves
+                        if (c.retired or c.feature in retiring) and c.feature not in mine)
         groups.append(swlink.TreeGroup(folder_name(context["stem"], context["index"]), tuple(mine)))
         return groups
 
@@ -1352,7 +1363,8 @@ class WingTab(tk.Frame):
         build = context["build"]
         self._remember(context["record"], build, context, result.hashes,
                        pushed=True, joined=result.joined_all,
-                       moved_aside=[old for _, old in result.remade])
+                       moved_aside=[old for _, old in result.remade],
+                       failed={name for name, _ in result.failures})
         self._shown_exported = True
         self.host._refresh_panel()
 
@@ -1382,7 +1394,13 @@ class WingTab(tk.Frame):
                 self._start_loft(record)
 
     def _remember(self, record, build, context, hashes, pushed: bool, joined: List[str],
-                  moved_aside: Sequence[str] = ()) -> None:
+                  moved_aside: Sequence[str] = (), failed: Collection[str] = ()) -> None:
+        """Replace the wing's record with what this export made of it.
+
+        ``failed`` names the curves SolidWorks would not take, which keep the
+        last push that worked. The curves this export no longer makes are in
+        the context as ``retire``; they stay in the part and are marked so.
+        """
         sidecar = self._sidecar()
         if sidecar is None:
             return
@@ -1398,7 +1416,7 @@ class WingTab(tk.Frame):
             station_count=build.station_count,
         )
         for curve in fresh.curves:
-            curve.last_pushed = stamp if pushed else ""
+            curve.last_pushed = store.push_stamp(curve.feature, stamp, pushed, failed, record)
         made = set(joined)
         for _, name in build.joins:
             if name in made:
@@ -1416,12 +1434,19 @@ class WingTab(tk.Frame):
         if record is not None:
             fresh.created = record.created or stamp
             known = {c.feature for c in fresh.curves}
-            # Retired curves are still in the part, and joins made before this
-            # push are still this wing's even if this push had none to make.
-            fresh.curves.extend(
-                c for c in record.curves
-                if c.feature not in known and (c.retired or c.is_derived)
-            )
+            retiring = set(context.get("retire", ()))
+            for c in record.curves:
+                if c.feature in known:
+                    continue
+                if c.feature in retiring:
+                    # Retired on a copy, not on the record: had the push
+                    # failed, the record would still have to say it is live.
+                    fresh.curves.append(dataclasses.replace(c, retired=True))
+                elif c.retired or c.is_derived:
+                    # Retired curves are still in the part, and joins made
+                    # before this push are still this wing's even if this
+                    # push had none to make.
+                    fresh.curves.append(c)
             sidecar.wings[sidecar.wings.index(record)] = fresh
         else:
             sidecar.wings.append(fresh)
