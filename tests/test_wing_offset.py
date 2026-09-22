@@ -596,6 +596,19 @@ def test_a_smooth_section_is_cut_at_its_nose_too():
     assert pieces[0][1][-1] == pieces[1][1][0] == loop[36]
 
 
+def test_a_blunt_closed_section_is_cut_at_its_nose_not_at_its_trailing_edge():
+    """Auto-closing a blunt trailing edge turns a right angle onto the closing
+    line. That corner is the sharpest on the outline, and it is not the nose:
+    cutting there left the whole section in one piece with the nose inside it."""
+    loop = [(50.0 + 50.0 * math.cos(math.radians(a)), 10.0 * math.sin(math.radians(a)))
+            for a in range(10, 351, 5)]
+    loop.append(loop[0])
+    pieces = wing_build.split_at_nose(loop, True, (0.0, 1.0), (0.0, 0.0))
+    assert [role for role, _, _ in pieces] == [export.ROLE_SECTION_UPPER, export.ROLE_SECTION_LOWER]
+    assert pieces[0][1][-1] == pieces[1][1][0] == loop[34]
+    assert len(pieces[0][1]) == 35 and len(pieces[1][1]) == 36
+
+
 def test_every_section_of_an_offset_wing_comes_in_the_same_pieces(tmp_path):
     synthetic = SyntheticWing([0.0, 300.0], lambda s: 0.0, lambda s: -200.0,
                               te_mode=export.TE_LINE, te_thickness="0.8")

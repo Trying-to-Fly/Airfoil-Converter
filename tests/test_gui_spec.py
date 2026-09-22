@@ -117,7 +117,9 @@ def test_an_offset_copy_is_named_for_its_direction():
     assert wing_tab.offset_copy_name("wing", OFFSET_OUTWARD) == "wing_outer"
 
 
-def test_an_export_that_makes_fewer_curves_retires_the_rest():
+def test_an_export_that_makes_fewer_curves_names_the_rest_and_leaves_the_record_alone():
+    """The record is only marked once the export lands: a push that fails
+    must leave it saying what is still true of the part."""
     from airfoil_converter import store, wing_tab
     from airfoil_converter.export import Curve
 
@@ -125,10 +127,11 @@ def test_an_export_that_makes_fewer_curves_retires_the_rest():
         store.CurveRecord(role="section", feature="w_s01", file="w_s01.sldcrv"),
         store.CurveRecord(role="section", feature="w_s02", file="w_s02.sldcrv"),
         store.CurveRecord(role="section_joined", feature="w_s02_joined", file=""),
+        store.CurveRecord(role="section", feature="w_s03", file="w_s03.sldcrv", retired=True),
     ])
     kept = [Curve(role="section", points=[(0, 0, 0)], closed=True, feature="w_s01")]
-    assert wing_tab.retire_missing(record, kept, []) == ["w_s02", "w_s02_joined"]
-    assert [c.retired for c in record.curves] == [False, True, True]
+    assert wing_tab.left_behind(record, kept, []) == ["w_s02", "w_s02_joined"]
+    assert [c.retired for c in record.curves] == [False, False, False, True]
 
 
 # -- the poll ------------------------------------------------------------------

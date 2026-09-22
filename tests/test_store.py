@@ -116,6 +116,38 @@ def test_an_unreadable_record_is_moved_aside_never_deleted(tmp_path):
     assert any(p.name.startswith("Wing.airfoils.json.bad-") for p in tmp_path.iterdir())
 
 
+@pytest.mark.parametrize("raw", [
+    {"schemaVersion": 1, "exports": [{"stem": "rib"}]},                   # no id
+    {"schemaVersion": 1, "document": "Wing.SLDPRT"},                       # not an object
+    {"schemaVersion": 1, "exports": "rib"},                                # not a list
+    {"schemaVersion": 1, "exports": [{"export_id": "a", "curves": ["rib_airfoil"]}]},
+    {"schemaVersion": 1, "exports": [{"export_id": "a", "curves": [{"role": "airfoil"}]}]},
+    {"schemaVersion": 2, "wings": [["wing-1"]]},
+])
+def test_a_record_of_the_wrong_shape_is_refused_as_unreadable(raw):
+    """Valid JSON of the wrong shape used to escape as a TypeError, which
+    nothing up the stack read as a spoiled file."""
+    with pytest.raises(StoreError):
+        store.from_json(json.dumps(raw))
+
+
+def test_a_record_of_the_wrong_shape_is_moved_aside_like_any_other(tmp_path):
+    path = tmp_path / "Wing.airfoils.json"
+    path.write_text(json.dumps({"schemaVersion": 1, "exports": [{"stem": "rib"}]}),
+                    encoding="utf-8")
+    with pytest.raises(StoreError, match="moved to"):
+        store.load(str(path))
+    assert not path.exists()
+
+
+def test_a_record_that_is_not_utf8_is_moved_aside_too(tmp_path):
+    path = tmp_path / "Wing.airfoils.json"
+    path.write_bytes(b"\xff\xfe{}")
+    with pytest.raises(StoreError, match="moved to"):
+        store.load(str(path))
+    assert not path.exists()
+
+
 def test_unknown_keys_from_a_future_version_are_ignored():
     raw = json.dumps({
         "schemaVersion": 1,
@@ -214,6 +246,32 @@ def test_a_file_edited_outside_the_app_has_drifted(tmp_path):
     assert states[0].state == DRIFTED
 
 
+def test_a_record_is_checked_in_its_own_folder_not_the_one_on_the_form(tmp_path):
+    """The form's folder is whatever was typed last; the record knows where it
+    wrote, and a stranger's file of the same name in the form's folder is not
+    drift, while a real edit where the record wrote is."""
+    own, other = tmp_path / "own", tmp_path / "other"
+    own.mkdir()
+    other.mkdir()
+    record = written(own, "rib_airfoil", [(0.0, 0.0, 0.0), (1.0, 0.0, 0.0)])
+    edited = b"9.000000mm\t0.000000mm\t0.000000mm\r\n"
+
+    (other / "rib_airfoil.sldcrv").write_bytes(edited)
+    states = reconcile(sidecar_with(record, folder=str(own)), ["rib_airfoil"], str(other))
+    assert states[0].state == LINKED
+
+    (own / "rib_airfoil.sldcrv").write_bytes(edited)
+    states = reconcile(sidecar_with(record, folder=str(own)), ["rib_airfoil"], str(other))
+    assert states[0].state == DRIFTED
+
+
+def test_a_record_without_a_folder_of_its_own_is_checked_in_the_one_given(tmp_path):
+    record = written(tmp_path, "rib_airfoil", [(0.0, 0.0, 0.0), (1.0, 0.0, 0.0)])
+    (tmp_path / "rib_airfoil.sldcrv").write_bytes(b"9.000000mm\t0.000000mm\t0.000000mm\r\n")
+    states = reconcile(sidecar_with(record, folder=""), ["rib_airfoil"], str(tmp_path))
+    assert states[0].state == DRIFTED
+
+
 def test_a_file_newer_than_the_part_is_not_pushed(tmp_path):
     record = written(tmp_path, "rib_airfoil", [(0.0, 0.0, 0.0), (1.0, 0.0, 0.0)])
     record.last_written = "2026-02-01T00:00:00Z"
@@ -227,6 +285,39 @@ def test_a_retired_curve_is_listed_and_never_refreshed(tmp_path):
     record.retired = True
     states = reconcile(sidecar_with(record), ["rib_airfoil_te"], str(tmp_path))
     assert states[0].state == RETIRED
+
+
+# -- what a push is told, and what it is told afterwards ---------------------
+
+
+def test_a_push_is_told_which_files_the_part_has_never_read():
+    record = ExportRecord(export_id="exp-1", curves=[
+        # Rewritten after its last push: SolidWorks was closed at the time.
+        CurveRecord(role="airfoil", feature="rib_airfoil", file="a.sldcrv",
+                    last_written="2026-02-01T00:00:00Z", last_pushed="2026-01-01T00:00:00Z"),
+        # Pushed since it was written.
+        CurveRecord(role="camber", feature="rib_camber", file="b.sldcrv",
+                    last_written="2026-01-01T00:00:00Z", last_pushed="2026-01-01T00:00:00Z"),
+        # Taken over from the part, so never pushed by this app.
+        CurveRecord(role="airfoil_te", feature="rib_airfoil_te", file="c.sldcrv"),
+        # Derived, so there is no file to reload; retired, so not exported.
+        CurveRecord(role="airfoil_joined", feature="rib_airfoil_joined", file=""),
+        CurveRecord(role="airfoil", feature="old_airfoil", file="d.sldcrv", retired=True),
+    ])
+    assert store.stale_in_part(record) == ["rib_airfoil", "rib_airfoil_te"]
+
+
+def test_a_curve_solidworks_refused_keeps_the_last_push_that_worked():
+    before = ExportRecord(export_id="exp-1", curves=[
+        CurveRecord(role="airfoil", feature="rib_airfoil", file="a.sldcrv",
+                    last_written="2026-01-01T00:00:00Z", last_pushed="2026-01-01T00:00:00Z"),
+    ])
+    now = "2026-02-01T00:00:00Z"
+    assert store.push_stamp("rib_airfoil", now, True, [], before) == now
+    assert store.push_stamp("rib_airfoil", now, True, ["rib_airfoil"], before) == "2026-01-01T00:00:00Z"
+    assert store.push_stamp("rib_camber", now, True, ["rib_camber"], before) == ""
+    assert store.push_stamp("rib_camber", now, True, ["rib_camber"], None) == ""
+    assert store.push_stamp("rib_airfoil", now, False, [], before) == ""
 
 
 def test_a_record_can_be_found_from_any_of_its_curves():

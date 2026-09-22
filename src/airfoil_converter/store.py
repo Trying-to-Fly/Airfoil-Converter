@@ -252,19 +252,10 @@ def from_json(text: str) -> Sidecar:
         )
 
     document = raw.get("document") or {}
-    exports = []
-    for item in raw.get("exports") or []:
-        curves = [CurveRecord(**_known(CurveRecord, c)) for c in item.get("curves") or []]
-        fields = _known(ExportRecord, item)
-        fields["curves"] = curves
-        exports.append(ExportRecord(**fields))
-
-    wings = []
-    for item in raw.get("wings") or []:
-        curves = [CurveRecord(**_known(CurveRecord, c)) for c in item.get("curves") or []]
-        fields = _known(WingRecord, item)
-        fields["curves"] = curves
-        wings.append(WingRecord(**fields))
+    if not isinstance(document, dict):
+        raise StoreError("The curve record's document entry is not an object.")
+    exports = [_record(ExportRecord, item, "export") for item in _list(raw, "exports")]
+    wings = [_record(WingRecord, item, "wing") for item in _list(raw, "wings")]
 
     return Sidecar(
         part_path=document.get("path", ""),
@@ -283,6 +274,34 @@ def _known(cls, raw: Dict[str, Any]) -> Dict[str, Any]:
     return {k: v for k, v in raw.items() if k in allowed and k != "curves"}
 
 
+def _list(raw: Dict[str, Any], key: str) -> List[Any]:
+    items = raw.get(key) or []
+    if not isinstance(items, list):
+        raise StoreError(f"The curve record's {key} entry is not a list.")
+    return items
+
+
+def _record(cls, raw: Any, what: str):
+    """One export's or wing's record from its JSON.
+
+    A file that parses as JSON can still be the wrong shape — a record with
+    no id, a curve that is a string — and the dataclasses answer that with a
+    TypeError, which nothing up the stack reads as a spoiled file. Here it
+    is a StoreError like any other, so the file is moved aside and said so.
+    """
+    if not isinstance(raw, dict):
+        raise StoreError(f"The curve record holds a {what} that is not an object.")
+    curves = raw.get("curves") or []
+    if not isinstance(curves, list) or not all(isinstance(c, dict) for c in curves):
+        raise StoreError(f"The curve record holds a {what} whose curves are not objects.")
+    try:
+        fields = _known(cls, raw)
+        fields["curves"] = [CurveRecord(**_known(CurveRecord, c)) for c in curves]
+        return cls(**fields)
+    except TypeError as exc:
+        raise StoreError(f"The curve record holds a {what} that could not be read: {exc}") from None
+
+
 def load(path: str) -> Optional[Sidecar]:
     """Read a sidecar, or None when there is not one yet.
 
@@ -291,13 +310,18 @@ def load(path: str) -> Optional[Sidecar]:
     """
     if not os.path.exists(path):
         return None
-    with open(path, "r", encoding="utf-8") as handle:
-        text = handle.read()
     try:
-        return from_json(text)
+        with open(path, "rb") as handle:
+            raw = handle.read()
+    except OSError as exc:
+        # It is there and its contents are unknown: nothing to move aside,
+        # and nothing that may be written over.
+        raise StoreError(f"The curve record beside this part could not be read: {exc}") from None
+    try:
+        return from_json(raw.decode("utf-8"))
     except UnknownSchema:
         raise
-    except StoreError:
+    except (StoreError, UnicodeDecodeError):
         spoiled = f"{path}.bad-{time.strftime('%Y%m%d-%H%M%S')}"
         os.replace(path, spoiled)
         raise StoreError(
@@ -554,6 +578,10 @@ def reconcile(
     ``renamed`` maps a remembered feature name to what a durable reference says
     it is called now. Following that is the only way a rename shows as one true
     row instead of a phantom missing curve and a phantom stray one.
+
+    Each record's files are looked for where it wrote them. ``folder`` is only
+    for a record that never learned a folder of its own — one taken over from
+    the part — so that the form's folder cannot stand in for another's.
     """
     present = list(document_features)
     in_document = set(present)
@@ -582,8 +610,8 @@ def reconcile(
 
             claimed.add(name)
             state = LINKED
-            path = resolve_file(curve, folder or record.output_folder)
-            if curve.sha256 and folder is not None and os.path.exists(path):
+            path = resolve_file(curve, record.output_folder or folder)
+            if curve.sha256 and os.path.exists(path):
                 if _file_hash(path) != curve.sha256:
                     state = DRIFTED
                     detail = "this file was changed outside the app"
@@ -597,6 +625,41 @@ def reconcile(
             states.append(CurveState(name, ORPHAN, None, "", "in the part, not tracked"))
 
     return states
+
+
+def stale_in_part(record) -> List[str]:
+    """The curves whose file the part has never read: what a push must reload.
+
+    A push reloads a curve whose file it has just changed. One rewritten while
+    SolidWorks was closed, or taken over from the part with no push behind it,
+    is unchanged by the next export and yet not what the part holds, so the
+    push has to be told to reload it anyway.
+    """
+    return [
+        curve.feature
+        for curve in record.written_curves()
+        if not curve.last_pushed or curve.last_pushed < curve.last_written
+    ]
+
+
+def push_stamp(
+    feature: str, stamp: str, pushed: bool, failed: Collection[str], previous: Any = None
+) -> str:
+    """When the part last took this curve: now, unless SolidWorks refused it.
+
+    A curve the push could not reload or insert leaves the part holding
+    whatever it held, so its record keeps the last push that worked — or none
+    — and the panel goes on saying the part is behind the file. ``previous``
+    is the record as it stood before this export.
+    """
+    if not pushed:
+        return ""
+    if feature not in failed:
+        return stamp
+    for curve in (previous.curves if previous is not None else []):
+        if curve.feature == feature:
+            return curve.last_pushed
+    return ""
 
 
 def _file_hash(path: str) -> str:
