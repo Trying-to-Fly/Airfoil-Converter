@@ -847,8 +847,20 @@ class Session:
         return self.rename_feature(created[0], name)
 
     def composite_sources(self, name: str) -> List[str]:
-        """The curves a composite joins, by name, in the order it holds them."""
+        """The curves a composite joins, by name, in the order it holds them.
+
+        Reading a feature's selections rolls the model back to just before it:
+        that is what ``AccessSelections`` does, and ``ReleaseSelectionAccess``
+        is what puts the bar back. The release takes no arguments and returns
+        nothing, so reaching it as an attribute — the way :func:`call` reaches
+        every other argument-less member — never ran it, and every push since
+        the joins were checked left the part rolled back to just before its
+        first composite. It is called outright here, and since that has been
+        wrong once, a tree that was forward before the read is checked
+        afterwards and rolled forward if it is not.
+        """
         doc = self._active()
+        was_forward = not self._rolled_back()
         data = call(self._curve_feature(name), "GetDefinition")
         if data is None or not call(data, "AccessSelections", doc, _null_dispatch()):
             raise SolidWorksError(f"The curves {name} joins could not be read.")
@@ -857,7 +869,9 @@ class Session:
             entities = call(data, "GetEntitiesToJoin", kinds) or ()
             return [str(call(e, "Name")) for e in entities]
         finally:
-            call(data, "ReleaseSelectionAccess")
+            data.ReleaseSelectionAccess()
+            if was_forward and self._rolled_back():
+                self.roll_forward()
 
     def set_rebuild_suppressed(self, suppressed: bool) -> None:
         """Hold the rebuild off while several curves are reloaded.
@@ -898,9 +912,13 @@ class Session:
         """
         doc = self._active()
         call(call(doc, "FeatureManager"), "EditRollback", ROLLBACK_TO_END, "")
-        last = call(doc, "FeatureByPositionReverse", 0)
-        if last is not None and call(last, "IsRolledBack"):
+        if self._rolled_back():
             raise SolidWorksError("The tree could not be rolled forward again.")
+
+    def _rolled_back(self) -> bool:
+        """Is any of the tree rolled back? The last feature is the one to ask."""
+        last = call(self._active(), "FeatureByPositionReverse", 0)
+        return bool(last is not None and call(last, "IsRolledBack"))
 
     def rebuild(self, force: bool = False) -> bool:
         """Rebuild the active document. Called once, after the last curve.

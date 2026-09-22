@@ -359,6 +359,45 @@ class FakeFeature:
         return self.doc.rolled_back
 
 
+class FakeCompositeData:
+    """A composite curve's definition: reading it rolls the model back, and
+    the release is a Sub — no arguments, no result — that rolls it forward
+    again, unless ``release_restores`` says this SolidWorks does not."""
+
+    def __init__(self, doc, sources, release_restores=True):
+        self.doc = doc
+        self.sources = sources
+        self.release_restores = release_restores
+
+    def AccessSelections(self, top_doc, component):
+        self.doc.calls.append(("AccessSelections",))
+        self.doc.rolled_back = True
+        return True
+
+    def GetEntitiesToJoin(self, kinds):
+        self.doc.calls.append(("GetEntitiesToJoin",))
+        return [FakeEntity(name) for name in self.sources]
+
+    def ReleaseSelectionAccess(self):
+        self.doc.calls.append(("ReleaseSelectionAccess",))
+        if self.release_restores:
+            self.doc.rolled_back = False
+
+
+class FakeEntity:
+    def __init__(self, name):
+        self.Name = name
+
+
+class FakeCompositeFeature:
+    """One feature in the tree walk ``_curve_feature`` does."""
+
+    def __init__(self, doc, name, sources, release_restores=True):
+        self.Name = name
+        self.GetNextFeature = None
+        self.GetDefinition = FakeCompositeData(doc, sources, release_restores)
+
+
 class FakeDoc:
     """A document that records what was asked of it, as late binding would.
 
@@ -367,10 +406,12 @@ class FakeDoc:
     method — which is the distinction :func:`swcom.call` exists to make.
     """
 
-    def __init__(self, refuse=(), lies=()):
+    def __init__(self, refuse=(), lies=(), composite=None):
         self.calls = []
         self.rolled_back = False
         self.manager = FakeManager(self, refuse, lies)
+        self.FirstFeature = composite
+        self.GetTitle = "Wing.SLDPRT"
 
     @property
     def FeatureManager(self):
@@ -395,8 +436,8 @@ class FakeApp:
         self.ActiveDoc = doc
 
 
-def rebuilding_session(refuse=(), lies=()):
-    doc = FakeDoc(refuse, lies)
+def rebuilding_session(refuse=(), lies=(), composite=None):
+    doc = FakeDoc(refuse, lies, composite)
     return swcom.Session(FakeApp(doc), (34, 0, 0), 1000), doc
 
 
@@ -448,6 +489,49 @@ def test_rolling_forward_goes_to_the_end_and_checks_it_got_there():
     ]
     assert not any(c[0] == "EditRollback" and c[1] == swcom.ROLLBACK_TO_PREVIOUS
                    for c in doc.calls)
+
+
+@pytest.fixture
+def win32(monkeypatch):
+    """pywin32's typed nulls and by-ref variants, which the read needs to
+    build even though nothing here marshals them: this suite runs on Linux."""
+    import types
+
+    stub = types.SimpleNamespace(VT_DISPATCH=9, VT_BYREF=0x4000, VT_VARIANT=12, VT_I4=3, VT_BOOL=11)
+    monkeypatch.setattr(swcom, "pythoncom", stub, raising=False)
+    monkeypatch.setattr(swcom, "VARIANT", lambda kind, value: (kind, value), raising=False)
+
+
+def test_reading_what_a_composite_joins_releases_the_access_it_took(win32):
+    """AccessSelections rolls the model back to just before the feature, and
+    ReleaseSelectionAccess is the Sub that puts it forward. Reached as an
+    attribute it never ran, and every push left the part rolled back."""
+    doc = FakeDoc()
+    doc.FirstFeature = FakeCompositeFeature(doc, "rib_joined", ["rib_airfoil", "rib_airfoil_te"])
+    session = swcom.Session(FakeApp(doc), (34, 0, 0), 1000)
+    assert session.composite_sources("rib_joined") == ["rib_airfoil", "rib_airfoil_te"]
+    assert ("ReleaseSelectionAccess",) in doc.calls
+    assert not doc.rolled_back
+    assert not any(c[0] == "EditRollback" for c in doc.calls)   # the release was enough
+
+
+def test_a_release_that_leaves_the_tree_rolled_back_is_followed_by_a_roll_forward(win32):
+    doc = FakeDoc()
+    doc.FirstFeature = FakeCompositeFeature(doc, "rib_joined", ["a", "b"], release_restores=False)
+    session = swcom.Session(FakeApp(doc), (34, 0, 0), 1000)
+    assert session.composite_sources("rib_joined") == ["a", "b"]
+    assert not doc.rolled_back
+    assert ("EditRollback", swcom.ROLLBACK_TO_END, "") in doc.calls
+
+
+def test_a_tree_the_user_had_rolled_back_is_left_rolled_back_by_a_read(win32):
+    doc = FakeDoc()
+    doc.FirstFeature = FakeCompositeFeature(doc, "rib_joined", ["a", "b"], release_restores=False)
+    doc.rolled_back = True
+    session = swcom.Session(FakeApp(doc), (34, 0, 0), 1000)
+    session.composite_sources("rib_joined")
+    assert doc.rolled_back
+    assert not any(c[0] == "EditRollback" for c in doc.calls)
 
 
 def test_a_tree_that_answers_yes_and_stays_rolled_back_is_an_error():
