@@ -328,16 +328,122 @@ def test_the_worker_reports_being_busy_while_a_call_is_in_flight():
 # -- rebuilding -------------------------------------------------------------
 
 
-class FakeManager:
-    """The feature manager, which is where the rollback bar lives."""
+class FakeEdge:
+    """One edge of a body. Its two ends are what tells the loops apart."""
 
-    def __init__(self, calls, refuse=()):
+    def __init__(self, calls, tag, start, end):
         self.calls = calls
+        self.tag = tag
+        self.start = start        # in metres, as SolidWorks holds them
+        self.end = end
+
+    @property
+    def GetCurve(self):
+        # Reading the parameters without this first is what the help warns of.
+        self.calls.append(("GetCurve", self.tag))
+        return object()
+
+    @property
+    def GetCurveParams2(self):
+        return list(self.start) + list(self.end) + [0.0, 1.0, 0.0, 0.0, 0.0]
+
+    def Select4(self, append, data):
+        self.calls.append(("Select4", self.tag, append))
+        return True
+
+
+class FakeBody:
+    def __init__(self, name, edges):
+        self.Name = name
+        self.edges = edges
+
+    @property
+    def GetEdges(self):
+        return list(self.edges)
+
+
+class FakeFace:
+    def __init__(self, body):
+        self.body = body
+
+    @property
+    def GetBody(self):
+        return self.body
+
+
+class FakeDefinition:
+    def __init__(self, points):
+        # Metres, flat, as a curve feature hands them back.
+        self.PointArray = [c / 1000.0 for p in points for c in p]
+
+
+class FakeFeature:
+    """A feature in the tree. Its name is a property both ways, as COM's is."""
+
+    def __init__(self, name, type_name="RefCurve", body=None, points=None):
+        self._name = name
+        self._type = type_name
+        self.body = body
+        self.points = points
+        self.next = None
+
+    @property
+    def GetFaces(self):
+        return [FakeFace(self.body)] if self.body else None
+
+    @property
+    def GetDefinition(self):
+        return FakeDefinition(self.points) if self.points else None
+
+    @property
+    def Name(self):
+        return self._name
+
+    @Name.setter
+    def Name(self, value):
+        self._name = value
+
+    @property
+    def GetTypeName2(self):
+        return self._type
+
+    @property
+    def GetNextFeature(self):
+        return self.next
+
+
+class FakeManager:
+    """The feature manager: the rollback bar, the tree listing, and the two
+    calls that cap a surface loft into a solid."""
+
+    def __init__(self, calls, doc, refuse=()):
+        self.calls = calls
+        self.doc = doc
         self.refuse = set(refuse)
+        self.refuse_knit = False
 
     def EditRollback(self, position, name):
         self.calls.append(("EditRollback", position, name))
         return position not in self.refuse
+
+    def GetFeatures(self, top_only):
+        return list(self.doc.features)
+
+    def InsertSewRefSurface(self, gap_filters, form_solid, merge, tolerance, gap_range):
+        self.calls.append(
+            ("InsertSewRefSurface", gap_filters, form_solid, merge, tolerance, gap_range)
+        )
+        return None if self.refuse_knit else self.doc.add("Surface-Knit1", "SewRefSurface")
+
+
+class FakeExtension:
+    def __init__(self, calls):
+        self.calls = calls
+        self.refuse = set()
+
+    def SelectByID2(self, name, kind, x, y, z, append, mark, callout, options):
+        self.calls.append(("SelectByID2", name, kind, append, mark))
+        return name not in self.refuse
 
 
 class FakeDoc:
@@ -348,9 +454,49 @@ class FakeDoc:
     method — which is the distinction :func:`swcom.call` exists to make.
     """
 
-    def __init__(self, refuse=()):
+    def __init__(self, refuse=(), features=()):
         self.calls = []
-        self.manager = FakeManager(self.calls, refuse)
+        self.features = []
+        self.refuse_cap = False
+        self.manager = FakeManager(self.calls, self, refuse)
+        self.extension = FakeExtension(self.calls)
+        for name in features:
+            self.add(name)
+
+    def add(self, name, type_name="RefCurve", body=None, points=None):
+        made = FakeFeature(name, type_name, body, points)
+        if self.features:
+            self.features[-1].next = made
+        self.features.append(made)
+        return made
+
+    @property
+    def FirstFeature(self):
+        return self.features[0] if self.features else None
+
+    @property
+    def SelectionManager(self):
+        return self
+
+    @property
+    def CreateSelectData(self):
+        return "select-data"
+
+    @property
+    def InsertPlanarRefSurface(self):
+        self.calls.append(("InsertPlanarRefSurface",))
+        if self.refuse_cap:
+            return False
+        self.add("Surface-Plane1", "RefSurface", body=FakeBody("Surface-Plane1", []))
+        return True
+
+    @property
+    def Extension(self):
+        return self.extension
+
+    def ClearSelection2(self, whole):
+        self.calls.append(("ClearSelection2", whole))
+        return True
 
     @property
     def FeatureManager(self):
@@ -371,9 +517,16 @@ class FakeApp:
         self.ActiveDoc = doc
 
 
-def rebuilding_session(refuse=()):
-    doc = FakeDoc(refuse)
+def rebuilding_session(refuse=(), features=()):
+    doc = FakeDoc(refuse, features)
     return swcom.Session(FakeApp(doc), (34, 0, 0), 1000), doc
+
+
+@pytest.fixture
+def no_variants(monkeypatch):
+    """A typed COM null needs pythoncom, which is not here. Everything else in
+    the two calls below is the real thing."""
+    monkeypatch.setattr(swcom, "_null_dispatch", lambda: None)
 
 
 def test_a_rebuild_regenerates_only_what_changed():
@@ -431,3 +584,136 @@ def test_a_tree_that_will_not_roll_forward_at_all_says_so():
     )
     with pytest.raises(SolidWorksError, match="could not be rolled forward"):
         session.roll_forward()
+
+
+# -- capping a surface loft into a solid ------------------------------------
+#
+# The construction these pin was run on SolidWorks 2026 on 2026-09-22; what is
+# pinned here is what the app sends it.
+
+
+def wing_body():
+    """A surface loft's body: a loop at each end and the seams between them.
+
+    Metres. The root loop stands in the plane x = 0 and the tip loop in
+    x = -0.998, which is where a wing a metre long puts them.
+    """
+    root = [FakeEdge([], f"root{k}", (0.0, 0.0, -0.05 * k), (0.0, 0.0, -0.05 * (k + 1)))
+            for k in range(3)]
+    tip = [FakeEdge([], f"tip{k}", (-0.998, 0.0, -0.05 * k), (-0.998, 0.0, -0.05 * (k + 1)))
+           for k in range(3)]
+    seams = [FakeEdge([], f"seam{k}", (0.0, 0.0, -0.05 * k), (-0.998, 0.0, -0.05 * k))
+             for k in range(3)]
+    return root, tip, seams
+
+
+def capping_session(refuse_cap=False):
+    root, tip, seams = wing_body()
+    session, doc = rebuilding_session()
+    for edge in root + tip + seams:
+        edge.calls = doc.calls
+    doc.add("wing_loft_surface", "BlendRefSurface",
+            body=FakeBody("Surface-Loft1", root + tip + seams))
+    # The profile the loft ran through at the root: a loop in the plane x = 0.
+    doc.add("root_joined", "CurveInFile",
+            points=[(0.0, 0.0, 0.0), (0.0, 20.0, -30.0), (0.0, 0.0, -150.0), (0.0, -10.0, -30.0)])
+    doc.refuse_cap = refuse_cap
+    return session, doc
+
+
+def test_a_cap_takes_the_end_edges_that_lie_in_the_profile_s_plane(no_variants):
+    """The loft's own end edges, told apart by the plane the profile lies in.
+    Neither a composite curve nor the curves it joins will do as a boundary —
+    SolidWorks refuses those outright, which is what sent this here."""
+    session, doc = capping_session()
+    assert session.cap_end("wing_loft_surface", "root_joined", "root_cap") == "root_cap"
+
+    assert [c for c in doc.calls if c[0] == "Select4"] == [
+        ("Select4", "root0", False), ("Select4", "root1", True), ("Select4", "root2", True),
+    ]
+    assert ("InsertPlanarRefSurface",) in doc.calls
+    # The curve has to be asked for before its parameters can be read.
+    assert [c[0] for c in doc.calls].index("GetCurve") < [c[0] for c in doc.calls].index("Select4")
+    assert [f.Name for f in doc.features][-1] == "root_cap"
+
+
+def test_a_cap_at_the_other_end_takes_the_other_loop(no_variants):
+    session, doc = capping_session()
+    doc.add("tip_joined", "CurveInFile",
+            points=[(-998.0, 0.0, 0.0), (-998.0, 10.0, -30.0), (-998.0, 0.0, -150.0)])
+    session.cap_end("wing_loft_surface", "tip_joined", "tip_cap")
+    assert [c[1] for c in doc.calls if c[0] == "Select4"] == ["tip0", "tip1", "tip2"]
+
+
+def test_a_composite_profile_is_read_through_the_curves_it_joins(no_variants, monkeypatch):
+    """A wing's end profile is a composite of three curves, and a composite has
+    no points of its own to read."""
+    session, doc = capping_session()
+    doc.add("root_composite", "CompositeCurve")
+    doc.add("root_upper", "CurveInFile", points=[(0.0, 0.0, 0.0), (0.0, 20.0, -30.0)])
+    doc.add("root_lower", "CurveInFile", points=[(0.0, 0.0, -150.0), (0.0, -10.0, -30.0)])
+    monkeypatch.setattr(
+        swcom.Session, "composite_sources", lambda self, name: ["root_upper", "root_lower"]
+    )
+    session.cap_end("wing_loft_surface", "root_composite", "root_cap")
+    assert [c[1] for c in doc.calls if c[0] == "Select4"] == ["root0", "root1", "root2"]
+
+
+def test_an_end_with_no_edges_in_that_plane_says_so(no_variants):
+    session, doc = capping_session()
+    doc.add("nowhere", "CurveInFile",
+            points=[(500.0, 0.0, 0.0), (500.0, 20.0, -30.0), (500.0, 0.0, -150.0)])
+    with pytest.raises(SolidWorksError, match="No edge of wing_loft_surface lies in the plane"):
+        session.cap_end("wing_loft_surface", "nowhere", "root_cap")
+
+
+def test_a_cap_solidworks_refuses_says_how_many_edges_it_was_given(no_variants):
+    """What a sliver face at the tip looks like from here: the loop is there,
+    and nothing will put a surface across it."""
+    session, _ = capping_session(refuse_cap=True)
+    with pytest.raises(SolidWorksError, match="would not put a planar surface across the 3 edges"):
+        session.cap_end("wing_loft_surface", "root_joined", "root_cap")
+
+
+def test_a_knit_selects_the_bodies_by_name_and_asks_for_a_solid(no_variants):
+    """Bodies, not features: IBody2 has no Select4 and Select2 raises through
+    pywin32, so each one is picked out by the name it carries."""
+    session, doc = rebuilding_session()
+    for feature, body in (("wing_loft_surface", "Surface-Loft1"),
+                          ("root_cap", "Surface-Plane1"),
+                          ("tip_cap", "Surface-Plane2")):
+        doc.add(feature, "RefSurface", body=FakeBody(body, []))
+
+    assert session.knit_to_solid(
+        ["wing_loft_surface", "root_cap", "tip_cap"], "wing_loft") == "wing_loft"
+    assert [c for c in doc.calls if c[0] == "SelectByID2"] == [
+        ("SelectByID2", "Surface-Loft1", "SURFACEBODY", False, 1),
+        ("SelectByID2", "Surface-Plane1", "SURFACEBODY", True, 1),
+        ("SelectByID2", "Surface-Plane2", "SURFACEBODY", True, 1),
+    ]
+    assert [c for c in doc.calls if c[0] == "InsertSewRefSurface"] == [
+        ("InsertSewRefSurface", True, True, False, swcom.KNIT_TOLERANCE, swcom.KNIT_GAP_RANGE)
+    ]
+
+
+def test_a_knit_can_be_asked_for_a_plain_surface_instead(no_variants):
+    session, doc = rebuilding_session()
+    for feature in ("a", "b"):
+        doc.add(feature, "RefSurface", body=FakeBody("Body-" + feature, []))
+    session.knit_to_solid(["a", "b"], "knitted", solid=False)
+    assert [c[2] for c in doc.calls if c[0] == "InsertSewRefSurface"] == [False]
+
+
+def test_a_knit_that_will_not_form_a_solid_says_what_it_was_given(no_variants):
+    session, doc = rebuilding_session()
+    for feature in ("a", "b"):
+        doc.add(feature, "RefSurface", body=FakeBody("Body-" + feature, []))
+    doc.manager.refuse_knit = True
+    with pytest.raises(SolidWorksError, match="would not knit a and b into a solid"):
+        session.knit_to_solid(["a", "b"], "knitted")
+
+
+def test_a_knit_of_one_surface_is_refused_before_solidworks_sees_it():
+    session, _ = rebuilding_session(features=["a"])
+    with pytest.raises(SolidWorksError, match="at least two surfaces"):
+        session.knit_to_solid(["a"], "knitted")

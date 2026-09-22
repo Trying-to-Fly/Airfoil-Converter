@@ -7,6 +7,16 @@ settings are the ones read back off a loft made in the Loft property page — an
 writes each loft to a STEP file of its own, so the real surfaces can be
 compared.
 
+A solid SolidWorks refuses is built a second way before it is given up on:
+the surface loft it does accept, a planar surface across the end edges of that
+surface at each end, and the three knitted with "try to form solid". It is the
+same geometry asked for in a different order, and on a wing whose section loop
+SolidWorks will not use as the boundary of a solid that is the whole
+difference — a copy of the real part gave 1 solid body of 2.5 million cubic
+millimetres for the four offsets whose solid loft it had refused outright. The
+part is left as the surface fallback alone would have left it if any of the
+three steps does not work.
+
 What SolidWorks is reached through is a :class:`SolidWorks` protocol, as in
 :mod:`swlink`, so the order of things is testable without a CAD package.
 
@@ -18,6 +28,7 @@ from __future__ import annotations
 
 import argparse
 import os
+import re
 import shutil
 from dataclasses import dataclass
 from typing import List, Optional, Protocol, Sequence, Tuple
@@ -37,6 +48,7 @@ from .export import (
 )
 from .swcom import (
     GUIDE_TO_NEXT_GUIDE,
+    KNIT_TYPE_NAME,
     LOFT_SURFACE_TYPE_NAME,
     LOFT_TYPE_NAME,
     DocInfo,
@@ -44,14 +56,75 @@ from .swcom import (
 )
 
 LOFT_SUFFIX = "_loft"
+# What the surface loft is called while it is being capped, before the knit
+# takes the plan's own name. It only exists between the two.
+SURFACE_SUFFIX = "_surface"
+CAP_SUFFIX = "_cap"
 COPY_SUFFIX = " lofted"
-BODY_FEATURE_TYPES = (LOFT_TYPE_NAME, LOFT_SURFACE_TYPE_NAME)
+BODY_FEATURE_TYPES = (LOFT_TYPE_NAME, LOFT_SURFACE_TYPE_NAME, KNIT_TYPE_NAME)
 
 # The order the guides are given in can change the loft: on SolidWorks 2026 it
 # moved one wing's inner surface by up to 0.04 mm, and its outer not at all. A
 # fixed order keeps one run comparable with the next.
 _GUIDE_ORDER = {ROLE_WING_LE: 0, ROLE_WING_SURFACE: 1, ROLE_WING_TE: 2,
                 ROLE_WING_TE_UPPER: 2, ROLE_WING_TE_LOWER: 3}
+
+
+# Which surface guides a rung leaves out, and how to say so. A loft held by
+# every guide can come out with a sliver face running along the tip, and then
+# nothing will put a surface across the loop that face leaves — that is one
+# guide's doing, and on the wing it was found on, the lower one at 2% of the
+# chord. Dropping it gave three faces, two caps and a solid at every offset
+# that had failed, of a volume within 0.006% of the solid loft where the solid
+# loft worked at all. Dropping the upper one instead did nothing, so the rungs
+# below start with the lower and widen from there rather than guessing.
+# How far along the chord the guides nearest the nose stand, as wing.py places
+# them.
+NOSE_STATIONS = (2.0, 3.5)
+LADDER: Tuple[Tuple[Optional[Tuple[Tuple[str, float], ...]], str], ...] = (
+    ((("lower", 2.0),), "the lower 2% guide was dropped to close the tip"),
+    ((("upper", 2.0),), "the upper 2% guide was dropped to close the tip"),
+    ((("lower", 2.0), ("upper", 2.0)), "both 2% guides were dropped to close the tip"),
+    (tuple((side, at) for at in NOSE_STATIONS for side in ("lower", "upper")),
+     "the four nose guides were dropped to close the tip"),
+    (None, "only the edge guides were kept, to close the tip"),
+)
+
+# ``wing_upper_3p5`` is the guide 3.5% along the upper surface. The trailing
+# edge's own guides end in _te_upper and _te_lower and carry no station, so
+# this passes over them, as it does the leading edge.
+_SURFACE_GUIDE = re.compile(r"_(upper|lower)_(\d+)(?:p(\d))?$")
+
+
+def surface_guide(name: str) -> Optional[Tuple[str, float]]:
+    """Which surface a guide holds and how far along it, or None if it is an edge."""
+    found = _SURFACE_GUIDE.search(name)
+    if found is None:
+        return None
+    tenths = float(found.group(3)) / 10.0 if found.group(3) else 0.0
+    return found.group(1), float(found.group(2)) + tenths
+
+
+def guide_ladder(guides: Sequence[str]) -> List[Tuple[Tuple[str, ...], str]]:
+    """The guide sets to try in order, each with what it leaves out.
+
+    The first is every guide the wing asked for. The rest drop surface guides
+    near the nose, in the app's own order otherwise, and a rung that would drop
+    nothing — or nothing more than the rung before it — is left out rather than
+    run for a second time: each attempt is a loft of 10 to 15 seconds in
+    SolidWorks, and a cap a fifth of a second, so the whole ladder is about a
+    minute at worst.
+    """
+    out: List[Tuple[Tuple[str, ...], str]] = [(tuple(guides), "")]
+    for dropped, said in LADDER:
+        kept = tuple(
+            name for name in guides
+            if surface_guide(name) is None
+            or (dropped is not None and surface_guide(name) not in dropped)
+        )
+        if len(kept) < len(guides) and all(kept != before for before, _ in out):
+            out.append((kept, said))
+    return out
 
 
 class SolidWorks(Protocol):
@@ -62,6 +135,9 @@ class SolidWorks(Protocol):
     def insert_loft(self, profiles: Sequence[str], guides: Sequence[str], name: str,
                     merge: bool = False, keep_tangency: bool = True,
                     guide_influence: int = GUIDE_TO_NEXT_GUIDE, solid: bool = True) -> str: ...
+    def cap_end(self, loft: str, profile: str, name: str) -> str: ...
+    def knit_to_solid(self, surfaces: Sequence[str], name: str, solid: bool = True) -> str: ...
+    def rename_feature(self, current: str, new: str) -> str: ...
     def delete_feature(self, name: str) -> None: ...
     def set_suppressed(self, name: str, suppressed: bool) -> None: ...
     # No argument: this module only ever rebuilds what changed.
@@ -86,10 +162,21 @@ class LoftResult:
     feature: str = ""
     step: str = ""
     error: str = ""
-    # Set when SolidWorks refused the solid and a surface loft was made instead.
+    # Set when SolidWorks refused the solid, a surface loft was made instead,
+    # and capping that surface into a solid did not work either.
     surface: bool = False
+    # Set when the solid was refused but the surface, capped at both ends and
+    # knitted, made one anyway.
+    capped: bool = False
     # Set when the loft was there already and was left as it is.
     kept: bool = False
+    # Why the capping did not happen, when it was tried and did not work. Not
+    # an error: the surface loft is still there and still measurable.
+    note: str = ""
+    # How many guides the loft that now stands was built with, and — when that
+    # is fewer than the wing asked for — what was left out and why.
+    guides_used: int = 0
+    dropped: str = ""
 
     def describe(self) -> str:
         name = self.plan.name
@@ -98,10 +185,20 @@ class LoftResult:
         if self.kept:
             return (f"{name} is already in the part and follows the curves. Delete it "
                     "to loft it again.")
-        if self.surface:
-            return (f"{name} lofted as a surface: SolidWorks would not make it a solid "
+        if self.capped and self.dropped:
+            said = (f"{name} lofted as a surface and capped into a solid "
+                    f"({self.guides_used} of {len(self.plan.guides)} guides; "
+                    f"{self.dropped}).")
+        elif self.capped:
+            said = (f"{name} lofted as a surface and capped into a solid "
                     f"({len(self.plan.guides)} guides).")
-        return f"{name} lofted through {len(self.plan.profiles)} profiles and {len(self.plan.guides)} guides."
+        elif self.surface:
+            said = (f"{name} lofted as a surface: SolidWorks would not make it a solid "
+                    f"({len(self.plan.guides)} guides).")
+        else:
+            said = (f"{name} lofted through {len(self.plan.profiles)} profiles and "
+                    f"{len(self.plan.guides)} guides.")
+        return f"{said} [{self.note}]" if self.note else said
 
     @property
     def ok(self) -> bool:
@@ -192,24 +289,148 @@ def _make_lofts(
                     result.kept = True
                     continue
                 sw.delete_feature(plan.name)
+                # A capped loft is four features under three names. Whatever
+                # deleting the knit left of it goes too, or the next attempt
+                # builds under names SolidWorks has had to make up.
+                left = set(sw.feature_names())
+                for piece in _capping_pieces(result):
+                    if piece in left:
+                        sw.delete_feature(piece)
             try:
                 result.feature = sw.insert_loft(
                     plan.profiles, plan.guides, plan.name,
                     keep_tangency=plan.keep_tangency, guide_influence=plan.guide_influence,
                 )
+                result.guides_used = len(plan.guides)
             except SolidWorksError:
                 if not surface_fallback:
                     raise
                 # SolidWorks turns down some solids whose surface it makes
-                # without complaint.
-                result.feature = sw.insert_loft(
-                    plan.profiles, plan.guides, plan.name,
-                    keep_tangency=plan.keep_tangency, solid=False,
-                )
-                result.surface = True
+                # without complaint, and a capped surface is a solid again.
+                _cap_into_solid(sw, result)
         except SolidWorksError as exc:
             result.error = str(exc)
     return results
+
+
+def _capping_pieces(result: LoftResult) -> Tuple[str, str, str]:
+    """The three features a capped loft is made of, by the names given to them."""
+    name = result.plan.name
+    return (name + SURFACE_SUFFIX, f"{name}_root{CAP_SUFFIX}", f"{name}_tip{CAP_SUFFIX}")
+
+
+def _cap_into_solid(sw: SolidWorks, result: LoftResult) -> None:
+    """Loft the surface, cap both ends, knit the three into a solid.
+
+    The same geometry as the solid loft SolidWorks refused, built the other way
+    round: it accepts the surface every time, and a planar face across the end
+    edges of that surface is a thing it can be asked for on its own.
+
+    An end that will not take a cap is the loft's own doing rather than the
+    section's: held by every guide it can come out with a sliver face along the
+    tip, and no surface will span the loop that leaves. So the guides come off
+    a rung at a time — see :data:`LADDER` — and the first set that caps and
+    knits is the one that stays. Each rung is a loft of 10 to 15 seconds and
+    two caps of a fifth of a second, so the ladder costs about a minute at
+    worst, against a wing that otherwise has no solid at all.
+
+    Whatever happens, the part ends up either with the solid or with the
+    surface loft the wing asked for, under the plan's name, and with nothing
+    else of this left in the tree.
+    """
+    plan = result.plan
+    surface_name, root_cap, tip_cap = _capping_pieces(result)
+    ends = ((root_cap, plan.profiles[0]), (tip_cap, plan.profiles[-1]))
+    note, left = "", []
+
+    for guides, dropped in guide_ladder(plan.guides):
+        if result.feature:
+            # What the rung before made, which is not what this one wants.
+            left += _take_out(sw, [result.feature])
+            result.feature = ""
+        try:
+            result.feature = sw.insert_loft(
+                plan.profiles, guides, surface_name,
+                keep_tangency=plan.keep_tangency, solid=False,
+            )
+        except SolidWorksError:
+            if not result.guides_used:
+                # Not even the surface can be lofted, which is the end of it.
+                raise
+            continue
+        result.surface = True
+        result.guides_used = len(guides)
+
+        caps: List[str] = []
+        try:
+            for cap, profile in ends:
+                caps.append(sw.cap_end(result.feature, profile, cap))
+        except SolidWorksError as exc:
+            # Only the caps go. The loft stands until the next rung takes it
+            # out, and if there is no next rung it is what is handed back.
+            note = str(exc)
+            left += _take_out(sw, caps)
+            continue
+        try:
+            result.feature = sw.knit_to_solid([result.feature] + caps, plan.name)
+        except SolidWorksError as exc:
+            # Three surfaces that will not knit is not something fewer guides
+            # would mend, so the ladder stops here.
+            note = str(exc)
+            left += _take_out(sw, caps)
+            break
+        result.capped = True
+        result.surface = False
+        result.dropped = dropped
+        return
+
+    _leave_the_surface(sw, result, note, left)
+
+
+def _take_out(sw: SolidWorks, names: Sequence[str]) -> List[str]:
+    """Delete what an attempt made, and say which of it would not go."""
+    left = []
+    for name in names:
+        if not name:
+            continue
+        try:
+            sw.delete_feature(name)
+        except SolidWorksError:
+            left.append(name)
+    return left
+
+
+def _leave_the_surface(
+    sw: SolidWorks, result: LoftResult, note: str, left: List[str]
+) -> None:
+    """Leave the part holding the surface loft the wing asked for, under its name.
+
+    The loft standing at this point is whatever the last rung made, which is
+    not what was asked for; if it is not the full set it goes, and the full one
+    is made again. That costs another loft, and it is the difference between
+    handing back the wing's own surface and handing back a reduced one nothing
+    in the record describes.
+    """
+    plan = result.plan
+    if result.feature and result.guides_used == len(plan.guides):
+        result.feature = sw.rename_feature(result.feature, plan.name)
+    else:
+        left += _take_out(sw, [result.feature])
+        result.feature = ""
+        result.feature = sw.insert_loft(
+            plan.profiles, plan.guides, plan.name,
+            keep_tangency=plan.keep_tangency, solid=False,
+        )
+    result.surface = True
+    result.capped = False
+    result.dropped = ""
+    result.guides_used = len(plan.guides)
+    if left:
+        # Saying so is all that can be done, and it is worth more than a tidy
+        # message: these are features in the user's part under names nothing
+        # else knows about.
+        note += f"; left in the part as {', '.join(left)}"
+    result.note = note
 
 
 def loft_in_part(
@@ -247,7 +468,12 @@ def loft_and_export(
     os.makedirs(step_folder, exist_ok=True)
     results = _make_lofts(sw, plans, replace, surface_fallback)
 
-    bodies = sw.features_of_type(*BODY_FEATURE_TYPES)
+    # The body a capped loft offers is its knit, which counts here by type; the
+    # surface it was knitted from is still in the tree beside it, absorbed but
+    # still calling itself a lofted surface. Suppressing that would take the
+    # solid with it, so the pieces are known by name rather than by type.
+    absorbed = {name for result in results if result.capped for name in _capping_pieces(result)}
+    bodies = [b for b in sw.features_of_type(*BODY_FEATURE_TYPES) if b not in absorbed]
     for result in results:
         if not result.ok:
             continue
@@ -343,7 +569,11 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         print(f"   profiles: {', '.join(plan.profiles)}")
         print(f"   guides:   {', '.join(plan.guides)}")
         if result.ok:
-            made = " (as a surface: SolidWorks refused the solid)" if result.surface else ""
+            made = ""
+            if result.capped:
+                made = " (a surface loft capped at both ends and knitted into a solid)"
+            elif result.surface:
+                made = " (as a surface: SolidWorks refused the solid)"
             print(f"   -> {result.step}{made}")
         else:
             failed += 1

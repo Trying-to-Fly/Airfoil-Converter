@@ -91,6 +91,9 @@ LOFT_PROFILE_MARK = 1
 LOFT_GUIDE_MARK = 2
 LOFT_TYPE_NAME = "Blend"
 LOFT_SURFACE_TYPE_NAME = "BlendRefSurface"
+# What a knit calls itself in the tree, read off one made on SolidWorks 2026 on
+# 2026-09-22. A capped loft is a body under this type, not under a loft's.
+KNIT_TYPE_NAME = "SewRefSurface"
 
 # Values read out of the SolidWorks 2026 constant library (swconst.tlb) rather
 # than remembered: swGuideCurveInfluence_e, swFeatureSuppressionAction_e,
@@ -116,6 +119,37 @@ ROLLBACK_TO_END = 1
 ROLLBACK_TO_PREVIOUS = 2
 ROLLBACK_BEFORE_FEATURE = 3
 ROLLBACK_AFTER_FEATURE = 4
+
+# -- capping a surface loft into a solid ------------------------------------
+#
+# Run on SolidWorks 2026 on 2026-09-22, against a copy of the real part, so
+# what follows is what happened rather than what the help promises.
+#
+# A solid loft SolidWorks refuses can be built as the surface loft it always
+# accepts, a cap over each end, and a knit of the three. The caps were the
+# whole difficulty. Neither InsertFillSurface2 nor InsertPlanarRefSurface will
+# take a composite curve as a boundary, or the curves it joins: both refuse in
+# no time at all, even on an end loop that is perfectly flat. What they take
+# is the loft body's own end edges, selected as entities. Both ends of a wing
+# are flat, so the cap is a planar surface — IModelDoc2::InsertPlanarRefSurface,
+# no arguments, a boolean back, 0.2 s. A fill over the same edges works too and
+# is slower, so it is not used.
+
+# An end loop's edges lie in the plane of the profile the loft ran through
+# there; the edges that run root to tip do not. This is how far off that plane
+# an end point may sit and still count as on it, in millimetres. The edges
+# meet the profile exactly, so the margin is only for arithmetic.
+END_PLANE_TOL = 0.05
+
+# The knit's inputs are selected by body name, as SURFACEBODY. IBody2 has no
+# Select4, and Select2 raises through pywin32, so a body cannot select itself;
+# it is picked out by the name it carries instead.
+KNIT_SELECT_MARK = 1
+SURFACE_BODY_TYPE = "SURFACEBODY"
+# The knit tolerance and gap range, in metres: 1e-4 m is 0.1 mm, the upper
+# limit the help gives and what its example passes. Proven at that value.
+KNIT_TOLERANCE = 1e-4
+KNIT_GAP_RANGE = 1e-4
 
 # SolidWorks holds curve points in metres however the file is written, so
 # everything crossing this boundary is scaled. The file says "175.000000mm"
@@ -411,6 +445,33 @@ def transform_point(data: Sequence[float], point: Vec3) -> Vec3:
         s * (r[1] * x + r[4] * y + r[7] * z) + ty,
         s * (r[2] * x + r[5] * y + r[8] * z) + tz,
     )
+
+
+def plane_through(points: Sequence[Vec3]) -> Tuple[Vec3, Vec3]:
+    """A point on the plane a loop lies in, and its unit normal.
+
+    Newell's normal, which is the area-weighted one: it uses every point
+    rather than three of them, so a nose where the points crowd together
+    cannot tilt it.
+    """
+    count = len(points)
+    if count < 3:
+        raise SolidWorksError("A plane needs at least three points.")
+    middle = tuple(sum(p[c] for p in points) / count for c in range(3))
+    nx = ny = nz = 0.0
+    for a, b in zip(points, list(points[1:]) + [points[0]]):
+        nx += (a[1] - b[1]) * (a[2] + b[2])
+        ny += (a[2] - b[2]) * (a[0] + b[0])
+        nz += (a[0] - b[0]) * (a[1] + b[1])
+    size = (nx * nx + ny * ny + nz * nz) ** 0.5
+    if size <= 1e-12:
+        raise SolidWorksError("These points do not lie in a plane of their own.")
+    return middle, (nx / size, ny / size, nz / size)  # type: ignore[return-value]
+
+
+def _off_plane(point: Vec3, plane: Tuple[Vec3, Vec3]) -> float:
+    (mx, my, mz), (nx, ny, nz) = plane
+    return abs((point[0] - mx) * nx + (point[1] - my) * ny + (point[2] - mz) * nz)
 
 
 def _try(obj: Any, name: str, *args: Any) -> Any:
@@ -788,11 +849,14 @@ class Session:
         except Exception:  # noqa: BLE001
             return None
 
-    def _select_all(self, picks: Sequence[Tuple[str, int]], what: str) -> None:
-        """Select curves by name, each at its mark, rebuilding and retrying once.
+    def _select_all(
+        self, picks: Sequence[Tuple[str, int]], what: str, kind: str = "REFERENCECURVES"
+    ) -> None:
+        """Select features by name, each at its mark, rebuilding and retrying once.
 
         Straight after a push SolidWorks sometimes cannot find a curve it has
-        just made; a rebuild settles it.
+        just made; a rebuild settles it. ``kind`` is what the names are being
+        looked up as: curves by default, or BODYFEATURE for a surface.
         """
         doc = self._active()
         extension = call(doc, "Extension")
@@ -801,7 +865,7 @@ class Session:
             missing = ""
             for position, (curve, mark) in enumerate(picks):
                 if not call(
-                    extension, "SelectByID2", curve, "REFERENCECURVES",
+                    extension, "SelectByID2", curve, kind,
                     0.0, 0.0, 0.0, position > 0, mark, _null_dispatch(), 0,
                 ):
                     missing = curve
@@ -1007,6 +1071,129 @@ class Session:
         if len(created) != 1:
             raise SolidWorksError(
                 f"The loft added {len(created)} features, so which one it is cannot be told."
+            )
+        return self.rename_feature(created[0], name)
+
+    def _feature_body(self, name: str) -> Any:
+        """The body a feature made, reached through one of its faces.
+
+        A feature does not offer its body; a face of it does.
+        """
+        faces = list(call(self._curve_feature(name), "GetFaces") or [])
+        if not faces:
+            raise SolidWorksError(f"{name} has no faces, so there is no body to work from.")
+        body = call(faces[0], "GetBody")
+        if body is None:
+            raise SolidWorksError(f"The body {name} made could not be read.")
+        return body
+
+    def body_name(self, feature: str) -> str:
+        """What the body a feature made calls itself, which is how a knit picks it."""
+        return str(call(self._feature_body(feature), "Name"))
+
+    def profile_points(self, name: str) -> List[Vec3]:
+        """Every point of a profile curve, its pieces in order if it is a composite."""
+        kind = str(call(self._curve_feature(name), "GetTypeName2"))
+        if kind == COMPOSITE_TYPE_NAME:
+            return [p for source in self.composite_sources(name)
+                    for p in self.curve_points(source)]
+        return self.curve_points(name)
+
+    def cap_end(self, loft: str, profile: str, name: str) -> str:
+        """Close one end of a surface loft with a planar surface, named ``name``.
+
+        Which edges are that end is settled geometrically: the loft ran through
+        ``profile`` there, and the edges of that end lie in the plane its points
+        lie in, while every edge that runs to the other end has one point on
+        each. Reading the profile rather than the part's own axes is what keeps
+        this true of a wing standing anywhere, at any dihedral.
+
+        Proven on SolidWorks 2026 on 2026-09-22. The edges select themselves —
+        ``Select4`` on each, appending after the first — because they have no
+        name for ``SelectByID2`` to use; the help's "select the boundary with
+        SelectByID2 at mark 1" cannot be followed for an edge.
+        """
+        doc = self._active()
+        plane = plane_through(self.profile_points(profile))
+        edges = []
+        for edge in list(call(self._feature_body(loft), "GetEdges") or []):
+            # The curve has to be generated before its parameters can be read:
+            # SolidWorks does not keep the underlying curve on the edge.
+            call(edge, "GetCurve")
+            params = call(edge, "GetCurveParams2")
+            ends = (
+                tuple(float(params[i]) * MM_PER_METRE for i in range(3)),
+                tuple(float(params[i]) * MM_PER_METRE for i in range(3, 6)),
+            )
+            if all(_off_plane(end, plane) <= END_PLANE_TOL for end in ends):
+                edges.append(edge)
+        if not edges:
+            raise SolidWorksError(
+                f"No edge of {loft} lies in the plane of {profile}, so that end "
+                "cannot be capped."
+            )
+
+        call(doc, "ClearSelection2", True)
+        data = call(call(doc, "SelectionManager"), "CreateSelectData")
+        for position, edge in enumerate(edges):
+            if not call(edge, "Select4", position > 0, data):
+                call(doc, "ClearSelection2", True)
+                raise SolidWorksError(f"An edge of {loft} at {profile} would not select.")
+
+        before = set(self.feature_names())
+        made = call(doc, "InsertPlanarRefSurface")
+        call(doc, "ClearSelection2", True)
+
+        created = [n for n in self.feature_names() if n not in before]
+        if not made or not created:
+            raise SolidWorksError(
+                f"SolidWorks would not put a planar surface across the {len(edges)} "
+                f"edges of {loft} at {profile}."
+            )
+        if len(created) != 1:
+            raise SolidWorksError(
+                f"Capping {loft} at {profile} added {len(created)} features, "
+                "so which one it is cannot be told."
+            )
+        return self.rename_feature(created[0], name)
+
+    def knit_to_solid(self, surfaces: Sequence[str], name: str, solid: bool = True) -> str:
+        """Knit the bodies ``surfaces`` made into one, a solid if they close one.
+
+        ``surfaces`` are feature names, as everything else here is; what is
+        selected is the body each of them made, by the name it carries. Proven
+        on SolidWorks 2026 on 2026-09-22, with the arguments below: gap filters
+        on, merging off, tolerance 0.1 mm. The three sheets meet along the very
+        curves they were built from, so there is nothing for a filter to bridge.
+        """
+        if len(surfaces) < 2:
+            raise SolidWorksError("A knit needs at least two surfaces to join.")
+        doc = self._active()
+        bodies = [self.body_name(surface) for surface in surfaces]
+        self._select_all(
+            [(body, KNIT_SELECT_MARK) for body in bodies], "to knit", SURFACE_BODY_TYPE,
+        )
+
+        before = set(self.feature_names())
+        made = call(
+            call(doc, "FeatureManager"), "InsertSewRefSurface",
+            True,            # UseGapFilters
+            solid,           # TryToFormSolid
+            False,           # MergeEntities: keep the faces as they are
+            KNIT_TOLERANCE,
+            KNIT_GAP_RANGE,
+        )
+        call(doc, "ClearSelection2", True)
+
+        created = [n for n in self.feature_names() if n not in before]
+        if made is None or made is False or not created:
+            what = "a solid" if solid else "one surface"
+            raise SolidWorksError(
+                f"SolidWorks would not knit {' and '.join(surfaces)} into {what}."
+            )
+        if len(created) != 1:
+            raise SolidWorksError(
+                f"Knitting added {len(created)} features, so which one it is cannot be told."
             )
         return self.rename_feature(created[0], name)
 
