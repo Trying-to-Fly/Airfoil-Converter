@@ -652,6 +652,113 @@ def test_a_near_duplicate_beside_a_corner_is_collapsed_onto_the_corner():
     assert corner in cleaned
 
 
+class RoundSkin:
+    """A skin that is a circle, so the wall inside it is a circle too.
+
+    Enough of :class:`~airfoil_converter.wing_offset.Skin` for the gap filling:
+    the section's outline, and how far a point stands off it.
+    """
+
+    def __init__(self, radius, points=240):
+        self.radius = radius
+        step = 2.0 * math.pi / points
+        self.pts = [(radius * math.cos(k * step), radius * math.sin(k * step))
+                    for k in range(points)]
+        self.loft = self
+
+    def outline(self, _s):
+        return list(self.pts)
+
+    def distance(self, _s, p, faces=True):
+        return abs(self.radius - math.hypot(p[0], p[1]))
+
+
+def on_circle(radius, degrees):
+    a = math.radians(degrees)
+    return (radius * math.cos(a), radius * math.sin(a))
+
+
+def fill_between(skin, loop, d, passes=4):
+    """What the offset builder does: fill, then look again at what was made."""
+    bridges = [True] * len(loop)
+    for _ in range(passes):
+        loop, bridges = wing_offset._fill_gaps(skin, 0.0, loop, bridges, d, True)
+        if not any(bridges):
+            break
+    return loop
+
+
+def test_a_tight_nose_is_drawn_round_rather_than_cut_across():
+    """A wall of a quarter-millimetre radius, which is what an inward offset
+    leaves at a hooked tip. Drawn with two points and 50° between them
+    SolidWorks will not make a solid of the section; drawn round, it is an arc
+    like any other."""
+    skin = RoundSkin(2.0)
+    d = 1.75                      # wall radius 0.25
+    loop = [on_circle(0.25, 100.0), on_circle(0.25, -100.0),
+            on_circle(0.25, -170.0), on_circle(0.25, 170.0)]
+    out = fill_between(skin, loop, d)
+
+    nose = out[: out.index(loop[1]) + 1]      # the stretch round the nose itself
+    assert len(nose) >= 6
+    for p in nose:
+        assert abs(math.hypot(*p) - 0.25) <= 0.005
+    turns = [wing_build._turn(a, b, c) for a, b, c in zip(nose, nose[1:], nose[2:])]
+    assert max(turns) <= 15.0
+    steps = [math.dist(a, b) for a, b in zip(nose, nose[1:])]
+    assert min(steps) >= 0.02
+
+
+class FlatSkin:
+    """A skin that is the line x = -2, so the wall inside it is a line too."""
+
+    def __init__(self):
+        self.pts = [(-2.0, -10.0), (10.0, -10.0), (10.0, 10.0), (-2.0, 10.0)]
+        self.loft = self
+
+    def outline(self, _s):
+        return list(self.pts)
+
+    def distance(self, _s, p, faces=True):
+        return p[0] + 2.0
+
+
+def test_a_straight_run_of_wall_is_left_where_it_is():
+    """The rule only draws what bends. A flank already on the wall keeps its
+    own points, however long its steps are."""
+    straight = [(-0.25, y) for y in (-0.6, -0.2, 0.2, 0.6)]
+    out, fresh = wing_offset._fill_gaps(FlatSkin(), 0.0, straight, [True] * 4, 1.75, True)
+    assert out == straight
+    assert not any(fresh)
+
+
+def test_a_nose_too_tight_to_draw_is_left_as_one_corner():
+    """Below about a seventh of a millimetre an arc cannot be drawn at ten
+    degrees a step without steps shorter than the walk can place, so it stays
+    a corner — which is what a deep offset's nose and every tail already are."""
+    skin = RoundSkin(1.0)
+    d = 0.95                      # wall radius 0.05, tighter than MIN_ARC
+    loop = [on_circle(0.05, 80.0), on_circle(0.05, -80.0),
+            on_circle(0.05, -175.0), on_circle(0.05, 175.0)]
+    out = fill_between(skin, loop, d)
+    assert out[:2] == loop[:2]
+
+
+def test_two_points_closer_than_a_fiftieth_of_a_millimetre_are_one_point():
+    """The real tip of a 1.6 mm inward offset, where the nose is becoming a
+    swallowtail: the trim leaves four points inside 0.07 mm, each too near the
+    last for a rule that judges a pair by its neighbours to see."""
+    huddle = [(138.459, -34.805), (138.451, -34.845), (138.440, -34.859),
+              (138.440, -34.870)]
+    loop = [(139.5, -34.5), (138.486, -34.797)] + huddle + [(138.444, -34.987), (139.5, -35.5)]
+    out = wing_offset._uncrowd(loop)
+
+    steps = [math.dist(a, b) for a, b in zip(out, out[1:])]
+    assert min(steps) >= wing_offset.HUDDLE_STEP
+    # The corner of the huddle is what stays: the point furthest off the line.
+    assert (138.451, -34.845) in out or (138.440, -34.859) in out
+
+
 def test_an_evenly_dense_nose_is_left_alone():
     """The 1.5 mm wing's own root nose, which SolidWorks lofts as a solid:
     0.035 mm steps, but between 0.07 mm ones. That is the shape, drawn to one

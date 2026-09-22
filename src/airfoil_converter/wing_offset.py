@@ -12,7 +12,10 @@ asked. Two remedies, chosen per section:
   skin around it.
 
 Either way the result is trimmed wherever it comes closer to the skin than the
-offset: behind a thin trailing edge, inside a tight nose.
+offset: behind a thin trailing edge, inside a tight nose. What the trim takes
+out is then drawn again by walking onto the wall, ten degrees of turn at a
+step, so a nose of a quarter of a millimetre comes out as an arc rather than
+as the two or three points a fixed spacing leaves on it.
 
 The offset wing gets more sections than the ribs, because a loft only blends
 straight between sections and the offset shape does not change in a straight
@@ -463,9 +466,52 @@ def _trim(
 
 
 # A gap in the trimmed offset longer than this is checked, and filled if the
-# straight line across it strays off the wall.
+# straight line across it strays off the wall by more than GAP_TOL of the
+# offset.
 GAP = 0.2
 GAP_TOL = 0.005
+# However straight the line is, the loop must not turn more than this at a
+# point: past about ten degrees a step the wall is being drawn as a polygon
+# rather than followed. An inward offset's nose used to come out with four
+# points and fifty degrees between them, and SolidWorks would not make a solid
+# of it: it draws each half of such a section as a spline that ends at that
+# vertex with no curvature, so the two halves graze each other within microns
+# of it and the loop is no use as the boundary of a face. The surface loft
+# still built, which is what made it look like a tolerance problem.
+TURN_STEP = math.radians(10.0)
+# A turn is only worth filling in if the wall really does bend there. Walk the
+# middle of the gap onto the wall: if it moves off the line by more than this
+# much of the gap's own length the wall is curved, and if it stays on the line
+# the turn is a corner — the tail, or where two offsets meet — which is meant
+# to stay one point.
+SAG_FRACTION = 0.02
+# What the walk itself can tell apart. The wall is found by measuring to a skin
+# sampled every d/6 along the span, so a point can sit a thousandth or two off
+# where the true wall is; chasing anything smaller than that is chasing noise.
+MIN_DEVIATION = 0.002
+# However tight the turn, no step shorter than this. Below it the points stand
+# closer to each other than they do to the wall they were walked onto.
+MIN_FILL = 0.025
+# How far off a line the wall it spans can be, as a fraction of the line's own
+# length: half, for a bend of up to a half turn. A walk that comes back with
+# more than that has found some other part of the wall.
+REACH = 0.75
+# A bend tighter than this is left as a corner rather than drawn as an arc:
+# ten degrees a step round it would want steps shorter than MIN_FILL, and a
+# corner drawn with one vertex and full-length steps either side is what
+# SolidWorks makes a clean job of. A deep offset's nose, and every tail, is
+# one of these.
+MIN_ARC = MIN_FILL / TURN_STEP
+
+
+def _turn(a: Point2, b: Point2, c: Point2) -> float:
+    """How far the way from ``a`` to ``c`` bends at ``b``, in radians."""
+    ux, uy = b[0] - a[0], b[1] - a[1]
+    vx, vy = c[0] - b[0], c[1] - b[1]
+    size = math.hypot(ux, uy) * math.hypot(vx, vy)
+    if size <= 0.0:
+        return 0.0
+    return math.acos(max(-1.0, min(1.0, (ux * vx + uy * vy) / size)))
 
 
 def _fill_gaps(
@@ -477,6 +523,13 @@ def _fill_gaps(
     plane — a leading edge hooking back — points solved against their own
     patch of skin come out too close and are trimmed, and the offset jumps
     straight across. The true offset lies off that line; walk to it.
+
+    Two things ask for points. A line that strays off the wall is the plain
+    case, measured by what the wall's distance does along it. A line that the
+    loop turns hard at either end of is the other: round a tight nose the
+    distance hardly moves — near a tip what the wall stands off is the end
+    face, out of this plane, so walking about in the plane barely changes it —
+    and the only sign left that the wall bends is the loop's own corner.
     """
     poly = skin.loft.outline(s)
     out: List[Point2] = []
@@ -488,18 +541,53 @@ def _fill_gaps(
         out.append(a)
         fresh.append(False)
         length = math.hypot(b[0] - a[0], b[1] - a[1])
-        if length <= GAP or not bridges[i]:
+        if not bridges[i]:
             continue
-        probes = [(a[0] + f * (b[0] - a[0]), a[1] + f * (b[1] - a[1])) for f in (0.25, 0.5, 0.75)]
-        if all(abs(skin.distance(s, q, faces=False) - d) <= GAP_TOL * d for q in probes):
+        bend = max(_turn(loop[i - 1], a, b), _turn(a, b, loop[(i + 2) % n]))
+        straying = False
+        if length > GAP:
+            probes = [(a[0] + f * (b[0] - a[0]), a[1] + f * (b[1] - a[1])) for f in (0.25, 0.5, 0.75)]
+            straying = any(
+                abs(skin.distance(s, q, faces=False) - d) > GAP_TOL * d for q in probes
+            )
+        if not straying and (bend <= TURN_STEP or length <= 2.0 * MIN_FILL):
             continue
         ex, ey = (b[0] - a[0]) / length, (b[1] - a[1]) / length
         # Toward the skin: outward from an inner loop, inward from an outer one.
         nx, ny = (ey, -ex) if inward else (-ey, ex)
-        count = min(40, int(math.ceil(length / GAP)))
+        count = int(math.ceil(length / GAP)) if straying else 0
+        if not straying:
+            middle = (0.5 * (a[0] + b[0]), 0.5 * (a[1] + b[1]))
+            found = _level_point(skin, s, poly, middle, (nx, ny), d, inward)
+            if found is None:
+                continue
+            off = math.hypot(found[0] - middle[0], found[1] - middle[1])
+            if off <= max(SAG_FRACTION * length, MIN_DEVIATION):
+                # The wall runs straight across this gap, so the turn at its
+                # end is a corner of the offset and belongs where it is.
+                continue
+            if off > REACH * length:
+                # A line across a bend of less than a half turn stands off it
+                # by at most half its own length. Further than that and the
+                # walk has left this stretch of wall for another one — round
+                # the nose, or the far side of a corner — and what it found is
+                # not a point of this gap.
+                continue
+            # A chord of length L across an arc that turns by t stands L/2 ·
+            # tan(t/4) off it, which is what says how tight the bend is and
+            # how many steps of ten degrees it takes.
+            turn = 4.0 * math.atan(2.0 * off / length)
+            if length < 2.0 * MIN_ARC * math.sin(0.5 * min(turn, math.pi)):
+                continue   # tighter than MIN_ARC: a corner, left as one point
+            count = int(math.ceil(turn / TURN_STEP))
+        count = min(max(count, 2), 40, max(2, int(length / MIN_FILL)))
         for k in range(1, count):
             c = (a[0] + ex * length * k / count, a[1] + ey * length * k / count)
             found = _level_point(skin, s, poly, c, (nx, ny), d, inward)
+            if found is not None and not straying and (
+                math.hypot(found[0] - c[0], found[1] - c[1]) > REACH * length
+            ):
+                found = None   # off this stretch of wall altogether; see above
             if found is not None:
                 fresh[-1] = True
                 out.append(found)
@@ -665,6 +753,38 @@ def _despike(loop: List[Point2], where: Callable[[Point2], bool]) -> List[Point2
 # the steps on either side of them.
 CROWD_STEP = 0.05
 CROWD_FRACTION = 0.25
+# Closer than this and they are one point whatever their neighbours do. The
+# gaps filled round a nose are never smaller than MIN_FILL, so anything under
+# this is a leftover of the trim rather than a step of the wall — and at a
+# corner the trim can leave several, each too near the last for the rule above
+# to see, because the step before them is just as short.
+HUDDLE_STEP = 0.02
+
+
+def _unhuddle(pts: List[Point2]) -> List[Point2]:
+    """The loop with no two points left closer together than ``HUDDLE_STEP``.
+
+    The tightest pair goes first, and of the two the one standing nearer the
+    line across the pair — so a corner keeps its own point and what is dropped
+    is the near-copy of it beside it. Taking one point at a time rather than a
+    whole run is what stops a stretch that is merely fine from collapsing: each
+    time one goes the gap left is twice what it was.
+    """
+    while len(pts) > 3:
+        n = len(pts)
+        at, tightest = -1, HUDDLE_STEP
+        for i in range(n):
+            a, b = pts[i], pts[(i + 1) % n]
+            gap = math.hypot(b[0] - a[0], b[1] - a[1])
+            if gap < tightest:
+                at, tightest = i, gap
+        if at < 0:
+            break
+        before, after = pts[at - 1], pts[(at + 2) % n]
+        first, second = pts[at], pts[(at + 1) % n]
+        keep_first = _line_distance(first, before, after) >= _line_distance(second, before, after)
+        del pts[at if not keep_first else (at + 1) % n]
+    return pts
 
 
 def _uncrowd(loop: List[Point2]) -> List[Point2]:
@@ -692,7 +812,7 @@ def _uncrowd(loop: List[Point2]) -> List[Point2]:
     it: that is the corner, and rounding the corner off is the one thing this
     must not do.
     """
-    pts = list(loop)
+    pts = _unhuddle(list(loop))
     n = len(pts)
     if n < 5:
         return pts
