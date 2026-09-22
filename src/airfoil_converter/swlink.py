@@ -6,15 +6,27 @@ protocol, which means every rule below is testable against a fake on a machine
 with no CAD package at all — and the rules are the part that was expensive to
 learn.
 
-Three of them, each paid for by somebody's afternoon:
+Four of them, each paid for by somebody's afternoon:
 
-* **Write every file, reload every curve, then rebuild once.** Reloading with
-  the rebuild live shows a real but transient error partway through, because
-  mid-refresh some curves carry the old geometry and some the new, and it
-  rebuilds once per curve for nothing.
-* **Restore the rebuild flag in a ``finally``.** A document left suppressed
-  looks fine and silently stops updating, which is about the worst state to
-  hand back to someone.
+* **Write every file, reload every curve, then rebuild once, and only what
+  changed.** Reloading with the rebuild live shows a real but transient error
+  partway through, because mid-refresh some curves carry the old geometry and
+  some the new, and it rebuilds once per curve for nothing. The one rebuild at
+  the end regenerates the features the reloaded curves feed, not the whole
+  part: on a part of 397 features with six lofts through thirty guides each,
+  that is 0.8 seconds against 25 for the same geometry.
+* **Roll the tree back to the curves before reloading them.** SolidWorks
+  commits a curve's new points against everything standing below it in the
+  tree, and charges for it: on that same part each commit took 25 seconds with
+  the tree rolled forward — 16.5 minutes for one wing's 39 curves — and half a
+  second with the bar sitting just after those curves, where nothing built on
+  them has been made yet. Rolled back, reloaded, rolled forward and rebuilt,
+  the whole wing takes 29 seconds. New curves land at the bar too, which is
+  beside the record's own curves rather than at the end of the part.
+* **Restore the rebuild flag, and the bar, in a ``finally``.** A document left
+  suppressed looks fine and silently stops updating; one left rolled back
+  looks like a part with half its features gone. Both are about the worst
+  state to hand back to someone.
 * **Read a name back after setting it.** SolidWorks quietly keeps its own name
   on a collision, and a record pointing at a feature that does not exist is a
   failure nothing later can detect.
@@ -44,7 +56,10 @@ class SolidWorks(Protocol):
     def rename_feature(self, current: str, new: str) -> str: ...
     def feature_names(self) -> List[str]: ...
     def reload_curve(self, name: str, path: str) -> None: ...
+    def roll_back_to(self, name: str) -> None: ...
+    def roll_forward(self) -> None: ...
     def set_rebuild_suppressed(self, suppressed: bool) -> None: ...
+    # No argument: this module only ever rebuilds what changed.
     def rebuild(self) -> bool: ...
     def folders(self) -> Dict[str, List[str]]: ...
     def insert_folder(self, names: Sequence[str], folder: str) -> str: ...
@@ -231,6 +246,24 @@ def _apply(
     to_reload: Sequence[Curve],
     folder: str,
 ) -> None:
+    # The bar goes just after the last curve of this record that the part
+    # already has, so that committing points to any of them costs nothing
+    # below. New curves are made at the bar, which puts them beside their own
+    # kind rather than at the end of the part.
+    order = {name: i for i, name in enumerate(sw.feature_names())}
+    here = [c.feature for c in to_reload if c.feature in order]
+    last = max(here, key=lambda name: order[name]) if here else ""
+    rolled = False
+    if last:
+        try:
+            sw.roll_back_to(last)
+            rolled = True
+        except SolidWorksError:
+            # A bar that will not move costs time, not correctness. The push
+            # goes ahead on the live tree, the way it always used to, rather
+            # than refusing an export over how long it is going to take.
+            pass
+
     sw.set_rebuild_suppressed(True)
     try:
         for curve in to_insert:
@@ -260,7 +293,12 @@ def _apply(
                 continue
             result.refreshed.append(curve.feature)
     finally:
-        sw.set_rebuild_suppressed(False)
+        try:
+            if rolled:
+                sw.roll_forward()
+        finally:
+            # Whatever the bar does, the document must not be left suppressed.
+            sw.set_rebuild_suppressed(False)
 
     if result.touched:
         result.rebuilt = bool(sw.rebuild())

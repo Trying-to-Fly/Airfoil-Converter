@@ -108,6 +108,15 @@ OPEN_SILENT = 1
 SAVE_SILENT = 1
 SAVE_AS_COPY = 2
 
+# swMoveRollbackBarTo_e, read off the same library. The bar goes after the
+# wing's last curve feature to reload them, and back to where it was afterwards
+# — "previous position" rather than "end", so a bar the user had put somewhere
+# themselves is where they left it.
+ROLLBACK_TO_END = 1
+ROLLBACK_TO_PREVIOUS = 2
+ROLLBACK_BEFORE_FEATURE = 3
+ROLLBACK_AFTER_FEATURE = 4
+
 # SolidWorks holds curve points in metres however the file is written, so
 # everything crossing this boundary is scaled. The file says "175.000000mm"
 # and the part reads back 0.175.
@@ -801,7 +810,10 @@ class Session:
                 return
             call(doc, "ClearSelection2", True)
             if attempt == 0:
-                call(doc, "ForceRebuild3", False)
+                # What changed, not everything: on a big part forcing every
+                # feature is 25 seconds against under one, and a curve that has
+                # just been made only needs its own regeneration to be findable.
+                self.rebuild()
         raise SolidWorksError(f"{missing} could not be selected {what}.")
 
     def insert_composite_curve(self, sources: Sequence[str], name: str) -> str:
@@ -857,9 +869,52 @@ class Session:
         """
         self._app.CommandInProgress = bool(suppressed)
 
-    def rebuild(self) -> bool:
-        """Rebuild the active document. Called once, after the last curve."""
-        return bool(call(self._active(), "ForceRebuild3", False))
+    def roll_back_to(self, name: str) -> None:
+        """Put the rollback bar just after the feature ``name``.
+
+        Committing new points to a curve costs what the tree below it costs.
+        On the real part each :meth:`reload_curve` took 25 seconds with the
+        tree rolled forward — 39 curves, 16.5 minutes — and half a second with
+        the bar sitting just after the curves, because everything built on
+        them is rolled back and has nothing to say yet. Moving the bar itself
+        is a fifth of a second.
+        """
+        manager = call(self._active(), "FeatureManager")
+        if not call(manager, "EditRollback", ROLLBACK_AFTER_FEATURE, name):
+            raise SolidWorksError(f"The tree could not be rolled back to {name}.")
+
+    def roll_forward(self) -> None:
+        """Put the bar back where it was, or failing that at the end.
+
+        A tree left rolled back looks like a part with half its features
+        missing, so this belongs in a ``finally``. "Previous position" is
+        asked for first because the user may have had the bar somewhere of
+        their own before any of this started.
+        """
+        manager = call(self._active(), "FeatureManager")
+        if call(manager, "EditRollback", ROLLBACK_TO_PREVIOUS, ""):
+            return
+        if not call(manager, "EditRollback", ROLLBACK_TO_END, ""):
+            raise SolidWorksError("The tree could not be rolled forward again.")
+
+    def rebuild(self, force: bool = False) -> bool:
+        """Rebuild the active document. Called once, after the last curve.
+
+        Only what needs it. ``EditRebuild3`` regenerates the features whose
+        input moved and whatever is built on them; ``ForceRebuild3``
+        regenerates every feature in the part whether or not anything under it
+        changed. On a part of 397 features — six lofts through thirty guides
+        each, with splits and inserts on top — forcing everything is 25
+        seconds and this is 0.8, for geometry that came out identical. The
+        features a reloaded curve feeds are exactly the ones that have to be
+        redone, so that is what is asked for. ``force`` is the old behaviour,
+        kept for the day something is found that the tree does not know has
+        moved; nothing asks for it today.
+        """
+        doc = self._active()
+        if force:
+            return bool(call(doc, "ForceRebuild3", False))
+        return bool(call(doc, "EditRebuild3"))
 
     # -- documents ------------------------------------------------------------
 

@@ -619,6 +619,7 @@ def offset_outline(
     along = [p[0] * u[0] + p[1] * u[1] for p in trimmed]
     middle = 0.5 * (min(along) + max(along))
     trimmed = _despike(trimmed, lambda p: p[0] * u[0] + p[1] * u[1] < middle)
+    trimmed = _uncrowd(trimmed)
     if g.signed_area(trimmed) < 0:
         trimmed.reverse()
     looped = _start_at_tail(trimmed, lambda p: p[0] * u[0] + p[1] * u[1])
@@ -657,6 +658,67 @@ def _despike(loop: List[Point2], where: Callable[[Point2], bool]) -> List[Point2
                 changed = True
                 break
     return pts
+
+
+# Points of a trimmed offset this close together, in mm, are candidates for
+# being one point — but only the ones that are also this small a fraction of
+# the steps on either side of them.
+CROWD_STEP = 0.05
+CROWD_FRACTION = 0.25
+
+
+def _uncrowd(loop: List[Point2]) -> List[Point2]:
+    """The loop with a huddle of points at a corner collapsed onto the corner.
+
+    Where an inward offset comes to a corner at the nose, the offsets of two
+    neighbouring vertices of the section both land within a hair of it, and
+    both can stand just far enough off the skin for the trim to keep them.
+    Neither is a spike, so :func:`_despike` leaves them, and they are further
+    apart than the thinning in :mod:`geometry` takes out. One real wing's tip,
+    offset 1.35 mm inward, came out with 0.014 mm between two steps of 0.2 and
+    0.4 mm. SolidWorks draws a Curve Through XYZ Points as one spline
+    parametrised by the length along it, so a step a twentieth of its
+    neighbours is a kink in that spline, and the loft folds along it — which
+    is what a solid loft SolidWorks refuses looks like from here. A sharp tail
+    collects the same huddle, from the two sides of the offset meeting there.
+
+    A huddle has to be short twice over: shorter than ``CROWD_STEP`` outright,
+    and shorter than a quarter of the steps entering and leaving it. The
+    fraction is what leaves a nose alone that is merely dense — a nose sampled
+    at 0.035 mm between 0.07 mm steps is the shape, evenly drawn, and a spline
+    through it is smooth — and the 0.05 mm ceiling keeps the rule away from
+    anything anyone would call geometry, whatever its neighbours do. What is
+    kept is whichever point of the huddle stands furthest off the line across
+    it: that is the corner, and rounding the corner off is the one thing this
+    must not do.
+    """
+    pts = list(loop)
+    n = len(pts)
+    if n < 5:
+        return pts
+    step = [math.hypot(pts[(i + 1) % n][0] - pts[i][0], pts[(i + 1) % n][1] - pts[i][1])
+            for i in range(n)]
+    # Walk from a point something arrives at from far enough away, so that no
+    # huddle is cut in half by the start of the loop.
+    start = next((i for i in range(n) if step[i - 1] >= CROWD_STEP), None)
+    if start is None:
+        return pts
+    out: List[Point2] = []
+    k = 0
+    while k < n:
+        run = [(start + k) % n]
+        while k + 1 < n and step[run[-1]] < CROWD_STEP:
+            k += 1
+            run.append((start + k) % n)
+        k += 1
+        if len(run) > 1:
+            before, after = pts[run[0] - 1], pts[(run[-1] + 1) % n]
+            span = sum(step[i] for i in run[:-1])
+            if span < CROWD_FRACTION * min(step[run[0] - 1], step[run[-1]]):
+                out.append(max(run, key=lambda i: _line_distance(pts[i], before, after)))
+                continue
+        out.extend(run)
+    return [pts[i] for i in out]
 
 
 def _solve_depth(

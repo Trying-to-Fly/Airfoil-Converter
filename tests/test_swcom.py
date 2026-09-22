@@ -323,3 +323,111 @@ def test_the_worker_reports_being_busy_while_a_call_is_in_flight():
     finally:
         release.set()
         worker.shutdown()
+
+
+# -- rebuilding -------------------------------------------------------------
+
+
+class FakeManager:
+    """The feature manager, which is where the rollback bar lives."""
+
+    def __init__(self, calls, refuse=()):
+        self.calls = calls
+        self.refuse = set(refuse)
+
+    def EditRollback(self, position, name):
+        self.calls.append(("EditRollback", position, name))
+        return position not in self.refuse
+
+
+class FakeDoc:
+    """A document that records what was asked of it, as late binding would.
+
+    A member taking no arguments is reached as an attribute, so ``EditRebuild3``
+    and ``FeatureManager`` have to be properties here and ``ForceRebuild3`` a
+    method — which is the distinction :func:`swcom.call` exists to make.
+    """
+
+    def __init__(self, refuse=()):
+        self.calls = []
+        self.manager = FakeManager(self.calls, refuse)
+
+    @property
+    def FeatureManager(self):
+        return self.manager
+
+    @property
+    def EditRebuild3(self):
+        self.calls.append(("EditRebuild3",))
+        return True
+
+    def ForceRebuild3(self, top_only):
+        self.calls.append(("ForceRebuild3", top_only))
+        return True
+
+
+class FakeApp:
+    def __init__(self, doc):
+        self.ActiveDoc = doc
+
+
+def rebuilding_session(refuse=()):
+    doc = FakeDoc(refuse)
+    return swcom.Session(FakeApp(doc), (34, 0, 0), 1000), doc
+
+
+def test_a_rebuild_regenerates_only_what_changed():
+    """ForceRebuild3 redoes all 397 features of the real part, 25 seconds'
+    worth; EditRebuild3 redoes the ones a reloaded curve feeds, in 0.8, and
+    the geometry it left was identical."""
+    session, doc = rebuilding_session()
+    assert session.rebuild() is True
+    assert doc.calls == [("EditRebuild3",)]
+
+
+def test_a_forced_rebuild_is_still_reachable():
+    session, doc = rebuilding_session()
+    assert session.rebuild(force=True) is True
+    assert doc.calls == [("ForceRebuild3", False)]
+
+
+# -- the rollback bar -------------------------------------------------------
+
+
+def test_the_bar_is_rolled_back_to_just_after_a_feature():
+    """Reloading a curve on a live tree cost 25 seconds a curve on the real
+    part, and half a second with the bar sitting just after the curves."""
+    session, doc = rebuilding_session()
+    session.roll_back_to("wing_root_upper")
+    assert doc.calls == [("EditRollback", swcom.ROLLBACK_AFTER_FEATURE, "wing_root_upper")]
+
+
+def test_a_bar_that_will_not_move_is_an_error_not_a_silence():
+    session, doc = rebuilding_session(refuse=[swcom.ROLLBACK_AFTER_FEATURE])
+    with pytest.raises(SolidWorksError, match="could not be rolled back"):
+        session.roll_back_to("wing_root_upper")
+
+
+def test_rolling_forward_asks_for_the_previous_position():
+    """Where the bar was, not the end: the user may have put it somewhere."""
+    session, doc = rebuilding_session()
+    session.roll_forward()
+    assert doc.calls == [("EditRollback", swcom.ROLLBACK_TO_PREVIOUS, "")]
+
+
+def test_rolling_forward_falls_back_to_the_end():
+    session, doc = rebuilding_session(refuse=[swcom.ROLLBACK_TO_PREVIOUS])
+    session.roll_forward()
+    assert doc.calls == [
+        ("EditRollback", swcom.ROLLBACK_TO_PREVIOUS, ""),
+        ("EditRollback", swcom.ROLLBACK_TO_END, ""),
+    ]
+
+
+def test_a_tree_that_will_not_roll_forward_at_all_says_so():
+    """The one state worse than a slow export: half a part, handed back."""
+    session, _ = rebuilding_session(
+        refuse=[swcom.ROLLBACK_TO_PREVIOUS, swcom.ROLLBACK_TO_END]
+    )
+    with pytest.raises(SolidWorksError, match="could not be rolled forward"):
+        session.roll_forward()

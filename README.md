@@ -217,8 +217,12 @@ right-hand side lists the curves in that part and what the app knows about each.
 It is opened and closed from **Curves** in the window's SolidWorks bar, and the
 window grows and shrinks sideways with it, so the form itself never moves.
 Press **Export** and the curves go straight in: any that are not there yet are
-imported and named, and any that are there have their points replaced. The
-document is rebuilt once, at the end.
+imported and named, and any that are there have their points replaced. While
+that happens the rollback bar is parked just after the record's own curves and
+put back where it was afterwards — SolidWorks charges for everything standing
+below a curve every time one is committed, which on a 397-feature part was the
+difference between 29 seconds for a wing and a quarter of an hour. The
+document is rebuilt once, at the end, and only what changed.
 
 The point of replacing rather than re-importing is that the feature keeps its
 identity. Loft two ribs together, change a chord, press Export, and the loft

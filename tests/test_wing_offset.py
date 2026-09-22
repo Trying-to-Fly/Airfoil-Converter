@@ -633,3 +633,31 @@ def test_a_hairpin_left_by_the_trim_is_taken_out():
     # A sharp tail turns back on itself too, and is left alone.
     tail = [(0.0, 5.0), (99.0, 1.0), (100.0, 0.0), (99.0, -1.0), (0.0, -5.0)]
     assert wing_offset._despike(tail, front) == tail
+
+
+def test_a_near_duplicate_beside_a_corner_is_collapsed_onto_the_corner():
+    """The real tip nose of a 1.35 mm inward offset, to scale: a corner, and
+    0.014 mm past it a second point, between steps of 0.22 and 0.36 mm. The
+    spline SolidWorks draws through that kinks, and the loft folds along it."""
+    corner = (0.0, 0.0)
+    beside = (0.0017, -0.0139)
+    loop = [(2.0, 1.4), (0.183, 0.300), (0.054, 0.218), corner, beside,
+            (0.044, -0.357), (0.151, -0.619), (2.0, -1.4)]
+    cleaned = wing_offset._uncrowd(loop)
+
+    assert cleaned == [p for p in loop if p != beside]
+    steps = [math.dist(a, b) for a, b in zip(cleaned, cleaned[1:] + cleaned[:1])]
+    assert min(steps) > wing_offset.CROWD_STEP
+    # The corner is what the pair is there to say; only the second copy goes.
+    assert corner in cleaned
+
+
+def test_an_evenly_dense_nose_is_left_alone():
+    """The 1.5 mm wing's own root nose, which SolidWorks lofts as a solid:
+    0.035 mm steps, but between 0.07 mm ones. That is the shape, drawn to one
+    scale throughout, not a leftover of the trim."""
+    nose = [(1.633, 0.293), (1.596, 0.226), (1.566, 0.141), (1.547, 0.061),
+            (1.538, -0.006), (1.533, -0.078), (1.532, -0.114), (1.533, -0.149),
+            (1.536, -0.221), (1.544, -0.293), (1.566, -0.398), (1.611, -0.545)]
+    loop = nose + [(60.0, -2.0), (60.0, 2.0)]
+    assert wing_offset._uncrowd(loop) == loop
