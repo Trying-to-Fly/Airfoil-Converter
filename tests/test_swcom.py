@@ -329,15 +329,34 @@ def test_the_worker_reports_being_busy_while_a_call_is_in_flight():
 
 
 class FakeManager:
-    """The feature manager, which is where the rollback bar lives."""
+    """The feature manager, which is where the rollback bar lives.
 
-    def __init__(self, calls, refuse=()):
-        self.calls = calls
+    ``lies`` is SolidWorks 2026 as observed: ``EditRollback`` answering True
+    for a position it did not move the bar to.
+    """
+
+    def __init__(self, doc, refuse=(), lies=()):
+        self.doc = doc
         self.refuse = set(refuse)
+        self.lies = set(lies)
 
     def EditRollback(self, position, name):
-        self.calls.append(("EditRollback", position, name))
-        return position not in self.refuse
+        self.doc.calls.append(("EditRollback", position, name))
+        if position in self.refuse:
+            return False
+        if position not in self.lies:
+            self.doc.rolled_back = position != swcom.ROLLBACK_TO_END
+        return True
+
+
+class FakeFeature:
+    def __init__(self, doc):
+        self.doc = doc
+
+    @property
+    def IsRolledBack(self):
+        self.doc.calls.append(("IsRolledBack",))
+        return self.doc.rolled_back
 
 
 class FakeDoc:
@@ -348,13 +367,18 @@ class FakeDoc:
     method — which is the distinction :func:`swcom.call` exists to make.
     """
 
-    def __init__(self, refuse=()):
+    def __init__(self, refuse=(), lies=()):
         self.calls = []
-        self.manager = FakeManager(self.calls, refuse)
+        self.rolled_back = False
+        self.manager = FakeManager(self, refuse, lies)
 
     @property
     def FeatureManager(self):
         return self.manager
+
+    def FeatureByPositionReverse(self, number):
+        self.calls.append(("FeatureByPositionReverse", number))
+        return FakeFeature(self)
 
     @property
     def EditRebuild3(self):
@@ -371,8 +395,8 @@ class FakeApp:
         self.ActiveDoc = doc
 
 
-def rebuilding_session(refuse=()):
-    doc = FakeDoc(refuse)
+def rebuilding_session(refuse=(), lies=()):
+    doc = FakeDoc(refuse, lies)
     return swcom.Session(FakeApp(doc), (34, 0, 0), 1000), doc
 
 
@@ -408,26 +432,28 @@ def test_a_bar_that_will_not_move_is_an_error_not_a_silence():
         session.roll_back_to("wing_root_upper")
 
 
-def test_rolling_forward_asks_for_the_previous_position():
-    """Where the bar was, not the end: the user may have put it somewhere."""
+def test_rolling_forward_goes_to_the_end_and_checks_it_got_there():
+    """Never "previous position": on SolidWorks 2026 it answers True and moves
+    nothing, and the return of the call that does move it is not trusted
+    either — the last feature is asked."""
     session, doc = rebuilding_session()
+    session.roll_back_to("wing_root_upper")
+    assert doc.rolled_back
     session.roll_forward()
-    assert doc.calls == [("EditRollback", swcom.ROLLBACK_TO_PREVIOUS, "")]
-
-
-def test_rolling_forward_falls_back_to_the_end():
-    session, doc = rebuilding_session(refuse=[swcom.ROLLBACK_TO_PREVIOUS])
-    session.roll_forward()
-    assert doc.calls == [
-        ("EditRollback", swcom.ROLLBACK_TO_PREVIOUS, ""),
+    assert not doc.rolled_back
+    assert doc.calls[1:] == [
         ("EditRollback", swcom.ROLLBACK_TO_END, ""),
+        ("FeatureByPositionReverse", 0),
+        ("IsRolledBack",),
     ]
+    assert not any(c[0] == "EditRollback" and c[1] == swcom.ROLLBACK_TO_PREVIOUS
+                   for c in doc.calls)
 
 
-def test_a_tree_that_will_not_roll_forward_at_all_says_so():
+def test_a_tree_that_answers_yes_and_stays_rolled_back_is_an_error():
     """The one state worse than a slow export: half a part, handed back."""
-    session, _ = rebuilding_session(
-        refuse=[swcom.ROLLBACK_TO_PREVIOUS, swcom.ROLLBACK_TO_END]
-    )
+    session, doc = rebuilding_session(lies=[swcom.ROLLBACK_TO_END])
+    session.roll_back_to("wing_root_upper")
     with pytest.raises(SolidWorksError, match="could not be rolled forward"):
         session.roll_forward()
+    assert doc.rolled_back

@@ -109,9 +109,9 @@ SAVE_SILENT = 1
 SAVE_AS_COPY = 2
 
 # swMoveRollbackBarTo_e, read off the same library. The bar goes after the
-# wing's last curve feature to reload them, and back to where it was afterwards
-# — "previous position" rather than "end", so a bar the user had put somewhere
-# themselves is where they left it.
+# wing's last curve feature to reload them, and to the end afterwards. Not to
+# its "previous position": on SolidWorks 2026 that call answers True and
+# moves nothing, which left a part rolled back after every push.
 ROLLBACK_TO_END = 1
 ROLLBACK_TO_PREVIOUS = 2
 ROLLBACK_BEFORE_FEATURE = 3
@@ -884,17 +884,22 @@ class Session:
             raise SolidWorksError(f"The tree could not be rolled back to {name}.")
 
     def roll_forward(self) -> None:
-        """Put the bar back where it was, or failing that at the end.
+        """Put the bar at the end of the tree, and make sure it went there.
 
         A tree left rolled back looks like a part with half its features
-        missing, so this belongs in a ``finally``. "Previous position" is
-        asked for first because the user may have had the bar somewhere of
-        their own before any of this started.
+        missing, so this belongs in a ``finally``. "Previous position" would
+        be kinder to someone who had parked the bar somewhere of their own,
+        but on SolidWorks 2026 that call answers True and moves nothing, and a
+        push that believed it handed back lofts with no faces and the splits
+        and inserts under them gone. So the bar goes to the end, where it
+        stood for anyone who had not moved it — and since the answer has been
+        shown not to mean what it says, the last feature in the tree is asked
+        whether it is still rolled back.
         """
-        manager = call(self._active(), "FeatureManager")
-        if call(manager, "EditRollback", ROLLBACK_TO_PREVIOUS, ""):
-            return
-        if not call(manager, "EditRollback", ROLLBACK_TO_END, ""):
+        doc = self._active()
+        call(call(doc, "FeatureManager"), "EditRollback", ROLLBACK_TO_END, "")
+        last = call(doc, "FeatureByPositionReverse", 0)
+        if last is not None and call(last, "IsRolledBack"):
             raise SolidWorksError("The tree could not be rolled forward again.")
 
     def rebuild(self, force: bool = False) -> bool:
