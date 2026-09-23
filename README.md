@@ -219,7 +219,7 @@ window grows and shrinks sideways with it, so the form itself never moves.
 Press **Export** and the curves go straight in: any that are not there yet are
 imported and named, and any that are there have their points replaced. While
 that happens the rollback bar is parked just after the record's own curves and
-put back where it was afterwards — SolidWorks charges for everything standing
+moved to the end of the tree afterwards — SolidWorks charges for everything standing
 below a curve every time one is committed, which on a 397-feature part was the
 difference between 29 seconds for a wing and a quarter of an hour. The
 document is rebuilt once, at the end, and only what changed.
@@ -578,7 +578,7 @@ pip install pyinstaller pywin32
 build.bat
 ```
 
-This produces `dist\Airfoil Converter v1.5.1.exe`, a single self-contained file.
+This produces `dist\Airfoil Converter v1.6.exe`, a single self-contained file.
 If `build.bat` cannot find `pyinstaller`, use `python -m PyInstaller` instead —
 pip may have installed the scripts outside your PATH.
 

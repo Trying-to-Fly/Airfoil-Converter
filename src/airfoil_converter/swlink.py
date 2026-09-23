@@ -301,7 +301,11 @@ def _apply(
             sw.set_rebuild_suppressed(False)
 
     if result.touched:
-        result.rebuilt = bool(sw.rebuild())
+        # The rebuild's own answer is whether the part came out clean, and a
+        # part with a feature in error from before says False every time; what
+        # is recorded here is that the rebuild ran.
+        sw.rebuild()
+        result.rebuilt = True
 
 
 def _join(

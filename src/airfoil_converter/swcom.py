@@ -112,9 +112,9 @@ SAVE_SILENT = 1
 SAVE_AS_COPY = 2
 
 # swMoveRollbackBarTo_e, read off the same library. The bar goes after the
-# wing's last curve feature to reload them, and back to where it was afterwards
-# — "previous position" rather than "end", so a bar the user had put somewhere
-# themselves is where they left it.
+# wing's last curve feature to reload them, and to the end afterwards. Not to
+# its "previous position": on SolidWorks 2026 that call answers True and
+# moves nothing, which left a part rolled back after every push.
 ROLLBACK_TO_END = 1
 ROLLBACK_TO_PREVIOUS = 2
 ROLLBACK_BEFORE_FEATURE = 3
@@ -911,8 +911,20 @@ class Session:
         return self.rename_feature(created[0], name)
 
     def composite_sources(self, name: str) -> List[str]:
-        """The curves a composite joins, by name, in the order it holds them."""
+        """The curves a composite joins, by name, in the order it holds them.
+
+        Reading a feature's selections rolls the model back to just before it:
+        that is what ``AccessSelections`` does, and ``ReleaseSelectionAccess``
+        is what puts the bar back. The release takes no arguments and returns
+        nothing, so reaching it as an attribute — the way :func:`call` reaches
+        every other argument-less member — never ran it, and every push since
+        the joins were checked left the part rolled back to just before its
+        first composite. It is called outright here, and since that has been
+        wrong once, a tree that was forward before the read is checked
+        afterwards and rolled forward if it is not.
+        """
         doc = self._active()
+        was_forward = not self._rolled_back()
         data = call(self._curve_feature(name), "GetDefinition")
         if data is None or not call(data, "AccessSelections", doc, _null_dispatch()):
             raise SolidWorksError(f"The curves {name} joins could not be read.")
@@ -921,7 +933,9 @@ class Session:
             entities = call(data, "GetEntitiesToJoin", kinds) or ()
             return [str(call(e, "Name")) for e in entities]
         finally:
-            call(data, "ReleaseSelectionAccess")
+            data.ReleaseSelectionAccess()
+            if was_forward and self._rolled_back():
+                self.roll_forward()
 
     def set_rebuild_suppressed(self, suppressed: bool) -> None:
         """Hold the rebuild off while several curves are reloaded.
@@ -948,18 +962,27 @@ class Session:
             raise SolidWorksError(f"The tree could not be rolled back to {name}.")
 
     def roll_forward(self) -> None:
-        """Put the bar back where it was, or failing that at the end.
+        """Put the bar at the end of the tree, and make sure it went there.
 
         A tree left rolled back looks like a part with half its features
-        missing, so this belongs in a ``finally``. "Previous position" is
-        asked for first because the user may have had the bar somewhere of
-        their own before any of this started.
+        missing, so this belongs in a ``finally``. "Previous position" would
+        be kinder to someone who had parked the bar somewhere of their own,
+        but on SolidWorks 2026 that call answers True and moves nothing, and a
+        push that believed it handed back lofts with no faces and the splits
+        and inserts under them gone. So the bar goes to the end, where it
+        stood for anyone who had not moved it — and since the answer has been
+        shown not to mean what it says, the last feature in the tree is asked
+        whether it is still rolled back.
         """
-        manager = call(self._active(), "FeatureManager")
-        if call(manager, "EditRollback", ROLLBACK_TO_PREVIOUS, ""):
-            return
-        if not call(manager, "EditRollback", ROLLBACK_TO_END, ""):
+        doc = self._active()
+        call(call(doc, "FeatureManager"), "EditRollback", ROLLBACK_TO_END, "")
+        if self._rolled_back():
             raise SolidWorksError("The tree could not be rolled forward again.")
+
+    def _rolled_back(self) -> bool:
+        """Is any of the tree rolled back? The last feature is the one to ask."""
+        last = call(self._active(), "FeatureByPositionReverse", 0)
+        return bool(last is not None and call(last, "IsRolledBack"))
 
     def rebuild(self, force: bool = False) -> bool:
         """Rebuild the active document. Called once, after the last curve.

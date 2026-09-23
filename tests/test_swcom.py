@@ -412,19 +412,93 @@ class FakeFeature:
         return self.next
 
 
-class FakeManager:
-    """The feature manager: the rollback bar, the tree listing, and the two
-    calls that cap a surface loft into a solid."""
+class FakeLastFeature:
+    """The last feature in the tree, which is the one worth asking whether any
+    of the tree is still rolled back."""
 
-    def __init__(self, calls, doc, refuse=()):
-        self.calls = calls
+    def __init__(self, doc):
         self.doc = doc
+
+    @property
+    def IsRolledBack(self):
+        self.doc.calls.append(("IsRolledBack",))
+        return self.doc.rolled_back
+
+
+class FakeCompositeData:
+    """A composite curve's definition: reading it rolls the model back, and
+    the release is a Sub — no arguments, no result — that rolls it forward
+    again, unless ``release_restores`` says this SolidWorks does not."""
+
+    def __init__(self, doc, sources, release_restores=True):
+        self.doc = doc
+        self.sources = sources
+        self.release_restores = release_restores
+
+    def AccessSelections(self, top_doc, component):
+        self.doc.calls.append(("AccessSelections",))
+        self.doc.rolled_back = True
+        return True
+
+    def GetEntitiesToJoin(self, kinds):
+        self.doc.calls.append(("GetEntitiesToJoin",))
+        return [FakeEntity(name) for name in self.sources]
+
+    def ReleaseSelectionAccess(self):
+        self.doc.calls.append(("ReleaseSelectionAccess",))
+        if self.release_restores:
+            self.doc.rolled_back = False
+
+
+class FakeEntity:
+    def __init__(self, name):
+        self.Name = name
+
+
+class FakeCompositeFeature:
+    """A composite in the tree walk ``_curve_feature`` does, carrying the
+    definition that takes and releases the selection access."""
+
+    def __init__(self, doc, name, sources, release_restores=True):
+        self._name = name
+        self.next = None
+        self.GetDefinition = FakeCompositeData(doc, sources, release_restores)
+
+    @property
+    def Name(self):
+        return self._name
+
+    @property
+    def GetTypeName2(self):
+        return swcom.COMPOSITE_TYPE_NAME
+
+    @property
+    def GetNextFeature(self):
+        return self.next
+
+
+class FakeManager:
+    """The feature manager: the rollback bar, the tree listing, and the call
+    that knits a capped loft into a solid.
+
+    ``lies`` is SolidWorks 2026 as observed: ``EditRollback`` answering True
+    for a position it did not move the bar to.
+    """
+
+    def __init__(self, doc, refuse=(), lies=()):
+        self.doc = doc
+        self.calls = doc.calls
         self.refuse = set(refuse)
+        self.lies = set(lies)
         self.refuse_knit = False
 
     def EditRollback(self, position, name):
-        self.calls.append(("EditRollback", position, name))
-        return position not in self.refuse
+        self.doc.calls.append(("EditRollback", position, name))
+        if position in self.refuse:
+            return False
+        if position not in self.lies:
+            self.doc.rolled_back = position != swcom.ROLLBACK_TO_END
+        return True
 
     def GetFeatures(self, top_only):
         return list(self.doc.features)
@@ -454,17 +528,26 @@ class FakeDoc:
     method — which is the distinction :func:`swcom.call` exists to make.
     """
 
-    def __init__(self, refuse=(), features=()):
+    def __init__(self, refuse=(), lies=(), features=()):
         self.calls = []
         self.features = []
+        self.rolled_back = False
         self.refuse_cap = False
-        self.manager = FakeManager(self.calls, self, refuse)
+        self.manager = FakeManager(self, refuse, lies)
         self.extension = FakeExtension(self.calls)
+        self.GetTitle = "Wing.SLDPRT"
         for name in features:
             self.add(name)
 
     def add(self, name, type_name="RefCurve", body=None, points=None):
-        made = FakeFeature(name, type_name, body, points)
+        return self._append(FakeFeature(name, type_name, body, points))
+
+    def add_composite(self, name, sources, release_restores=True):
+        """A composite curve in the tree, whose definition is the thing that
+        takes the selection access and gives it back."""
+        return self._append(FakeCompositeFeature(self, name, sources, release_restores))
+
+    def _append(self, made):
         if self.features:
             self.features[-1].next = made
         self.features.append(made)
@@ -473,6 +556,10 @@ class FakeDoc:
     @property
     def FirstFeature(self):
         return self.features[0] if self.features else None
+
+    def FeatureByPositionReverse(self, number):
+        self.calls.append(("FeatureByPositionReverse", number))
+        return FakeLastFeature(self)
 
     @property
     def SelectionManager(self):
@@ -517,8 +604,8 @@ class FakeApp:
         self.ActiveDoc = doc
 
 
-def rebuilding_session(refuse=(), features=()):
-    doc = FakeDoc(refuse, features)
+def rebuilding_session(refuse=(), lies=(), features=()):
+    doc = FakeDoc(refuse, lies, features)
     return swcom.Session(FakeApp(doc), (34, 0, 0), 1000), doc
 
 
@@ -561,29 +648,71 @@ def test_a_bar_that_will_not_move_is_an_error_not_a_silence():
         session.roll_back_to("wing_root_upper")
 
 
-def test_rolling_forward_asks_for_the_previous_position():
-    """Where the bar was, not the end: the user may have put it somewhere."""
+def test_rolling_forward_goes_to_the_end_and_checks_it_got_there():
+    """Never "previous position": on SolidWorks 2026 it answers True and moves
+    nothing, and the return of the call that does move it is not trusted
+    either — the last feature is asked."""
     session, doc = rebuilding_session()
+    session.roll_back_to("wing_root_upper")
+    assert doc.rolled_back
     session.roll_forward()
-    assert doc.calls == [("EditRollback", swcom.ROLLBACK_TO_PREVIOUS, "")]
-
-
-def test_rolling_forward_falls_back_to_the_end():
-    session, doc = rebuilding_session(refuse=[swcom.ROLLBACK_TO_PREVIOUS])
-    session.roll_forward()
-    assert doc.calls == [
-        ("EditRollback", swcom.ROLLBACK_TO_PREVIOUS, ""),
+    assert not doc.rolled_back
+    assert doc.calls[1:] == [
         ("EditRollback", swcom.ROLLBACK_TO_END, ""),
+        ("FeatureByPositionReverse", 0),
+        ("IsRolledBack",),
     ]
+    assert not any(c[0] == "EditRollback" and c[1] == swcom.ROLLBACK_TO_PREVIOUS
+                   for c in doc.calls)
 
 
-def test_a_tree_that_will_not_roll_forward_at_all_says_so():
+@pytest.fixture
+def win32(monkeypatch):
+    """pywin32's typed nulls and by-ref variants, which the read needs to
+    build even though nothing here marshals them: this suite runs on Linux."""
+    import types
+
+    stub = types.SimpleNamespace(VT_DISPATCH=9, VT_BYREF=0x4000, VT_VARIANT=12, VT_I4=3, VT_BOOL=11)
+    monkeypatch.setattr(swcom, "pythoncom", stub, raising=False)
+    monkeypatch.setattr(swcom, "VARIANT", lambda kind, value: (kind, value), raising=False)
+
+
+def test_reading_what_a_composite_joins_releases_the_access_it_took(win32):
+    """AccessSelections rolls the model back to just before the feature, and
+    ReleaseSelectionAccess is the Sub that puts it forward. Reached as an
+    attribute it never ran, and every push left the part rolled back."""
+    session, doc = rebuilding_session()
+    doc.add_composite("rib_joined", ["rib_airfoil", "rib_airfoil_te"])
+    assert session.composite_sources("rib_joined") == ["rib_airfoil", "rib_airfoil_te"]
+    assert ("ReleaseSelectionAccess",) in doc.calls
+    assert not doc.rolled_back
+    assert not any(c[0] == "EditRollback" for c in doc.calls)   # the release was enough
+
+
+def test_a_release_that_leaves_the_tree_rolled_back_is_followed_by_a_roll_forward(win32):
+    session, doc = rebuilding_session()
+    doc.add_composite("rib_joined", ["a", "b"], release_restores=False)
+    assert session.composite_sources("rib_joined") == ["a", "b"]
+    assert not doc.rolled_back
+    assert ("EditRollback", swcom.ROLLBACK_TO_END, "") in doc.calls
+
+
+def test_a_tree_the_user_had_rolled_back_is_left_rolled_back_by_a_read(win32):
+    session, doc = rebuilding_session()
+    doc.add_composite("rib_joined", ["a", "b"], release_restores=False)
+    doc.rolled_back = True
+    session.composite_sources("rib_joined")
+    assert doc.rolled_back
+    assert not any(c[0] == "EditRollback" for c in doc.calls)
+
+
+def test_a_tree_that_answers_yes_and_stays_rolled_back_is_an_error():
     """The one state worse than a slow export: half a part, handed back."""
-    session, _ = rebuilding_session(
-        refuse=[swcom.ROLLBACK_TO_PREVIOUS, swcom.ROLLBACK_TO_END]
-    )
+    session, doc = rebuilding_session(lies=[swcom.ROLLBACK_TO_END])
+    session.roll_back_to("wing_root_upper")
     with pytest.raises(SolidWorksError, match="could not be rolled forward"):
         session.roll_forward()
+    assert doc.rolled_back
 
 
 # -- capping a surface loft into a solid ------------------------------------
