@@ -386,12 +386,17 @@ class FakeBody:
 
 
 class FakeFace:
-    def __init__(self, body):
+    def __init__(self, body, area=0.0):
         self.body = body
+        self.area = area          # square millimetres, as the tests think
 
     @property
     def GetBody(self):
         return self.body
+
+    @property
+    def GetArea(self):
+        return self.area / 1e6    # square metres, as SolidWorks answers
 
 
 class FakeDefinition:
@@ -403,16 +408,39 @@ class FakeDefinition:
 class FakeFeature:
     """A feature in the tree. Its name is a property both ways, as COM's is."""
 
-    def __init__(self, name, type_name="RefCurve", body=None, points=None):
+    def __init__(self, name, type_name="RefCurve", body=None, points=None, area=0.0):
         self._name = name
         self._type = type_name
         self.body = body
         self.points = points
+        self.area = area
+        self.suppressed = False
+        self.doc = None
         self.next = None
 
     @property
     def GetFaces(self):
-        return [FakeFace(self.body)] if self.body else None
+        return [FakeFace(self.body, self.area)] if self.body else None
+
+    @property
+    def IsSuppressed(self):
+        return self.suppressed
+
+    def SetSuppression2(self, action, configuration, names):
+        self.doc.calls.append(("SetSuppression2", self._name, action))
+        if self._name in self.doc.wont_unsuppress and action == swcom.UNSUPPRESS:
+            return False
+        self.suppressed = action == swcom.SUPPRESS
+        # What a body feature carries with it, and does not bring back.
+        if action == swcom.SUPPRESS:
+            for child in self.doc.children.get(self._name, ()):
+                child.suppressed = True
+        return True
+
+    def Select2(self, append, mark):
+        self.doc.calls.append(("Select2", self._name))
+        self.doc.selected = self
+        return True
 
     @property
     def GetDefinition(self):
@@ -485,7 +513,13 @@ class FakeCompositeFeature:
     def __init__(self, doc, name, sources, release_restores=True):
         self._name = name
         self.next = None
+        self.doc = doc
+        self.suppressed = False
         self.GetDefinition = FakeCompositeData(doc, sources, release_restores)
+
+    @property
+    def IsSuppressed(self):
+        return self.suppressed
 
     @property
     def Name(self):
@@ -530,17 +564,34 @@ class FakeManager:
         self.calls.append(
             ("InsertSewRefSurface", gap_filters, form_solid, merge, tolerance, gap_range)
         )
-        return None if self.refuse_knit else self.doc.add("Surface-Knit1", "SewRefSurface")
+        if self.refuse_knit:
+            return None
+        if form_solid and self.doc.knit_makes_solid:
+            self.doc.solids += 1
+        return self.doc.add("Surface-Knit1", "SewRefSurface",
+                            body=FakeBody("Surface-Knit1", []))
 
 
 class FakeExtension:
-    def __init__(self, calls):
-        self.calls = calls
+    def __init__(self, doc):
+        self.doc = doc
+        self.calls = doc.calls
         self.refuse = set()
 
     def SelectByID2(self, name, kind, x, y, z, append, mark, callout, options):
         self.calls.append(("SelectByID2", name, kind, append, mark))
         return name not in self.refuse
+
+    def DeleteSelection2(self, options):
+        gone = self.doc.selected
+        self.calls.append(("DeleteSelection2", gone._name if gone else None))
+        if gone is None:
+            return False
+        self.doc.features = [f for f in self.doc.features if f is not gone]
+        for a, b in zip(self.doc.features, self.doc.features[1:] + [None]):
+            a.next = b
+        self.doc.selected = None
+        return True
 
 
 class FakeDoc:
@@ -556,14 +607,24 @@ class FakeDoc:
         self.features = []
         self.rolled_back = False
         self.refuse_cap = False
+        self.cap_area = 4046.8       # square millimetres the next cap comes out at
+        self.solids = 16             # what a real part already holds
+        self.knit_makes_solid = True
+        self.selected = None
+        self.children = {}           # what a feature's suppression carries with it
+        self.wont_unsuppress = set()
         self.manager = FakeManager(self, refuse, lies)
-        self.extension = FakeExtension(self.calls)
+        self.extension = FakeExtension(self)
         self.GetTitle = "Wing.SLDPRT"
         for name in features:
             self.add(name)
 
-    def add(self, name, type_name="RefCurve", body=None, points=None):
-        return self._append(FakeFeature(name, type_name, body, points))
+    def add(self, name, type_name="RefCurve", body=None, points=None, area=0.0):
+        return self._append(FakeFeature(name, type_name, body, points, area))
+
+    def GetBodies2(self, kind, visible_only):
+        self.calls.append(("GetBodies2", kind, visible_only))
+        return [object()] * (self.solids if kind == swcom.SOLID_BODY else 0)
 
     def add_composite(self, name, sources, release_restores=True):
         """A composite curve in the tree, whose definition is the thing that
@@ -571,6 +632,7 @@ class FakeDoc:
         return self._append(FakeCompositeFeature(self, name, sources, release_restores))
 
     def _append(self, made):
+        made.doc = self
         if self.features:
             self.features[-1].next = made
         self.features.append(made)
@@ -597,7 +659,8 @@ class FakeDoc:
         self.calls.append(("InsertPlanarRefSurface",))
         if self.refuse_cap:
             return False
-        self.add("Surface-Plane1", "RefSurface", body=FakeBody("Surface-Plane1", []))
+        self.add("Surface-Plane1", "RefSurface",
+                 body=FakeBody("Surface-Plane1", []), area=self.cap_area)
         return True
 
     @property
@@ -744,36 +807,52 @@ def test_a_tree_that_answers_yes_and_stays_rolled_back_is_an_error():
 # pinned here is what the app sends it.
 
 
-def wing_body():
+def wing_body(tip_edges=3):
     """A surface loft's body: a loop at each end and the seams between them.
 
     Metres. The root loop stands in the plane x = 0 and the tip loop in
-    x = -0.998, which is where a wing a metre long puts them.
+    x = -0.998, which is where a wing a metre long puts them. A fourth edge at
+    the tip is the sliver face the real loft grew.
     """
     root = [FakeEdge([], f"root{k}", (0.0, 0.0, -0.05 * k), (0.0, 0.0, -0.05 * (k + 1)))
             for k in range(3)]
     tip = [FakeEdge([], f"tip{k}", (-0.998, 0.0, -0.05 * k), (-0.998, 0.0, -0.05 * (k + 1)))
-           for k in range(3)]
+           for k in range(tip_edges)]
     seams = [FakeEdge([], f"seam{k}", (0.0, 0.0, -0.05 * k), (-0.998, 0.0, -0.05 * k))
              for k in range(3)]
     return root, tip, seams
 
 
-def capping_session(refuse_cap=False):
-    root, tip, seams = wing_body()
+# A wing's end profile is a composite of three curves, and the loop they make
+# encloses 1,500 mm²: a triangle 20 mm deep over a 150 mm chord.
+def profile_pieces(x):
+    return (
+        ("upper", [(x, 0.0, 0.0), (x, 20.0, -30.0)]),
+        ("lower", [(x, 20.0, -30.0), (x, 0.0, -150.0)]),
+        ("te", [(x, 0.0, -150.0), (x, 0.0, 0.0)]),
+    )
+
+
+PROFILE_AREA = 1500.0
+
+
+def capping_session(refuse_cap=False, tip_edges=3, cap_area=4046.8):
+    root, tip, seams = wing_body(tip_edges)
     session, doc = rebuilding_session()
     for edge in root + tip + seams:
         edge.calls = doc.calls
     doc.add("wing_loft_surface", "BlendRefSurface",
             body=FakeBody("Surface-Loft1", root + tip + seams))
-    # The profile the loft ran through at the root: a loop in the plane x = 0.
-    doc.add("root_joined", "CurveInFile",
-            points=[(0.0, 0.0, 0.0), (0.0, 20.0, -30.0), (0.0, 0.0, -150.0), (0.0, -10.0, -30.0)])
+    for end, x in (("root", 0.0), ("tip", -998.0)):
+        for tag, points in profile_pieces(x):
+            doc.add(f"{end}_{tag}", "CurveInFile", points=points)
+        doc.add_composite(f"{end}_joined", [f"{end}_{tag}" for tag, _ in profile_pieces(x)])
     doc.refuse_cap = refuse_cap
+    doc.cap_area = cap_area
     return session, doc
 
 
-def test_a_cap_takes_the_end_edges_that_lie_in_the_profile_s_plane(no_variants):
+def test_a_cap_takes_the_end_edges_that_lie_in_the_profile_s_plane(win32):
     """The loft's own end edges, told apart by the plane the profile lies in.
     Neither a composite curve nor the curves it joins will do as a boundary —
     SolidWorks refuses those outright, which is what sent this here."""
@@ -789,52 +868,81 @@ def test_a_cap_takes_the_end_edges_that_lie_in_the_profile_s_plane(no_variants):
     assert [f.Name for f in doc.features][-1] == "root_cap"
 
 
-def test_a_cap_at_the_other_end_takes_the_other_loop(no_variants):
+def test_a_cap_at_the_other_end_takes_the_other_loop(win32):
     session, doc = capping_session()
-    doc.add("tip_joined", "CurveInFile",
-            points=[(-998.0, 0.0, 0.0), (-998.0, 10.0, -30.0), (-998.0, 0.0, -150.0)])
     session.cap_end("wing_loft_surface", "tip_joined", "tip_cap")
     assert [c[1] for c in doc.calls if c[0] == "Select4"] == ["tip0", "tip1", "tip2"]
 
 
-def test_a_composite_profile_is_read_through_the_curves_it_joins(no_variants, monkeypatch):
+def test_a_composite_profile_is_read_through_the_curves_it_joins(win32):
     """A wing's end profile is a composite of three curves, and a composite has
     no points of its own to read."""
     session, doc = capping_session()
-    doc.add("root_composite", "CompositeCurve")
-    doc.add("root_upper", "CurveInFile", points=[(0.0, 0.0, 0.0), (0.0, 20.0, -30.0)])
-    doc.add("root_lower", "CurveInFile", points=[(0.0, 0.0, -150.0), (0.0, -10.0, -30.0)])
-    monkeypatch.setattr(
-        swcom.Session, "composite_sources", lambda self, name: ["root_upper", "root_lower"]
-    )
-    session.cap_end("wing_loft_surface", "root_composite", "root_cap")
-    assert [c[1] for c in doc.calls if c[0] == "Select4"] == ["root0", "root1", "root2"]
+    assert len(session.profile_pieces("root_joined")) == 3
+    assert ("GetEntitiesToJoin",) in doc.calls
+    assert ("ReleaseSelectionAccess",) in doc.calls
+    assert session.profile_points("root_joined")[0] == (0.0, 0.0, 0.0)
 
 
-def test_an_end_with_no_edges_in_that_plane_says_so(no_variants):
+def test_an_end_with_no_edges_in_that_plane_says_so(win32):
     session, doc = capping_session()
-    doc.add("nowhere", "CurveInFile",
+    doc.add("nowhere_only", "CurveInFile",
             points=[(500.0, 0.0, 0.0), (500.0, 20.0, -30.0), (500.0, 0.0, -150.0)])
+    doc.add_composite("nowhere", ["nowhere_only"])
     with pytest.raises(SolidWorksError, match="No edge of wing_loft_surface lies in the plane"):
         session.cap_end("wing_loft_surface", "nowhere", "root_cap")
 
 
-def test_a_cap_solidworks_refuses_says_how_many_edges_it_was_given(no_variants):
-    """What a sliver face at the tip looks like from here: the loop is there,
-    and nothing will put a surface across it."""
+def test_an_end_with_more_edges_than_the_profile_has_pieces_is_the_sliver(win32):
+    """What a fourth edge at the tip means: the loft has grown a sliver face
+    there, and the surface SolidWorks puts across its little loop is not the
+    end of the wing. Refused before anything is made."""
+    session, doc = capping_session(tip_edges=4)
+    with pytest.raises(SolidWorksError, match="has 4 edges where the profile has 3 pieces"):
+        session.cap_end("wing_loft_surface", "tip_joined", "tip_cap")
+    assert ("InsertPlanarRefSurface",) not in doc.calls
+
+
+def test_a_cap_that_does_not_span_the_end_is_taken_out_again(win32):
+    """0.078 mm² against 4,046.8 on the real part: a face across a sliver's own
+    loop, which SolidWorks made and answered True to."""
+    session, doc = capping_session(cap_area=0.078)
+    with pytest.raises(SolidWorksError, match=r"0\.078 mm² against the section's 1500\.0 mm²"):
+        session.cap_end("wing_loft_surface", "root_joined", "root_cap")
+    assert ("DeleteSelection2", "Surface-Plane1") in doc.calls
+    assert "Surface-Plane1" not in [f.Name for f in doc.features]
+
+
+def test_a_cap_just_under_the_section_is_taken_for_the_section(win32):
+    """The face is bounded by splines and the area compared with it is the
+    polygon through the profile's points, so they are not equal; the line is
+    half, which nothing real comes near."""
+    session, _ = capping_session(cap_area=PROFILE_AREA * 0.99)
+    assert session.cap_end("wing_loft_surface", "root_joined", "root_cap") == "root_cap"
+
+
+def test_a_cap_solidworks_refuses_says_how_many_edges_it_was_given(win32):
+    """What a sliver face at the tip used to look like from here: the loop is
+    there, and nothing will put a surface across it."""
     session, _ = capping_session(refuse_cap=True)
     with pytest.raises(SolidWorksError, match="would not put a planar surface across the 3 edges"):
         session.cap_end("wing_loft_surface", "root_joined", "root_cap")
 
 
-def test_a_knit_selects_the_bodies_by_name_and_asks_for_a_solid(no_variants):
-    """Bodies, not features: IBody2 has no Select4 and Select2 raises through
-    pywin32, so each one is picked out by the name it carries."""
+def knitting_session(makes_solid=True):
     session, doc = rebuilding_session()
     for feature, body in (("wing_loft_surface", "Surface-Loft1"),
                           ("root_cap", "Surface-Plane1"),
                           ("tip_cap", "Surface-Plane2")):
         doc.add(feature, "RefSurface", body=FakeBody(body, []))
+    doc.knit_makes_solid = makes_solid
+    return session, doc
+
+
+def test_a_knit_selects_the_bodies_by_name_and_asks_for_a_solid(no_variants):
+    """Bodies, not features: IBody2 has no Select4 and Select2 raises through
+    pywin32, so each one is picked out by the name it carries."""
+    session, doc = knitting_session()
 
     assert session.knit_to_solid(
         ["wing_loft_surface", "root_cap", "tip_cap"], "wing_loft") == "wing_loft"
@@ -846,26 +954,115 @@ def test_a_knit_selects_the_bodies_by_name_and_asks_for_a_solid(no_variants):
     assert [c for c in doc.calls if c[0] == "InsertSewRefSurface"] == [
         ("InsertSewRefSurface", True, True, False, swcom.KNIT_TOLERANCE, swcom.KNIT_GAP_RANGE)
     ]
+    # Counted either side, because the call answers the same way whichever it did.
+    assert [c for c in doc.calls if c[0] == "GetBodies2"] == [
+        ("GetBodies2", swcom.SOLID_BODY, False), ("GetBodies2", swcom.SOLID_BODY, False),
+    ]
+
+
+def test_a_knit_that_sews_a_sheet_is_not_a_solid_and_says_so(no_variants):
+    """The 1.30 set at every guide: three sheets went in, one sheet came out,
+    the feature was there and the call answered True."""
+    session, doc = knitting_session(makes_solid=False)
+    before = doc.solids
+
+    with pytest.raises(swcom.NotASolid, match="sewed them into a sheet rather than a solid"):
+        session.knit_to_solid(["wing_loft_surface", "root_cap", "tip_cap"], "wing_loft")
+    assert doc.solids == before
+    assert ("DeleteSelection2", "Surface-Knit1") in doc.calls
+    assert "Surface-Knit1" not in [f.Name for f in doc.features]
+
+
+def test_a_sewn_sheet_is_still_a_solidworks_error_to_anything_that_cares():
+    """So that every handler that already catches one keeps working."""
+    assert issubclass(swcom.NotASolid, SolidWorksError)
 
 
 def test_a_knit_can_be_asked_for_a_plain_surface_instead(no_variants):
-    session, doc = rebuilding_session()
-    for feature in ("a", "b"):
-        doc.add(feature, "RefSurface", body=FakeBody("Body-" + feature, []))
-    session.knit_to_solid(["a", "b"], "knitted", solid=False)
+    session, doc = knitting_session(makes_solid=False)
+    session.knit_to_solid(["wing_loft_surface", "root_cap"], "knitted", solid=False)
     assert [c[2] for c in doc.calls if c[0] == "InsertSewRefSurface"] == [False]
+    # Nothing to count: a surface knit was never going to make a body.
+    assert not [c for c in doc.calls if c[0] == "GetBodies2"]
 
 
 def test_a_knit_that_will_not_form_a_solid_says_what_it_was_given(no_variants):
-    session, doc = rebuilding_session()
-    for feature in ("a", "b"):
-        doc.add(feature, "RefSurface", body=FakeBody("Body-" + feature, []))
+    session, doc = knitting_session()
     doc.manager.refuse_knit = True
-    with pytest.raises(SolidWorksError, match="would not knit a and b into a solid"):
-        session.knit_to_solid(["a", "b"], "knitted")
+    with pytest.raises(SolidWorksError, match="would not knit wing_loft_surface and root_cap"):
+        session.knit_to_solid(["wing_loft_surface", "root_cap"], "knitted")
 
 
 def test_a_knit_of_one_surface_is_refused_before_solidworks_sees_it():
     session, _ = rebuilding_session(features=["a"])
     with pytest.raises(SolidWorksError, match="at least two surfaces"):
         session.knit_to_solid(["a"], "knitted")
+
+
+# -- putting a suppression cascade back -------------------------------------
+
+
+def suppression_session():
+    """A body feature with what was built on it, in tree order."""
+    session, doc = rebuilding_session()
+    for name in ("wing_loft", "Split1", "Sketch9<3>", "Insert1", "Plane7", "other_loft"):
+        doc.add(name)
+    doc.children["wing_loft"] = [f for f in doc.features if f.Name != "wing_loft"][:4]
+    return session, doc
+
+
+def test_the_state_of_every_feature_is_read_in_tree_order():
+    session, doc = suppression_session()
+    state = session.suppression_state()
+    assert [item.name for item in state] == [
+        "wing_loft", "Split1", "Sketch9<3>", "Insert1", "Plane7", "other_loft"]
+    assert not any(item.suppressed for item in state)
+
+
+def test_suppressing_a_body_feature_carries_what_was_built_on_it():
+    """Which is the whole difficulty: unsuppressing the parent brings none of
+    them back, and one of them is named ``Sketch9<3>``, which cannot be looked
+    up again."""
+    session, doc = suppression_session()
+    state = session.suppression_state()
+    session.set_suppressed("wing_loft", True)
+    assert [f.Name for f in doc.features if f.suppressed] == [
+        "wing_loft", "Split1", "Sketch9<3>", "Insert1", "Plane7"]
+
+    session.set_suppressed("wing_loft", False)
+    assert [f.Name for f in doc.features if f.suppressed] == [
+        "Split1", "Sketch9<3>", "Insert1", "Plane7"]
+
+    assert session.restore_suppression(state) == []
+    assert not [f.Name for f in doc.features if f.suppressed]
+
+
+def test_what_was_already_suppressed_is_left_where_it_was():
+    session, doc = suppression_session()
+    doc.features[-1].suppressed = True          # the user had this one off
+    state = session.suppression_state()
+    session.set_suppressed("wing_loft", True)
+    assert session.restore_suppression(state) == []
+    assert [f.Name for f in doc.features if f.suppressed] == ["other_loft"]
+    # Nothing was said to the feature that had not moved.
+    assert not [c for c in doc.calls if c[0] == "SetSuppression2" and c[1] == "other_loft"]
+
+
+def test_the_restore_works_down_the_tree_from_the_parent():
+    session, doc = suppression_session()
+    state = session.suppression_state()
+    session.set_suppressed("wing_loft", True)
+    doc.calls.clear()
+    session.restore_suppression(state)
+    assert [c[1] for c in doc.calls if c[0] == "SetSuppression2"] == [
+        "wing_loft", "Split1", "Sketch9<3>", "Insert1", "Plane7"]
+
+
+def test_a_feature_that_will_not_come_back_is_named():
+    """A part handed back with features suppressed is worth saying out loud."""
+    session, doc = suppression_session()
+    state = session.suppression_state()
+    session.set_suppressed("wing_loft", True)
+    doc.wont_unsuppress = {"Sketch9<3>"}
+    assert session.restore_suppression(state) == ["Sketch9<3>"]
+    assert [f.Name for f in doc.features if f.suppressed] == ["Sketch9<3>"]

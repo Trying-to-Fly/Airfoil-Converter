@@ -31,7 +31,7 @@ import os
 import re
 import shutil
 from dataclasses import dataclass
-from typing import List, Optional, Protocol, Sequence, Tuple
+from typing import Any, List, Optional, Protocol, Sequence, Tuple
 
 from . import export, store
 from .export import (
@@ -52,6 +52,7 @@ from .swcom import (
     LOFT_SURFACE_TYPE_NAME,
     LOFT_TYPE_NAME,
     DocInfo,
+    NotASolid,
     SolidWorksError,
 )
 
@@ -140,6 +141,9 @@ class SolidWorks(Protocol):
     def rename_feature(self, current: str, new: str) -> str: ...
     def delete_feature(self, name: str) -> None: ...
     def set_suppressed(self, name: str, suppressed: bool) -> None: ...
+    # What is handed back is held by feature, not by name, so it is opaque here.
+    def suppression_state(self) -> Any: ...
+    def restore_suppression(self, state: Any) -> List[str]: ...
     # No argument: this module only ever rebuilds what changed.
     def rebuild(self) -> bool: ...
     def export_step(self, path: str) -> None: ...
@@ -373,9 +377,17 @@ def _cap_into_solid(sw: SolidWorks, result: LoftResult) -> None:
             continue
         try:
             result.feature = sw.knit_to_solid([result.feature] + caps, plan.name)
+        except NotASolid as exc:
+            # Sewn, but into a sheet: the two caps and the loft do not close a
+            # volume between them. That is the same kind of fault as an end
+            # that will not cap, and on the wing it was found on the next rung
+            # down was the one that worked.
+            note = str(exc)
+            left += _take_out(sw, caps)
+            continue
         except SolidWorksError as exc:
-            # Three surfaces that will not knit is not something fewer guides
-            # would mend, so the ladder stops here.
+            # A knit SolidWorks would not run at all is not something fewer
+            # guides would mend, so the ladder stops here.
             note = str(exc)
             left += _take_out(sw, caps)
             break
@@ -478,11 +490,18 @@ def loft_and_export(
         if not result.ok:
             continue
         others = [name for name in bodies if name != result.feature]
-        hidden: List[str] = []
+        # Suppressing a body feature suppresses everything built on it — on one
+        # real part, 74 features — and unsuppressing it brings none of them
+        # back. So what the tree looked like before is written down first, and
+        # every feature that moved is put back from that afterwards, by feature
+        # rather than by name: some of what a cascade reaches is named
+        # ``Sketch9<3>``, which nothing can look up again. The walk costs about
+        # ten seconds on a part of 400 features, twice per loft, which is a
+        # price a diagnostic export can pay.
+        state = sw.suppression_state()
         try:
             for name in others:
                 sw.set_suppressed(name, True)
-                hidden.append(name)
             sw.rebuild()
             path = os.path.join(step_folder, result.plan.name + ".STEP")
             sw.export_step(path)
@@ -490,15 +509,12 @@ def loft_and_export(
         except SolidWorksError as exc:
             result.error = str(exc)
         finally:
-            errors = []
-            for name in hidden:
-                try:
-                    sw.set_suppressed(name, False)
-                except SolidWorksError as exc:
-                    errors.append(str(exc))
+            left = sw.restore_suppression(state)
             sw.rebuild()
-            if errors and result.ok:
-                result.error = "; ".join(errors)
+            if left and result.ok:
+                result.error = (
+                    "the part was left with " + ", ".join(left) + " suppressed"
+                )
     return results
 
 

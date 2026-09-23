@@ -139,6 +139,19 @@ ROLLBACK_AFTER_FEATURE = 4
 # no arguments, a boolean back, 0.2 s. A fill over the same edges works too and
 # is slower, so it is not used.
 
+# swBodyType_e, as the help's own examples name it and as a part answered on
+# 2026-09-22: solid bodies at 0, sheet bodies at 1.
+SOLID_BODY = 0
+SHEET_BODY = 1
+
+# A cap has to span the end it is put across, and the only way to know that it
+# did is its area. Half the profile's own area is the line, which is nowhere
+# near anything real: a cap that spans the section comes out within a percent
+# of the polygon through the profile's points, and the one that sent this here
+# was 0.078 mm² against 4,046.8 — a face across a sliver's little loop rather
+# than across the wing.
+CAP_AREA_SHARE = 0.5
+
 # An end loop's edges lie in the plane of the profile the loft ran through
 # there; the edges that run root to tip do not. This is how far off that plane
 # an end point may sit and still count as on it, in millimetres. The edges
@@ -175,6 +188,15 @@ class NotRunning(SolidWorksError):
 
 class WrongVersion(SolidWorksError):
     """Every reachable session is older than this app supports."""
+
+
+class NotASolid(SolidWorksError):
+    """A knit that ran, made its feature, and left a sheet body behind.
+
+    Not a knit SolidWorks refused: the surfaces were sewn, they simply did not
+    close anything. Worth a name of its own because what to do about it is
+    different — an end that did not close may well close with fewer guides.
+    """
 
 
 def is_available() -> bool:
@@ -488,6 +510,36 @@ def _off_plane(point: Vec3, plane: Tuple[Vec3, Vec3]) -> float:
     return abs((point[0] - mx) * nx + (point[1] - my) * ny + (point[2] - mz) * nz)
 
 
+def area_in_plane(points: Sequence[Vec3], plane: Tuple[Vec3, Vec3]) -> float:
+    """How much area a loop of points encloses in its own plane.
+
+    Two axes across the plane, the points laid on them, and the shoelace sum:
+    the loop closes back to its first point whether or not it repeats it.
+    """
+    middle, normal = plane
+    # Any direction not along the normal will do for the first axis.
+    aside = (0.0, 0.0, 1.0) if abs(normal[2]) < 0.9 else (1.0, 0.0, 0.0)
+    ux = normal[1] * aside[2] - normal[2] * aside[1]
+    uy = normal[2] * aside[0] - normal[0] * aside[2]
+    uz = normal[0] * aside[1] - normal[1] * aside[0]
+    size = (ux * ux + uy * uy + uz * uz) ** 0.5
+    if size <= 1e-12:
+        return 0.0
+    u = (ux / size, uy / size, uz / size)
+    v = (normal[1] * u[2] - normal[2] * u[1],
+         normal[2] * u[0] - normal[0] * u[2],
+         normal[0] * u[1] - normal[1] * u[0])
+    flat = [
+        (sum((p[c] - middle[c]) * u[c] for c in range(3)),
+         sum((p[c] - middle[c]) * v[c] for c in range(3)))
+        for p in points
+    ]
+    twice = 0.0
+    for a, b in zip(flat, flat[1:] + flat[:1]):
+        twice += a[0] * b[1] - b[0] * a[1]
+    return abs(twice) / 2.0
+
+
 def _try(obj: Any, name: str, *args: Any) -> Any:
     """A member the object may simply not have.
 
@@ -596,6 +648,19 @@ def _sketch_coords(obj: Any, to_model: Optional[Sequence[float]]) -> Optional[Ve
     return _in_mm(transform_point(to_model, (float(x), float(y), float(z))))
 
 
+@dataclass
+class Suppressed:
+    """What one feature's suppression was, and the feature itself.
+
+    The feature rather than its name: a name is not always enough to find it
+    again, and this is what a restore has to work through.
+    """
+
+    name: str
+    feature: Any = field(repr=False)
+    suppressed: bool = False
+
+
 class Session:
     """One connected SolidWorks. Only ever touched from the worker thread."""
 
@@ -676,24 +741,35 @@ class Session:
 
     def _walk(self, first: Any, depth: int = 0) -> List[FeatureInfo]:
         out: List[FeatureInfo] = []
-        feature = first
-        guard = 0
-        while feature is not None and guard < 5000:
-            guard += 1
+        for feature in self._walk_objects(first, depth):
             try:
                 type_name = str(call(feature, "GetTypeName2"))
             except Exception:  # noqa: BLE001 - a feature that will not describe itself
                 type_name = "?"
             out.append(FeatureInfo(name=str(call(feature, "Name")), type_name=type_name))
+        return out
 
+    def _walk_objects(self, first: Any, depth: int = 0) -> List[Any]:
+        """Every feature from ``first`` on, subfeatures included, in tree order.
+
+        The order is the point. ``FeatureManager::GetFeatures`` returns more —
+        an annotation folder the chain does not reach — but its own help says
+        the order means nothing, and a parent has to be put back before what
+        was built on it.
+        """
+        out: List[Any] = []
+        feature = first
+        guard = 0
+        while feature is not None and guard < 5000:
+            guard += 1
+            out.append(feature)
             if depth < 4:  # curves can sit inside a folder
                 try:
                     child = call(feature, "GetFirstSubFeature")
                 except Exception:  # noqa: BLE001
                     child = None
                 if child is not None:
-                    out.extend(self._walk(child, depth + 1))
-
+                    out.extend(self._walk_objects(child, depth + 1))
             feature = call(feature, "GetNextFeature")
         return out
 
@@ -701,6 +777,15 @@ class Session:
     # -- the write path ----------------------------------------------------
 
     def _curve_feature(self, name: str) -> Any:
+        """The feature of that name, by walking the tree and comparing names.
+
+        Not everything can be found this way. A feature SolidWorks has had to
+        number — ``Sketch9<3>``, an instance of a pattern — carries a suffix
+        that is not part of the name it answers with, and an annotation folder
+        is not on the chain at all. Nothing the app makes is either, but
+        anything walking the whole tree wants the objects instead: see
+        :meth:`_walk_objects`.
+        """
         doc = self._active()
         feature = call(doc, "FirstFeature")
         guard = 0
@@ -1128,13 +1213,23 @@ class Session:
         """What the body a feature made calls itself, which is how a knit picks it."""
         return str(call(self._feature_body(feature), "Name"))
 
-    def profile_points(self, name: str) -> List[Vec3]:
-        """Every point of a profile curve, its pieces in order if it is a composite."""
+    def profile_pieces(self, name: str) -> List[List[Vec3]]:
+        """A profile curve's points, a list per piece: the curves a composite joins.
+
+        How many pieces there are is worth as much as the points. A loft runs
+        one edge along each of them, so an end of the loft body that has more
+        edges than the profile has pieces has something on it that the profile
+        does not — a sliver face's own little loop, on the wing this was found
+        on.
+        """
         kind = str(call(self._curve_feature(name), "GetTypeName2"))
         if kind == COMPOSITE_TYPE_NAME:
-            return [p for source in self.composite_sources(name)
-                    for p in self.curve_points(source)]
-        return self.curve_points(name)
+            return [self.curve_points(source) for source in self.composite_sources(name)]
+        return [self.curve_points(name)]
+
+    def profile_points(self, name: str) -> List[Vec3]:
+        """Every point of a profile curve, its pieces in order if it is a composite."""
+        return [point for piece in self.profile_pieces(name) for point in piece]
 
     def cap_end(self, loft: str, profile: str, name: str) -> str:
         """Close one end of a surface loft with a planar surface, named ``name``.
@@ -1151,7 +1246,10 @@ class Session:
         SelectByID2 at mark 1" cannot be followed for an edge.
         """
         doc = self._active()
-        plane = plane_through(self.profile_points(profile))
+        pieces = self.profile_pieces(profile)
+        points = [point for piece in pieces for point in piece]
+        plane = plane_through(points)
+        wanted = area_in_plane(points, plane)
         edges = []
         for edge in list(call(self._feature_body(loft), "GetEdges") or []):
             # The curve has to be generated before its parameters can be read:
@@ -1168,6 +1266,14 @@ class Session:
             raise SolidWorksError(
                 f"No edge of {loft} lies in the plane of {profile}, so that end "
                 "cannot be capped."
+            )
+        if len(edges) != len(pieces):
+            # One edge along each piece of the profile is what an end of this
+            # loft is. Any more and the loft has grown something there.
+            raise SolidWorksError(
+                f"The end of {loft} at {profile} has {len(edges)} edges where the "
+                f"profile has {len(pieces)} pieces, so the loft has something on "
+                "that end the section does not."
             )
 
         call(doc, "ClearSelection2", True)
@@ -1192,7 +1298,28 @@ class Session:
                 f"Capping {loft} at {profile} added {len(created)} features, "
                 "so which one it is cannot be told."
             )
+
+        # It made a face; the question is whether it made it across the end.
+        # SolidWorks will happily put one over a sliver's own little loop and
+        # answer True, and a knit of that sews a sheet and answers True too.
+        made_area = self.face_area(created[0])
+        if made_area < CAP_AREA_SHARE * wanted:
+            self.delete_feature(created[0])
+            raise SolidWorksError(
+                f"The cap SolidWorks put across the end of {loft} at {profile} is "
+                f"{made_area:.3f} mm² against the section's {wanted:.1f} mm², so it "
+                "spans something else."
+            )
         return self.rename_feature(created[0], name)
+
+    def face_area(self, feature: str) -> float:
+        """How much face a feature made, in square millimetres."""
+        faces = list(call(self._curve_feature(feature), "GetFaces") or [])
+        return sum(float(call(face, "GetArea")) for face in faces) * MM_PER_METRE ** 2
+
+    def solid_bodies(self) -> int:
+        """How many solid bodies the part holds. Sheets are not counted."""
+        return len(list(call(self._active(), "GetBodies2", SOLID_BODY, False) or ()))
 
     def knit_to_solid(self, surfaces: Sequence[str], name: str, solid: bool = True) -> str:
         """Knit the bodies ``surfaces`` made into one, a solid if they close one.
@@ -1206,6 +1333,7 @@ class Session:
         if len(surfaces) < 2:
             raise SolidWorksError("A knit needs at least two surfaces to join.")
         doc = self._active()
+        was_solid = self.solid_bodies() if solid else 0
         bodies = [self.body_name(surface) for surface in surfaces]
         self._select_all(
             [(body, KNIT_SELECT_MARK) for body in bodies], "to knit", SURFACE_BODY_TYPE,
@@ -1232,6 +1360,15 @@ class Session:
             raise SolidWorksError(
                 f"Knitting added {len(created)} features, so which one it is cannot be told."
             )
+        if solid and self.solid_bodies() != was_solid + 1:
+            # It sewed them, and answered as if it had done what was asked. The
+            # part has one sheet where it had three, and no more solid than it
+            # started with.
+            self.delete_feature(created[0])
+            raise NotASolid(
+                f"Knitting {' and '.join(surfaces)} sewed them into a sheet rather "
+                "than a solid: the surfaces do not close a volume between them."
+            )
         return self.rename_feature(created[0], name)
 
     def delete_feature(self, name: str) -> None:
@@ -1244,6 +1381,52 @@ class Session:
         call(doc, "ClearSelection2", True)
         if not deleted:
             raise SolidWorksError(f"SolidWorks would not delete {name}.")
+
+    def suppression_state(self) -> List["Suppressed"]:
+        """Every feature in the tree, in tree order, and whether it is suppressed.
+
+        Suppressing a body feature suppresses everything built on it — on one
+        real part, 74 features: the splits and inserts under it, their folders,
+        the planes and sketches under those — and unsuppressing the body does
+        not bring any of them back. So what is put back afterwards has to be
+        every feature that moved, and it has to be held as features rather than
+        as names: some of what a cascade reaches is named ``Sketch9<3>``, which
+        nothing can look up again.
+
+        The walk costs about ten seconds on a part of 400 features.
+        """
+        return [
+            Suppressed(name=str(call(feature, "Name")), feature=feature,
+                       suppressed=bool(call(feature, "IsSuppressed")))
+            for feature in self._walk_objects(call(self._active(), "FirstFeature"))
+        ]
+
+    def restore_suppression(self, state: Sequence["Suppressed"]) -> List[str]:
+        """Put back every feature whose suppression has changed since ``state``.
+
+        In the order the tree holds them, so that a parent is unsuppressed
+        before whatever was built on it. Returns the names of any that would
+        not go back, because a part left with features suppressed is worth
+        saying out loud.
+        """
+        left: List[str] = []
+        for item in state:
+            try:
+                now = bool(call(item.feature, "IsSuppressed"))
+            except Exception:  # noqa: BLE001 - one feature that will not answer
+                left.append(item.name)
+                continue
+            if now == item.suppressed:
+                continue
+            action = SUPPRESS if item.suppressed else UNSUPPRESS
+            try:
+                put_back = call(item.feature, "SetSuppression2", action,
+                                THIS_CONFIGURATION, None)
+            except Exception:  # noqa: BLE001 - and one that will not move
+                put_back = False
+            if not put_back:
+                left.append(item.name)
+        return left
 
     def set_suppressed(self, name: str, suppressed: bool) -> None:
         action = SUPPRESS if suppressed else UNSUPPRESS

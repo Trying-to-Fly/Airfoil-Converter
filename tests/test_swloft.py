@@ -6,7 +6,7 @@ import pytest
 
 from airfoil_converter import export, store, swloft
 from airfoil_converter.store import CurveRecord
-from airfoil_converter.swcom import DocInfo, SolidWorksError
+from airfoil_converter.swcom import DocInfo, NotASolid, SolidWorksError
 from airfoil_converter.swloft import LoftPlan, loft_and_export, loft_in_part, wing_plan
 
 
@@ -111,6 +111,9 @@ class FakeSolidWorks:
         self.surface_fails = set()
         self.cap_fails = set()       # the profiles whose end will not cap
         self.cap_fails_at = set()    # the guide counts whose loft leaves a sliver
+        self.knit_sews_sheet = set() # the guide counts whose knit closes nothing
+        self.children = {}           # what a feature's suppression carries with it
+        self.wont_unsuppress = set()
         self.held_by = 0             # guides the surface loft standing now has
         self.knit_fails = False
         self.export_fails = False
@@ -151,6 +154,8 @@ class FakeSolidWorks:
         self.calls.append(("knit", tuple(surfaces), name))
         if self.knit_fails:
             raise SolidWorksError("no knit")
+        if solid and self.held_by in self.knit_sews_sheet:
+            raise NotASolid("sewed a sheet")
         # What it knits stays in the tree, absorbed but still calling itself a
         # lofted surface; the knit itself is a type of its own.
         self.names.append(name)
@@ -172,6 +177,25 @@ class FakeSolidWorks:
     def set_suppressed(self, name, suppressed):
         self.calls.append(("suppress" if suppressed else "unsuppress", name))
         (self.suppressed.add if suppressed else self.suppressed.discard)(name)
+        # What a body feature carries with it, and does not bring back.
+        if suppressed:
+            self.suppressed.update(self.children.get(name, ()))
+
+    def suppression_state(self):
+        self.calls.append(("state",))
+        return [(name, name in self.suppressed) for name in self.names]
+
+    def restore_suppression(self, state):
+        self.calls.append(("restore",))
+        left = []
+        for name, was in state:
+            if (name in self.suppressed) == was:
+                continue
+            if not was and name in self.wont_unsuppress:
+                left.append(name)
+                continue
+            (self.suppressed.add if was else self.suppressed.discard)(name)
+        return left
 
     def rebuild(self):
         return True
@@ -340,6 +364,43 @@ def test_everything_is_unsuppressed_even_when_the_export_fails(tmp_path):
     assert sw.suppressed == set()
 
 
+def test_what_a_suppression_carried_with_it_is_put_back_too(tmp_path):
+    """Suppressing a body feature suppresses everything built on it — 74
+    features on the real part — and unsuppressing it brings none of them back,
+    so the tree as it was is written down first and restored from that."""
+    sw = FakeSolidWorks(features=["Loft1"])
+    sw.names += ["Split1", "Sketch9<3>", "Plane7"]
+    sw.children["Loft1"] = ["Split1", "Sketch9<3>", "Plane7"]
+    results = loft_and_export(sw, PLANS[:1], str(tmp_path))
+
+    assert results[0].ok
+    assert sw.suppressed == set()
+    assert ("state",) in sw.calls and ("restore",) in sw.calls
+    assert sw.calls.index(("state",)) < sw.calls.index(("suppress", "Loft1"))
+
+
+def test_what_the_user_had_suppressed_stays_suppressed(tmp_path):
+    sw = FakeSolidWorks(features=["Loft1"])
+    sw.names.append("Split1")
+    sw.children["Loft1"] = ["Split1"]
+    sw.suppressed.add("Split1")
+    results = loft_and_export(sw, PLANS[:1], str(tmp_path))
+
+    assert results[0].ok
+    assert sw.suppressed == {"Split1"}
+
+
+def test_a_feature_that_will_not_come_back_is_reported_as_an_error(tmp_path):
+    sw = FakeSolidWorks(features=["Loft1"])
+    sw.names.append("Sketch9<3>")
+    sw.children["Loft1"] = ["Sketch9<3>"]
+    sw.wont_unsuppress = {"Sketch9<3>"}
+    results = loft_and_export(sw, PLANS[:1], str(tmp_path))
+
+    assert not results[0].ok
+    assert "left with Sketch9<3> suppressed" in results[0].error
+
+
 def test_nothing_is_done_while_a_sketch_is_open(tmp_path):
     sw = FakeSolidWorks()
     sw.sketching = True
@@ -466,6 +527,36 @@ def test_the_ladder_carries_on_to_the_rung_that_works():
     assert first.capped and first.guides_used == 6
     assert "both 2% guides were dropped" in first.describe()
     assert [c[2] for c in sw.calls if c[0] == "surface"] == [8, 7, 7, 6]
+
+
+def test_a_knit_that_sews_a_sheet_carries_on_down_the_ladder():
+    """Three sheets in, one sheet out: the caps and the loft close nothing
+    between them, which is the same kind of fault as an end that will not cap
+    and mends the same way."""
+    sw = FakeSolidWorks()
+    sw.loft_fails = {"w_loft"}
+    sw.knit_sews_sheet = {8}
+    first, = loft_in_part(sw, [LADDER_PLAN])
+
+    assert first.capped and first.guides_used == 7
+    assert [c[2] for c in sw.calls if c[0] == "surface"] == [8, 7]
+    assert [c[0] for c in sw.calls].count("knit") == 2
+    # The caps of the rung that sewed a sheet went with it.
+    assert [c for c in sw.calls if c[0] == "delete"] == [
+        ("delete", "w_loft_root_cap"), ("delete", "w_loft_tip_cap"),
+        ("delete", "w_loft_surface"),
+    ]
+
+
+def test_a_knit_solidworks_will_not_run_at_all_ends_the_ladder():
+    sw = FakeSolidWorks()
+    sw.loft_fails = {"w_loft"}
+    sw.knit_fails = True
+    first, = loft_in_part(sw, [LADDER_PLAN])
+
+    assert first.surface and not first.capped
+    assert [c[2] for c in sw.calls if c[0] == "surface"] == [8]
+    assert "no knit" in first.note
 
 
 def test_when_no_rung_closes_the_tip_the_wing_s_own_surface_is_what_stays():
