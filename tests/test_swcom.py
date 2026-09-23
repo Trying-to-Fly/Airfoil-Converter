@@ -325,6 +325,29 @@ def test_the_worker_reports_being_busy_while_a_call_is_in_flight():
         worker.shutdown()
 
 
+# -- reaching a member ------------------------------------------------------
+
+
+def test_a_member_that_comes_back_as_a_method_is_called():
+    """GetEdges and ReleaseSelectionAccess come back uncalled through late
+    binding; a value never does, so a method object is the one to call."""
+
+    class Body:
+        @property
+        def Name(self):
+            return "Surface-Loft1"
+
+        def GetEdges(self):
+            return ["e1", "e2"]
+
+        def Select4(self, append, data):
+            return (append, data)
+
+    assert swcom.call(Body(), "Name") == "Surface-Loft1"
+    assert swcom.call(Body(), "GetEdges") == ["e1", "e2"]
+    assert swcom.call(Body(), "Select4", True, "data") == (True, "data")
+
+
 # -- rebuilding -------------------------------------------------------------
 
 

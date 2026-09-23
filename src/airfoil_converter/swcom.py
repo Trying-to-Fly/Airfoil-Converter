@@ -15,10 +15,14 @@ guessed, and each point is load-bearing:
   versions.
 * **The table hands back an IUnknown.** ``dynamic.Dispatch`` cannot ask it for
   type information until it has been asked for its IDispatch face.
-* **A zero-argument method is a property get.** Late binding turns
+* **A zero-argument method is a property get — usually.** Late binding turns
   ``RevisionNumber()`` into a plain string attribute and ``ActiveDoc`` into a
-  document object, and *invoking* either raises "Member not found". Only
-  members that take arguments are called. That is what :func:`call` encodes.
+  document object, and *invoking* either raises "Member not found". But a
+  member that returns nothing (``ReleaseSelectionAccess``) or an array
+  (``GetEdges``, ``GetTessTriangles``) comes back as an uncalled method
+  object, and reading it as a value silently does nothing, or hands a method
+  to a ``for`` loop. Three afternoons went on those. :func:`call` now tells
+  the two apart by what came back rather than by guessing the member's kind.
 * **Two calls need their arguments typed by hand.** ``ModifyDefinition`` takes
   a component that is absent for a part, and a plain ``None`` there is a type
   mismatch; it needs a null of dispatch type. ``GetObjectByPersistReference3``
@@ -279,9 +283,19 @@ def call(obj: Any, name: str, *args: Any) -> Any:
     ``RevisionNumber`` and ``GetNextFeature`` all come back as their results.
     Testing ``callable`` and invoking would be wrong: a member returning a
     document is itself callable, and calling it raises "Member not found".
+
+    Not every argument-less member is invoked that way, though. One that
+    returns nothing, or an array — ``ReleaseSelectionAccess``, ``GetEdges``,
+    ``GetTessTriangles`` on SolidWorks 2026 — comes back as a bound method
+    that has not run. A value never looks like that, so a method object is
+    the one thing it is safe to call.
     """
     member = getattr(obj, name)
-    return member(*args) if args else member
+    if args:
+        return member(*args)
+    if type(member).__name__ == "method":
+        return member()
+    return member
 
 
 def _dispatch(raw: Any) -> Any:
