@@ -827,6 +827,41 @@ def test_a_nose_too_tight_to_draw_is_left_as_one_corner():
     assert out[:2] == loop[:2]
 
 
+class WedgeSkin:
+    """A skin that is a wedge, nose at the origin: the wall inside it is a
+    wedge too, with a crease where its two sides meet."""
+
+    def __init__(self, half_angle_deg=30.0):
+        self.t = math.radians(half_angle_deg)
+        reach = 10.0 * math.tan(self.t)
+        self.pts = [(0.0, 0.0), (10.0, -reach), (10.0, reach)]
+        self.loft = self
+
+    def outline(self, _s):
+        return list(self.pts)
+
+    def distance(self, _s, p, faces=True):
+        up = (-math.sin(self.t), math.cos(self.t))
+        down = (-math.sin(self.t), -math.cos(self.t))
+        return min(-(p[0] * n[0] + p[1] * n[1]) for n in (up, down))
+
+
+def test_a_crease_the_trim_stopped_short_of_gets_its_corner_back():
+    """At the tip of one wing, offset 2.65 mm, the trim stopped both sides of
+    the nose's crease short of where they meet, and a 0.12 mm line across stood
+    0.06 mm inside it: the wall there read 2.69. The corner goes back in."""
+    skin = WedgeSkin(30.0)
+    d = 1.0
+    apex = (d / math.sin(skin.t), 0.0)
+    c, s = math.cos(skin.t), math.sin(skin.t)
+    loop = [(apex[0] + 0.08 * c, 0.08 * s), (apex[0] + 0.08 * c, -0.08 * s),
+            (apex[0] + 5.0 * c, -5.0 * s), (apex[0] + 5.0 * c, 5.0 * s)]
+    out, _ = wing_offset._fill_gaps(skin, 0.0, loop, [True, False, False, False], d, True)
+    assert len(out) == 5
+    assert out[1] == pytest.approx(apex, abs=1e-3)
+    assert skin.distance(0.0, out[1]) == pytest.approx(d, abs=1e-4)
+
+
 def test_two_points_closer_than_a_fiftieth_of_a_millimetre_are_one_point():
     """The real tip of a 1.6 mm inward offset, where the nose is becoming a
     swallowtail: the trim leaves four points inside 0.07 mm, each too near the

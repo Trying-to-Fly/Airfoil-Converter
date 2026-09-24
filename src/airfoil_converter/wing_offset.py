@@ -570,19 +570,25 @@ def _fill_gaps(
                 # The wall runs straight across this gap, so the turn at its
                 # end is a corner of the offset and belongs where it is.
                 continue
-            if off > REACH * length:
-                # A line across a bend of less than a half turn stands off it
-                # by at most half its own length. Further than that and the
-                # walk has left this stretch of wall for another one — round
-                # the nose, or the far side of a corner — and what it found is
-                # not a point of this gap.
-                continue
             # A chord of length L across an arc that turns by t stands L/2 ·
             # tan(t/4) off it, which is what says how tight the bend is and
             # how many steps of ten degrees it takes.
             turn = 4.0 * math.atan(2.0 * off / length)
-            if length < 2.0 * MIN_ARC * math.sin(0.5 * min(turn, math.pi)):
-                continue   # tighter than MIN_ARC: a corner, left as one point
+            if off > REACH * length or length < 2.0 * MIN_ARC * math.sin(
+                0.5 * min(turn, math.pi)
+            ):
+                # A line across a bend of less than a half turn stands off it
+                # by at most half its own length, so a walk that went further
+                # has either left this stretch of wall or met a corner; and a
+                # bend tighter than MIN_ARC is a corner too. A corner is left
+                # as one point — but where the trim stopped both branches
+                # short of it, that point is not in the loop yet.
+                corner = _corner_in_gap(skin, s, poly, loop[i - 1], a, b, loop[(i + 2) % n],
+                                        (nx, ny), d, inward)
+                if corner is not None:
+                    out.append(corner)
+                    fresh.append(False)
+                continue
             count = int(math.ceil(turn / TURN_STEP))
         count = min(max(count, 2), 40, max(2, int(length / MIN_FILL)))
         for k in range(1, count):
@@ -597,6 +603,69 @@ def _fill_gaps(
                 out.append(found)
                 fresh.append(True)
     return out, fresh
+
+
+# Where along a gap its corner is looked for, before closing in on it.
+CORNER_PROBES = 9
+# The loop runs on into a corner nearly as it came: each side of the one at the
+# 2.65 mm tip bent 3-7° there. A point that asks for more is not that corner.
+CORNER_ALIGN = math.radians(30.0)
+
+
+def _corner_in_gap(
+    skin: Skin, s: float, poly: Sequence[Point2], before: Point2, a: Point2, b: Point2,
+    after: Point2, toward: Point2, d: float, inward: bool,
+) -> Optional[Point2]:
+    """The corner of the wall a straight gap cuts across, if it cuts one.
+
+    Round a crease at the nose the trim can stop both branches short of where
+    they meet, and the line across leaves the corner off: at the tip of one
+    wing, offset 2.65 mm, a 0.12 mm line stood 0.06 mm inside it, and the wall
+    there read 2.69. The corner is the point of the wall standing furthest off
+    the line toward the skin, found by walking onto the wall from along it.
+    It is taken only if the loop runs on into it from ``before`` and out of it
+    to ``after`` nearly straight, and follows the wall better through it than
+    the line did — a walk can find some other stretch of wall.
+    """
+    length = math.hypot(b[0] - a[0], b[1] - a[1])
+
+    def reach(f: float) -> Tuple[float, Optional[Point2]]:
+        c = (a[0] + f * (b[0] - a[0]), a[1] + f * (b[1] - a[1]))
+        found = _level_point(skin, s, poly, c, toward, d, inward)
+        if found is None:
+            return -math.inf, None
+        off = (found[0] - c[0]) * toward[0] + (found[1] - c[1]) * toward[1]
+        # A corner of a half turn or less stands off its line by no more than
+        # the line is long; further than that is another stretch of wall.
+        return (off, found) if off <= length else (-math.inf, None)
+
+    probes = [(k + 1) / (CORNER_PROBES + 1) for k in range(CORNER_PROBES)]
+    best = max(range(len(probes)), key=lambda k: reach(probes[k])[0])
+    lo = probes[best - 1] if best > 0 else 0.0
+    hi = probes[best + 1] if best + 1 < len(probes) else 1.0
+    golden = 0.5 * (math.sqrt(5.0) - 1.0)
+    for _ in range(12):
+        m1, m2 = hi - golden * (hi - lo), lo + golden * (hi - lo)
+        if reach(m1)[0] >= reach(m2)[0]:
+            hi = m2
+        else:
+            lo = m1
+    off, corner = reach(0.5 * (lo + hi))
+    if corner is None or off <= MIN_DEVIATION:
+        return None
+    if _turn(before, a, corner) > CORNER_ALIGN or _turn(corner, b, after) > CORNER_ALIGN:
+        return None
+
+    def strays(p: Point2, q: Point2) -> float:
+        return max(
+            abs(skin.distance(s, (p[0] + f * (q[0] - p[0]), p[1] + f * (q[1] - p[1])),
+                              faces=False) - d)
+            for f in (0.25, 0.5, 0.75)
+        )
+
+    if max(strays(a, corner), strays(corner, b)) >= strays(a, b):
+        return None
+    return corner
 
 
 def _level_point(
