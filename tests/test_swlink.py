@@ -87,6 +87,12 @@ class FakeSolidWorks:
         self.calls.append(("rename", current, new))
         if self.rename_fails:
             raise SolidWorksError("no")
+        if current in self.tree:
+            self.tree[new] = self.tree.pop(current)
+            for held in self.tree.values():
+                if current in held:
+                    held[held.index(current)] = new
+            return new
         self.composites[self.composites.index(current)] = new
         self.joined_from[new] = self.joined_from.pop(current)
         return new
@@ -559,6 +565,30 @@ def test_a_folder_renamed_in_solidworks_keeps_its_name():
     assert sw.calls == []
     assert "Root rib" in sw.tree and "rib" not in sw.tree
     assert result.kept == ["Root rib", swlink.PARENT_FOLDER]
+
+
+def test_a_folder_named_like_a_closing_tag_gets_its_own_name_back():
+    """What an earlier arrange left in the user's part, 2026-09-24: a wing's
+    folder called ``Folder4___EndTag___0``. Nobody chose that name, so unlike
+    a rename made in SolidWorks it is not kept."""
+    sw = FakeSolidWorks(features=["wing_s01", "wing_le"])
+    sw.tree = {"Folder4___EndTag___0": ["wing_s01", "wing_le"]}
+
+    result = swlink.arrange(sw, [group("wing", "wing_s01", "wing_le")], parent="Wing Curves")
+
+    assert ("rename", "Folder4___EndTag___0", "wing") in sw.calls
+    assert sw.tree == {"wing": ["wing_s01", "wing_le"], "Wing Curves": ["wing"]}
+    assert result.kept == ["wing"] and not result.failures
+
+
+def test_a_folder_rebuilt_is_not_given_a_closing_tag_s_name():
+    sw = FakeSolidWorks(features=["wing_s01", "wing_le"])
+    sw.tree = {"Folder4___EndTag___1": ["wing_s01"]}
+
+    swlink.arrange(sw, [group("wing", "wing_s01", "wing_le")], parent="Wing Curves")
+
+    assert sw.tree["wing"] == ["wing_s01", "wing_le"]
+    assert "Folder4___EndTag___1" not in sw.tree
 
 
 def test_a_curve_added_to_an_export_is_folded_in_with_the_rest():

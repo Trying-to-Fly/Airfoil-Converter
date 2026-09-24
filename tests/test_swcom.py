@@ -1115,6 +1115,69 @@ def test_the_walk_takes_each_feature_under_a_folder_once():
         "Folder1", "Curve1", "Curve2", "Loft1", "Split1", "Sketch9<3>",
     ]
 
+class TreeFolder(FakeFeature):
+    """A folder or its closing tag: both answer with what the folder holds."""
+
+    def __init__(self, name, held):
+        super().__init__(name, swcom.FOLDER_TYPE_NAME)
+        self.held = held
+
+    @property
+    def GetSpecificFeature2(self):
+        return self
+
+    @property
+    def GetFeatures(self):
+        return list(self.held)
+
+
+def folder_doc(*layout):
+    """``("[", name)`` opens a folder, ``("]", name)`` closes the one open."""
+    doc, stack = FakeDoc(), []
+    for kind, name in layout:
+        if kind == "[":
+            made = TreeFolder(name, [])
+            stack.append(made)
+            doc._append(made)
+        elif kind == "]":
+            opened = stack.pop()
+            doc._append(TreeFolder(name, opened.held))
+        else:
+            made = doc.add(name)
+        if kind != "]" and len(stack) > (kind == "["):
+            stack[-2 if kind == "[" else -1].held.append(made)
+    return swcom.Session(FakeApp(doc), (34, 0, 0), 1000)
+
+
+def test_a_closing_tag_with_a_number_after_it_still_closes_its_folder():
+    """Measured in SolidWorks 2026 (E91): with ``Folder1___EndTag___`` taken by a
+    folder since renamed, a part opened again names the next folder
+    ``Folder1`` and its tag ``Folder1___EndTag___0``. Read as a folder, that
+    tag took the lofts after it, and arranging went wrong from there."""
+    session = folder_doc(
+        ("[", "Wing Curves"),
+        ("[", "wing"), ("", "wing_s01"), ("]", "Folder1___EndTag___"),
+        ("[", "wing_cut"), ("", "wing_cut_s01"), ("]", "Folder1___EndTag___0"),
+        ("]", "Folder2___EndTag___"),
+        ("", "wing_loft"),
+    )
+    assert session.folders() == {
+        "Wing Curves": ["wing", "wing_cut"],
+        "wing": ["wing_s01"],
+        "wing_cut": ["wing_cut_s01"],
+    }
+
+
+def test_a_folder_named_like_a_tag_is_still_read_as_a_folder():
+    """What the misreading left in the user's part: a folder that opens, called
+    ``Folder4___EndTag___0``."""
+    session = folder_doc(
+        ("[", "Folder4___EndTag___0"), ("", "cut_s01"), ("]", "Folder6___EndTag___"),
+        ("", "cut_loft"),
+    )
+    assert session.folders() == {"Folder4___EndTag___0": ["cut_s01"]}
+
+
 def test_the_state_of_every_feature_is_read_in_tree_order():
     session, doc = suppression_session()
     state = session.suppression_state()

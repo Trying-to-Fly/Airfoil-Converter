@@ -45,7 +45,7 @@ import re
 import sys
 import threading
 from dataclasses import dataclass, field
-from typing import Any, Callable, Dict, List, Optional, Sequence, Tuple, TypeVar, Union
+from typing import Any, Callable, Dict, List, Optional, Sequence, Set, Tuple, TypeVar, Union
 
 try:  # pragma: no cover - exercised only on Windows with pywin32 present
     import pythoncom
@@ -76,7 +76,8 @@ FOLDER_TYPE_NAME = "FtrFolder"
 
 # A folder in the tree is two features: the folder and a closing tag after
 # everything it holds. The tag is an implementation detail of the walk and is
-# never shown or counted.
+# never shown or counted. Its name usually ends in this, but not always: see
+# :func:`_closes_folder`.
 FOLDER_END_TAG = "___EndTag___"
 
 # swFeatureTreeFolderType_e. Only "containing" is any use here, and on SolidWorks
@@ -556,6 +557,27 @@ def _try(obj: Any, name: str, *args: Any) -> Any:
         return None
 
 
+def _closes_folder(feature: Any, name: str, seen: Set[str]) -> bool:
+    """Is this folder feature the tag that closes a folder, not one opening?
+
+    Not by its name alone. A tag is named after the folder as SolidWorks first
+    made it, ``Folder3___EndTag___``, and once that folder has been renamed a
+    part opened again hands ``Folder3`` out afresh; the new folder's tag
+    cannot have the name, so it gets ``Folder3___EndTag___0``. Read as a
+    folder opening, that tag swallowed everything after it, and arranging the
+    tree deleted and renamed the wrong folders (the user's wing part,
+    2026-09-24). Both features answer with the same contents, so a folder
+    whose first item has already gone past is the closing one.
+    """
+    held = _try(_try(feature, "GetSpecificFeature2"), "GetFeatures")
+    if held:
+        first = _try(held[0], "Name")
+        if first is not None:
+            return str(first) in seen
+    # An empty folder has only its name to go by.
+    return FOLDER_END_TAG in name
+
+
 def _in_mm(values: Sequence[float]) -> Vec3:
     return (
         float(values[0]) * MM_PER_METRE,
@@ -853,6 +875,7 @@ class Session:
         """
         out: Dict[str, List[str]] = {}
         stack: List[str] = []
+        seen: Set[str] = set()
         feature = call(self._active(), "FirstFeature")
         guard = 0
         while feature is not None and guard < 5000:
@@ -862,16 +885,18 @@ class Session:
                 type_name = str(call(feature, "GetTypeName2"))
             except Exception:  # noqa: BLE001 - a feature that will not describe itself
                 type_name = "?"
-            feature = call(feature, "GetNextFeature")
+            here, feature = feature, call(feature, "GetNextFeature")
 
             if type_name != FOLDER_TYPE_NAME:
+                seen.add(name)
                 if stack:
                     out[stack[-1]].append(name)
                 continue
-            if name.endswith(FOLDER_END_TAG):
+            if _closes_folder(here, name, seen):
                 if stack:
                     stack.pop()
                 continue
+            seen.add(name)
             if stack:
                 out[stack[-1]].append(name)
             out.setdefault(name, [])
