@@ -603,7 +603,7 @@ pip install pyinstaller pywin32
 build.bat
 ```
 
-This produces `dist\Airfoil Converter v1.7.exe`, a single self-contained file.
+This produces `dist\Airfoil Converter v1.8-dev2.exe`, a single self-contained file.
 If `build.bat` cannot find `pyinstaller`, use `python -m PyInstaller` instead —
 pip may have installed the scripts outside your PATH.
 

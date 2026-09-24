@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "airfoil-converter"
-version = "1.7.0"
+version = "1.8.0.dev2"
 description = "Convert airfoil-plotter CSV exports into SolidWorks curves, and drive them into an open part"
 requires-python = ">=3.9"
 dependencies = []
