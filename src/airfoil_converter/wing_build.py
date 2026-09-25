@@ -35,12 +35,6 @@ from .geometry import GeometryError, Point2, Vec3
 from .parser import AirfoilParseError
 
 WING_FOLDER = "Wing Curves"
-# How far along an offset section its turning is added up, either way from a
-# point, to find its nose's corner. A crease the gap filling drew as a small
-# arc of ten-degree steps turns just as hard over this stretch as one drawn
-# with a single point.
-CORNER_REACH = 0.15
-
 Progress = Callable[[str], None]
 
 
@@ -330,54 +324,28 @@ def split_at_nose(
 ) -> List[Tuple[str, List[Point2], bool]]:
     """A section's outline as the curves to export: upper and lower, meeting at the nose.
 
-    SolidWorks draws one smooth spline through a curve's points, and round a
-    corner that spline swings wide, or loops and will not loft at all. An
-    inward offset deeper than the airfoil's nose radius has just such a corner
-    at its nose, so the outline is cut there, each half keeping it as an end.
-    Every section is cut, corner or not: a loft will not join profiles cut
-    into different numbers of pieces. Offset sections are dense enough at the
-    nose that a cut through a smooth one changes nothing to speak of.
+    Every offset section is cut in two, corner or not: a loft will not join
+    profiles cut into different numbers of pieces, and SolidWorks draws one
+    smooth spline through each piece. Where the cut falls is the seam between
+    the loft's upper and lower faces, and the leading-edge guide has to run
+    along it, so it is cut at ``nose`` — its foremost point, which the
+    leading-edge guide passes through.
 
-    Where the cut falls is the seam between the loft's upper and lower faces,
-    so it has to run smoothly from one section to the next. It is the point of
-    the front half that turns hardest over CORNER_REACH either way — the
-    corner, or where a smooth nose is tightest. It used to be the sharpest
-    single point, or the point nearest the leading edge when no point turned
-    thirty degrees; a crease drawn as a small arc in one section and as one
-    point in the next then had its cut jump half a millimetre and back from
-    section to section, and SolidWorks would not make even the surface.
+    It used to be cut at the point of the front half that turned hardest, for
+    fear of a spline swinging wide round a corner left inside a piece. Near a
+    closed tip, where the leading edge sweeps into it, which side of a nose
+    turns hardest changes from one section to the next: the seam jumped by up
+    to 0.9 mm and back, the leading-edge guide ran up to 0.63 mm beside it, and
+    SolidWorks refused the solid loft at 0.5, 0.75, 1.0, 1.2 and 1.25 mm inward
+    on the wing it was found on. Cut at the foremost point, every offset from
+    0.5 to 3 mm lofted as one solid, with creases of over a hundred degrees
+    inside a piece at the deepest.
     """
     pts = list(points)
-    # Only the front half is searched for the corner. A blunt trailing edge
-    # that has been auto-closed turns a right angle onto its closing line,
-    # and cutting there would leave the nose corner inside one piece — the
-    # very thing the cut is for — and name the pieces upper and lower of
-    # nothing.
-    reach = 0.5 * max((math.hypot(p[0] - nose[0], p[1] - nose[1]) for p in pts), default=0.0)
-    turns = [0.0] + [_turn(pts[i - 1], pts[i], pts[i + 1]) for i in range(1, len(pts) - 1)] + [0.0]
-    along = [0.0]
-    for a, b in zip(pts, pts[1:]):
-        along.append(along[-1] + math.hypot(b[0] - a[0], b[1] - a[1]))
-    best, at = -1.0, -1
-    lo = 0
-    for i in range(1, len(pts) - 1):
-        while along[i] - along[lo] > CORNER_REACH:
-            lo += 1
-        if math.hypot(pts[i][0] - nose[0], pts[i][1] - nose[1]) > reach:
-            continue
-        hi = i
-        while hi + 1 < len(pts) and along[hi + 1] - along[i] <= CORNER_REACH:
-            hi += 1
-        total = sum(turns[lo:hi + 1])
-        if total > best:
-            best, at = total, i
-    if at > 0:
-        # The cut goes at the sharpest point of that stretch.
-        near = [j for j in range(1, len(pts) - 1) if abs(along[j] - along[at]) <= CORNER_REACH]
-        at = max(near, key=lambda j: turns[j])
-    if not 0 < at < len(pts) - 1:
+    cut = min(range(len(pts)), key=lambda i: math.hypot(pts[i][0] - nose[0], pts[i][1] - nose[1]))
+    if not 0 < cut < len(pts) - 1:
         return [(ROLE_SECTION, pts, closed)]
-    first, second = pts[: at + 1], pts[at:]
+    first, second = pts[: cut + 1], pts[cut:]
     height = lambda piece: sum(p[0] * up[0] + p[1] * up[1] for p in piece) / len(piece)
     # Kept in the outline's own order, so the pieces and the trailing-edge line
     # join end to end: a composite given them out of order will not loft.
