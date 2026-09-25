@@ -242,11 +242,25 @@ def test_a_closed_end_moves_in_with_an_inward_offset(hooked_wing, tmp_path):
     assert stations[-1] == pytest.approx(998.0)
 
 
-def test_the_offset_does_not_move_the_sections_between(hooked_wing, tmp_path):
+def test_every_inward_offset_gets_the_same_sections_squeezed_into_the_end_gap(
+    hooked_wing, tmp_path
+):
+    """A loft runs through its profiles by name: a change of offset that took
+    a section away near a closed tip broke it. The gap to the closed end is
+    squeezed instead, in proportion, and the ribs between stay put."""
     loft = model_of(hooked_wing, tmp_path).loft
-    one = [st.station for st in wing.plan_stations(loft, -1.0, wing.OPEN, wing.CLOSED)]
-    two = [st.station for st in wing.plan_stations(loft, -2.0, wing.OPEN, wing.CLOSED)]
-    assert [s for s in one if s < 990.0] == [s for s in two if s < 990.0]
+    plans = {d: [st.station for st in wing.plan_stations(loft, -d, wing.OPEN, wing.CLOSED)]
+             for d in (0.5, 1.0, 2.0)}
+    assert len({len(plan) for plan in plans.values()}) == 1
+    one, two = plans[1.0], plans[2.0]
+    assert one[-1] == pytest.approx(loft.end - 1.0) and two[-1] == pytest.approx(loft.end - 2.0)
+    for rib in loft.stations[:-1]:
+        assert rib in one and rib in two
+    last = loft.stations[-2]
+    squeeze = (loft.end - 2.0 - last) / (loft.end - 1.0 - last)
+    for a, b in zip(one, two):
+        if a > last:
+            assert b - last == pytest.approx((a - last) * squeeze)
 
 
 def test_a_closed_end_grown_outward_is_rounded_by_rim_sections(straight_wing):

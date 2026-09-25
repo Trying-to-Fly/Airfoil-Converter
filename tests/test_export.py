@@ -302,11 +302,12 @@ def test_surface_guides_and_end_profiles_are_named_by_tag():
         export.wing_feature_name("w", export.ROLE_WING_SURFACE)
 
 
-def test_a_wing_spec_keeps_its_profiles_choice():
-    spec = export.WingSpec(profiles=export.PROFILES_ALL, thickness=export.THICKNESS_SCALED)
-    back = export.WingSpec.from_dict(spec.to_dict())
-    assert (back.profiles, back.thickness) == (export.PROFILES_ALL, export.THICKNESS_SCALED)
-    # Root and tip with guides is what an export gives unless told otherwise,
-    # and the thickness follows the loft SolidWorks would make on its own.
-    assert export.WingSpec.from_dict({}).profiles == export.PROFILES_ENDS
+def test_a_wing_spec_keeps_its_thickness_and_reads_an_old_profiles_choice():
+    spec = export.WingSpec(thickness=export.THICKNESS_SCALED)
+    assert export.WingSpec.from_dict(spec.to_dict()).thickness == export.THICKNESS_SCALED
+    # The thickness follows the loft SolidWorks would make on its own.
     assert export.WingSpec.from_dict({}).thickness == export.THICKNESS_BLENDED
+    # Every wing is exported as its sections now; a record written when there
+    # was a choice still reads.
+    old = export.WingSpec.from_dict({"profiles": "ends", "offset": "1.35"})
+    assert old.offset == "1.35" and "profiles" not in old.to_dict()

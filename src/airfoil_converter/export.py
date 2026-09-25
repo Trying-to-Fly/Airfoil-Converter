@@ -397,15 +397,16 @@ ROLE_WING_TE = "wing_te"
 # A blunt trailing edge is a face, so it gets an edge along each corner.
 ROLE_WING_TE_UPPER = "wing_te_upper"
 ROLE_WING_TE_LOWER = "wing_te_lower"
-# Guides along the offset wing's upper and lower surfaces, for a loft through
-# its end profiles alone.
+# Guides along a wing's upper and lower surfaces, at fixed fractions of the
+# chord, meeting every section.
 ROLE_WING_SURFACE = "wing_surface"
 ROLE_SECTION = "section"
 ROLE_SECTION_TE = "section_te"
 ROLE_SECTION_JOINED = "section_joined"
-# A section with a corner in its outline — the nose of a wing offset inward by
-# more than its nose radius — is exported as two curves meeting there, so the
-# spline through each keeps the corner instead of looping round it.
+# A section is exported as two curves meeting at its nose, so that a corner
+# there — the nose of a wing offset inward by more than its nose radius — stays
+# a corner instead of the spline looping round it, and every section of a wing
+# is cut into the same pieces.
 ROLE_SECTION_UPPER = "section_upper"
 ROLE_SECTION_LOWER = "section_lower"
 WING_ROLES = (
@@ -418,8 +419,6 @@ WING_EDGE_ROLES = (
     ROLE_WING_LE, ROLE_WING_TE, ROLE_WING_TE_UPPER, ROLE_WING_TE_LOWER, ROLE_WING_SURFACE,
 )
 
-# Which of the offset wing's sections are exported: every one, so the loft
-# runs through them, or the two at its ends with guides along its surfaces.
 # How the wing's thickness runs between two ribs: blended in millimetres from
 # one to the other, as a SolidWorks loft through the two does on its own, or
 # the airfoil kept whole and scaled to the chord everywhere.
@@ -427,9 +426,6 @@ THICKNESS_BLENDED = "blended"
 THICKNESS_SCALED = "scaled"
 THICKNESS_CHOICES = (THICKNESS_BLENDED, THICKNESS_SCALED)
 
-PROFILES_ALL = "all"
-PROFILES_ENDS = "ends"
-PROFILE_CHOICES = (PROFILES_ALL, PROFILES_ENDS)
 
 
 @dataclass(frozen=True)
@@ -446,7 +442,6 @@ class WingSpec:
     offset: str = ""
     offset_dir: str = OFFSET_INWARD
     extension: str = ".sldcrv"
-    profiles: str = PROFILES_ENDS
     thickness: str = THICKNESS_BLENDED
 
     def to_dict(self) -> Dict[str, Any]:

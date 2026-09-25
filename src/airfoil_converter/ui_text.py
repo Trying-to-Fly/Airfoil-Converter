@@ -21,7 +21,6 @@ from .export import (
     MODE_3POINTS,
     MODE_LOADED,
     MODE_NORMAL,
-    PROFILES_ALL,
     THICKNESS_BLENDED,
     ExportSpec,
     WingSpec,
@@ -403,15 +402,13 @@ def surface_guide_count(offset: bool) -> int:
     return 2 * len(fractions)
 
 
-def offset_hint(offset: str, profiles: str) -> str:
+def offset_hint(offset: str) -> str:
     """The Offset panel's one line, which says what the settings above will export."""
     if not offset.strip():
-        return (f"Blank exports the wing's own edges and "
+        return (f"Blank exports the wing's own sections, its edges and "
                 f"{surface_guide_count(False)} surface guides.")
-    if profiles == PROFILES_ALL:
-        return "Every section goes in, and the loft runs through them in order."
-    return (f"Root and tip go in, held by {surface_guide_count(True)} guides "
-            f"worked out through every section.")
+    return (f"The offset wing's sections go in, with its edges and "
+            f"{surface_guide_count(True)} surface guides through every one.")
 
 
 def _and(parts: List[Run]) -> List[Run]:
@@ -425,8 +422,7 @@ def _and(parts: List[Run]) -> List[Run]:
 
 
 def export_line(stem: str, index: int, editing: str = "", live: int = 0,
-                te_line: bool = False, offset: bool = False,
-                all_sections: bool = False) -> List[Run]:
+                te_line: bool = False, offset: bool = False) -> List[Run]:
     """What Export will do to the part, in the wing's own terms.
 
     ``editing`` names the wing being edited, whose ``live`` curves are updated
@@ -450,14 +446,8 @@ def export_line(stem: str, index: int, editing: str = "", live: int = 0,
         return [("Export will make a new wing.", PLAIN)]
     names: List[Run] = [(le, MONO)] + [(te, MONO) for te in tes]
     under = [(" under ", PLAIN), (WING_FOLDER, STRONG), (".", PLAIN)]
-    if not offset:
-        guides = f"{surface_guide_count(False)} surface guides"
-        return [("Export will make ", PLAIN)] + _and(names + [(guides, PLAIN)]) + under
-    if all_sections:
-        return ([("Export will make ", PLAIN), (base, MONO), ("'s sections, ", PLAIN)]
-                + _and(names) + under)
-    guides = f"{surface_guide_count(True)} surface guides"
-    return ([("Export will make ", PLAIN), (base, MONO), ("'s root and tip, ", PLAIN)]
+    guides = f"{surface_guide_count(offset)} surface guides"
+    return ([("Export will make ", PLAIN), (base, MONO), ("'s sections, ", PLAIN)]
             + _and(names + [(guides, PLAIN)]) + under)
 
 

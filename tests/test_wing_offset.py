@@ -141,7 +141,7 @@ def test_the_trailing_edge_moves_forward_where_the_wall_meets(straight_wing):
 def test_blunt_ribs_give_blunt_sections_and_joins(tmp_path):
     synthetic = SyntheticWing([0.0, 300.0], lambda s: 0.0, lambda s: -200.0,
                               te_mode=export.TE_LINE, te_thickness="0.8", keep_chord=True)
-    spec = synthetic.wing_spec(offset="2", profiles=export.PROFILES_ALL)
+    spec = synthetic.wing_spec(offset="2")
     build = wing_build.build_wing(spec, synthetic.sidecar(), "w", check=True)
     within(build.offset.report, 2.0, 0.01, 0.01)
     sections = [c for c in build.curves if c.role in export.SECTION_HEAD_ROLES]
@@ -227,33 +227,71 @@ def test_the_reference_wing_keeps_its_wall(tmp_path, thickness, tip_shift):
 # -- what an export of a wing makes -----------------------------------------
 
 
-def test_a_wing_without_an_offset_makes_its_edge_curves(hooked_wing, tmp_path):
+def test_a_wing_without_an_offset_is_its_sections_and_guides_through_them(hooked_wing, tmp_path):
+    """Lofted through its two ribs alone, SolidWorks' loft sagged up to 0.08 mm
+    off the wing between its guides; through its own sections it did not."""
     spec = hooked_wing.wing_spec(tmp_path)
     build = wing_build.build_wing(spec, hooked_wing.sidecar(), "wing")
-    assert [c.feature for c in build.curves][:2] == ["wing_le", "wing_te"]
-    # A tracked copy of the file, point for point.
-    from airfoil_converter import parser
-    assert build.curves[0].points == parser.parse_curve(spec.le_source)
     assert build.offset is None
+    assert build.station_count > 2
+    # A sharp trailing edge: each section is one curve closed on itself, as the
+    # rib is, so there is nothing to join.
+    assert build.section_names[0] == "wing_s01" and not build.joins
+    sections = section_points(build)
+    guides = [c for c in build.curves if c.role in export.WING_EDGE_ROLES]
+    assert {c.role for c in guides} >= {export.ROLE_WING_LE, export.ROLE_WING_SURFACE}
+    for guide in guides:
+        for number, points in sections.items():
+            # Each guide meets every section at a point of its own.
+            assert min(math.dist(p, q) for p in guide.points for q in points) < 1e-9, (
+                guide.feature, number)
+    # The leading edge still follows the curve file it was drawn from, to
+    # within what a rib may miss that file by.
+    from airfoil_converter import parser
+    drawn = parser.parse_curve(spec.le_source)
+    le = next(c for c in guides if c.role == export.ROLE_WING_LE)
+    assert max(to_polyline(p, drawn) for p in le.points[::10]) < wing.EDGE_TOL
 
 
-def test_a_straight_edge_is_two_points(straight_wing):
+def to_polyline(p, line):
+    """How far a point stands from a polyline in 3D."""
+    best = math.inf
+    for a, b in zip(line, line[1:]):
+        ab = [b[k] - a[k] for k in range(3)]
+        size = sum(c * c for c in ab) or 1e-30
+        t = max(0.0, min(1.0, sum((p[k] - a[k]) * ab[k] for k in range(3)) / size))
+        best = min(best, math.dist(p, [a[k] + t * ab[k] for k in range(3)]))
+    return best
+
+
+def section_points(build):
+    """Every exported section's points, by section number."""
+    out = {}
+    for c in build.curves:
+        if c.role in (export.ROLE_SECTION_UPPER, export.ROLE_SECTION_LOWER, export.ROLE_SECTION):
+            number = c.feature.split("_s")[-1].split("_")[0]
+            out.setdefault(number, []).extend(c.points)
+    return out
+
+def test_a_straight_edge_runs_straight(straight_wing):
     build = wing_build.build_wing(straight_wing.wing_spec(), straight_wing.sidecar(), "wing")
-    edges = [c for c in build.curves if c.role != export.ROLE_WING_SURFACE]
-    assert all(len(c.points) == 2 for c in edges)
-    assert build.curves[0].points[0] == pytest.approx((0.0, 0.0, 0.0))
-    assert build.curves[0].points[1] == pytest.approx((-300.0, 0.0, 0.0))
-
+    # The leading-edge guide follows the sections' nose point, which is the
+    # rib's own point nearest its leading edge: on the line, to within that.
+    le = next(c for c in build.curves if c.role == export.ROLE_WING_LE).points
+    assert le[0][0] == pytest.approx(0.0, abs=1e-6)
+    assert le[-1][0] == pytest.approx(-300.0, abs=1e-6)
+    assert all(math.hypot(p[1], p[2]) < wing.EDGE_TOL for p in le)
+    # An untapered wing's does not wander: the same offset all the way along.
+    assert max(p[1] for p in le) - min(p[1] for p in le) < 1e-6
 
 def test_an_offset_wing_names_its_sections_root_to_tip(straight_wing):
-    spec = straight_wing.wing_spec(offset="1", profiles=export.PROFILES_ALL)
+    spec = straight_wing.wing_spec(offset="1")
     build = wing_build.build_wing(spec, straight_wing.sidecar(), "inner", index=2)
     names = [c.feature for c in build.curves]
     sections = build.section_names
     # A sharp trailing edge closes the loop; cut at the nose, its halves are joined.
     assert sections[0] == "inner_2_s01_joined"
-    assert names[-2:] == ["inner_2_le", "inner_2_te"]
-    assert not any(c.role == export.ROLE_WING_SURFACE for c in build.curves)
+    assert {"inner_2_le", "inner_2_te", "inner_2_upper_50", "inner_2_lower_50"} <= set(names)
     assert build.station_count == len(sections)
     assert sorted(build.joins[0][0]) == ["inner_2_s01_lower", "inner_2_s01_upper"]
 
@@ -414,12 +452,17 @@ def rib_te_ends(synthetic):
 def test_a_blunt_wing_has_an_edge_along_each_corner():
     synthetic = blunt_wing()
     build = wing_build.build_wing(synthetic.wing_spec(), synthetic.sidecar(), "w")
-    by_name = {c.feature: c.points for c in build.curves if c.role != export.ROLE_WING_SURFACE}
+    by_name = {c.feature: c.points for c in build.curves
+               if c.role in export.WING_EDGE_ROLES and c.role != export.ROLE_WING_SURFACE}
     assert set(by_name) == {"w_le", "w_te_upper", "w_te_lower"}
     (root_up, root_low), (tip_up, tip_low) = rib_te_ends(synthetic)
-    assert by_name["w_te_upper"] == pytest.approx([root_up, tip_up], abs=1e-9)
-    assert by_name["w_te_lower"] == pytest.approx([root_low, tip_low], abs=1e-9)
-
+    for name, root, tip in (("w_te_upper", root_up, tip_up), ("w_te_lower", root_low, tip_low)):
+        assert by_name[name][0] == pytest.approx(root, abs=1e-6)
+        assert by_name[name][-1] == pytest.approx(tip, abs=1e-6)
+    # Each section goes in as a rib does: one curve round the nose, and the
+    # edge line, joined.
+    assert all(len(sources) == 2 for sources, _ in build.joins)
+    assert build.joins[0] == (("w_s01", "w_s01_te"), "w_s01_joined")
 
 def test_a_trailing_edge_file_off_the_corners_still_places_them(tmp_path):
     """The file runs along the chord line, a little below both corners: it only
@@ -430,8 +473,10 @@ def test_a_trailing_edge_file_off_the_corners_still_places_them(tmp_path):
     by_name = {c.feature: c.points for c in build.curves}
     (root_up, root_low), (tip_up, tip_low) = rib_te_ends(synthetic)
     for name, root, tip in (("w_te_upper", root_up, tip_up), ("w_te_lower", root_low, tip_low)):
-        assert by_name[name][0] == pytest.approx(root, abs=1e-9)
-        assert by_name[name][-1] == pytest.approx(tip, abs=1e-9)
+        # The wing's own corner, which is the rib's to within where the file
+        # puts the trailing edge's line through it.
+        assert by_name[name][0] == pytest.approx(root, abs=0.01)
+        assert by_name[name][-1] == pytest.approx(tip, abs=0.01)
         # An untapered wing's corners run straight.
         mid = by_name[name][len(by_name[name]) // 2]
         assert mid[1] == pytest.approx(root[1], abs=1e-6)
@@ -450,7 +495,7 @@ def test_a_trailing_edge_file_that_misses_the_edge_line_is_refused(tmp_path):
 
 def test_an_offset_blunt_wing_has_an_edge_along_each_offset_corner():
     synthetic = blunt_wing()
-    spec = synthetic.wing_spec(offset="2", profiles=export.PROFILES_ALL)
+    spec = synthetic.wing_spec(offset="2")
     build = wing_build.build_wing(spec, synthetic.sidecar(), "w")
     by_name = {c.feature: c.points for c in build.curves}
     assert "w_te" not in by_name
@@ -466,34 +511,10 @@ def test_an_offset_blunt_wing_has_an_edge_along_each_offset_corner():
 # -- a loft through the root and tip alone -----------------------------------
 
 
-def test_root_and_tip_only_exports_two_profiles_and_surface_guides(hooked_wing, tmp_path):
-    spec = hooked_wing.wing_spec(tmp_path, offset="2", profiles=export.PROFILES_ENDS)
-    build = wing_build.build_wing(spec, hooked_wing.sidecar(), "w")
-    names = [c.feature for c in build.curves]
-    fractions = [f for f in wing.SURFACE_GUIDES if f >= wing.OFFSET_GUIDES_FROM]
-    guides = ["w_" + wing.guide_tag(side, f) for side in ("upper", "lower") for f in fractions]
-    # A sharp SD7037 offset 2 mm in comes to a corner at its nose, so each end
-    # goes in two halves, joined.
-    ends = [n for n in names if n.startswith(("w_root_", "w_tip_"))]
-    assert sorted(ends) == ["w_root_lower", "w_root_upper", "w_tip_lower", "w_tip_upper"]
-    assert names == ends + ["w_le", "w_te"] + guides
-    assert build.section_names == ["w_root_joined", "w_tip_joined"]
-    assert build.station_count == 2
-    assert len(build.offset.sections) > 2   # still worked out through all of them
-    profiles = {c.feature: c.points for c in build.curves}
-    profiles["w_root"] = profiles["w_root_upper"] + profiles["w_root_lower"]
-    profiles["w_tip"] = profiles["w_tip_upper"] + profiles["w_tip_lower"]
-    for curve in build.curves:
-        if curve.role != export.ROLE_WING_SURFACE:
-            continue
-        # Each guide lands on a point of each end profile, which is what lets
-        # the loft take it.
-        assert min(math.dist(curve.points[0], p) for p in profiles["w_root"]) < 1e-9
-        assert min(math.dist(curve.points[-1], p) for p in profiles["w_tip"]) < 1e-9
 
 
-def test_surface_guides_follow_the_offset_wing_between_its_ends(straight_wing):
-    spec = straight_wing.wing_spec(offset="2", profiles=export.PROFILES_ENDS)
+def test_surface_guides_follow_the_offset_wing_between_its_sections(straight_wing):
+    spec = straight_wing.wing_spec(offset="2")
     build = wing_build.build_wing(spec, straight_wing.sidecar(), "w", check=True)
     frame = build.model.frame
     inner = build.offset.loft()
@@ -520,7 +541,7 @@ def test_every_exported_point_stands_clear_of_the_last(hooked_wing, tmp_path):
 # -- the wing itself, held to its shape --------------------------------------
 
 
-def test_the_wings_own_guides_land_on_every_rib(hooked_wing, tmp_path):
+def test_the_wings_end_sections_are_its_ribs_as_drawn(hooked_wing, tmp_path):
     build = wing_build.build_wing(hooked_wing.wing_spec(tmp_path), hooked_wing.sidecar(), "w")
     from airfoil_converter import parser
 
@@ -528,12 +549,25 @@ def test_the_wings_own_guides_land_on_every_rib(hooked_wing, tmp_path):
     # Each rib as SolidWorks draws it: the spline through its exported points.
     ribs = [wing.as_drawn(export.build_curves(data, hooked_wing.spec(s), "rib")[0].points)
             for s in hooked_wing.stations]
-    guides = [c for c in build.curves if c.role == export.ROLE_WING_SURFACE]
-    assert len(guides) == 2 * len(wing.SURFACE_GUIDES)
-    for guide in guides:
-        for rib in ribs:
-            assert min(math.dist(p, q) for p in guide.points for q in rib) < 1e-9, guide.feature
+    sections = section_points(build)
+    first, last = sections[min(sections)], sections[max(sections)]
+    for points, rib in ((first, ribs[0]), (last, ribs[-1])):
+        assert max(to_polyline(p, rib) for p in points[::7]) < 0.01
 
+
+def test_an_offset_wing_s_guides_meet_every_section_at_their_own_fraction(straight_wing):
+    """A guide landed on the point of each section nearest its fraction, and
+    between sections a tenth of a millimetre apart that zigzagged too hard for
+    SolidWorks to loft two of them."""
+    build = wing_build.build_wing(straight_wing.wing_spec(offset="2"), straight_wing.sidecar(), "w")
+    sections = section_points(build)
+    guides = [c for c in build.curves if c.role == export.ROLE_WING_SURFACE]
+    fractions = [f for f in wing.SURFACE_GUIDES if f >= wing.OFFSET_GUIDES_FROM]
+    assert len(guides) == 2 * len(fractions)
+    for guide in guides:
+        for number, points in sections.items():
+            assert min(math.dist(p, q) for p in guide.points for q in points) < 1e-9, (
+                guide.feature, number)
 
 @pytest.mark.parametrize("thickness", export.THICKNESS_CHOICES)
 def test_the_thickness_rule_decides_the_shape_between_ribs(thickness, tmp_path):
@@ -615,11 +649,60 @@ def test_every_section_of_an_offset_wing_comes_in_the_same_pieces(tmp_path):
     for direction in (export.OFFSET_OUTWARD, export.OFFSET_INWARD):
         spec = synthetic.wing_spec(offset="2", offset_dir=direction)
         build = wing_build.build_wing(spec, synthetic.sidecar(), "w")
-        assert [sorted(s) for s, _ in build.joins] == [
-            ["w_root_lower", "w_root_te", "w_root_upper"],
-            ["w_tip_lower", "w_tip_te", "w_tip_upper"],
-        ]
+        assert len(build.joins) == len(build.offset.sections) > 2
+        for number, (sources, name) in enumerate(build.joins, start=1):
+            assert name == f"w_s{number:02d}_joined"
+            assert sorted(sources) == [f"w_s{number:02d}_{piece}" for piece in ("lower", "te", "upper")]
 
+
+def test_a_swallowtail_left_at_a_crease_is_cut_out_at_its_crossing():
+    """A square whose top edge runs past its corner and whose left edge comes
+    back through it: the small loop goes, and where they crossed is the corner."""
+    loop = [(0.0, 0.0), (10.0, 0.0), (10.0, 10.0), (-1.0, 10.0), (0.0, 11.0)]
+    assert len(wing_offset._crossing_pairs(loop)) == 1
+    assert wing_offset._untangle(loop) == [(0.0, 0.0), (10.0, 0.0), (10.0, 10.0), (0.0, 10.0)]
+    # The same loop started inside the little loop keeps the square all the same.
+    turned = loop[3:] + loop[:3]
+    assert sorted(wing_offset._untangle(turned)) == sorted([(0.0, 0.0), (10.0, 0.0), (10.0, 10.0), (0.0, 10.0)])
+    square = [(0.0, 0.0), (1.0, 0.0), (1.0, 1.0), (0.0, 1.0)]
+    assert wing_offset._untangle(square) == square
+
+def _blunt_wing():
+    return SyntheticWing([0.0, 300.0], lambda s: 0.0, lambda s: -200.0,
+                         te_mode=export.TE_LINE, te_thickness="0.8")
+
+
+def test_an_edit_keeps_the_sections_the_loft_runs_through():
+    """A loft runs through its profiles by name, and one that gained or lost a
+    profile broke on every change of offset."""
+    synthetic = _blunt_wing()
+    first = wing_build.build_wing(synthetic.wing_spec(offset="2"), synthetic.sidecar(), "w")
+    for offset in ("1.5", "3"):
+        edited = wing_build.build_wing(synthetic.wing_spec(offset=offset), synthetic.sidecar(),
+                                       "w", sections=first.station_count)
+        assert edited.station_count == first.station_count
+        assert [name for _, name in edited.joins] == [name for _, name in first.joins]
+
+
+def test_a_wing_lofted_through_every_section_has_some_to_spare():
+    synthetic = _blunt_wing()
+    model = wing_build.stand_up(synthetic.wing_spec(offset="2"), synthetic.sidecar())
+
+    def count(spare):
+        return len(wing_offset.offset_wing(
+            model.frame, model.loft, -2.0, wing.OPEN, wing.CLOSED, model.te_mode,
+            model.te_thickness, spare=spare).sections)
+
+    assert count(wing_offset.SPARE_SECTIONS) == count(0) + wing_offset.SPARE_SECTIONS
+
+def test_a_count_the_wall_cannot_be_kept_to_is_not_forced():
+    """Too few to hold the wall: the loft will have to be picked again, so the
+    wing comes out as a first export would, spare sections and all."""
+    synthetic = _blunt_wing()
+    spec = synthetic.wing_spec(offset="2")
+    free = wing_build.build_wing(spec, synthetic.sidecar(), "w")
+    squeezed = wing_build.build_wing(spec, synthetic.sidecar(), "w", sections=3)
+    assert squeezed.station_count == free.station_count
 
 def test_a_hairpin_left_by_the_trim_is_taken_out():
     # A nose corner at (0, 0), turning about 100°, with a point 0.07 mm past it
@@ -742,6 +825,41 @@ def test_a_nose_too_tight_to_draw_is_left_as_one_corner():
             on_circle(0.05, -175.0), on_circle(0.05, 175.0)]
     out = fill_between(skin, loop, d)
     assert out[:2] == loop[:2]
+
+
+class WedgeSkin:
+    """A skin that is a wedge, nose at the origin: the wall inside it is a
+    wedge too, with a crease where its two sides meet."""
+
+    def __init__(self, half_angle_deg=30.0):
+        self.t = math.radians(half_angle_deg)
+        reach = 10.0 * math.tan(self.t)
+        self.pts = [(0.0, 0.0), (10.0, -reach), (10.0, reach)]
+        self.loft = self
+
+    def outline(self, _s):
+        return list(self.pts)
+
+    def distance(self, _s, p, faces=True):
+        up = (-math.sin(self.t), math.cos(self.t))
+        down = (-math.sin(self.t), -math.cos(self.t))
+        return min(-(p[0] * n[0] + p[1] * n[1]) for n in (up, down))
+
+
+def test_a_crease_the_trim_stopped_short_of_gets_its_corner_back():
+    """At the tip of one wing, offset 2.65 mm, the trim stopped both sides of
+    the nose's crease short of where they meet, and a 0.12 mm line across stood
+    0.06 mm inside it: the wall there read 2.69. The corner goes back in."""
+    skin = WedgeSkin(30.0)
+    d = 1.0
+    apex = (d / math.sin(skin.t), 0.0)
+    c, s = math.cos(skin.t), math.sin(skin.t)
+    loop = [(apex[0] + 0.08 * c, 0.08 * s), (apex[0] + 0.08 * c, -0.08 * s),
+            (apex[0] + 5.0 * c, -5.0 * s), (apex[0] + 5.0 * c, 5.0 * s)]
+    out, _ = wing_offset._fill_gaps(skin, 0.0, loop, [True, False, False, False], d, True)
+    assert len(out) == 5
+    assert out[1] == pytest.approx(apex, abs=1e-3)
+    assert skin.distance(0.0, out[1]) == pytest.approx(d, abs=1e-4)
 
 
 def test_two_points_closer_than_a_fiftieth_of_a_millimetre_are_one_point():

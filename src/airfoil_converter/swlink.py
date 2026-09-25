@@ -40,7 +40,10 @@ from typing import Collection, Dict, List, Optional, Protocol, Sequence, Tuple
 
 from . import writer
 from .export import Curve, joinable
-from .swcom import MINIMUM_MAJOR, DocInfo, FeatureInfo, SolidWorksError, meets_minimum, version_label
+from .swcom import (
+    FOLDER_END_TAG, MINIMUM_MAJOR, DocInfo, FeatureInfo, SolidWorksError, meets_minimum,
+    version_label,
+)
 
 
 class SolidWorks(Protocol):
@@ -52,7 +55,7 @@ class SolidWorks(Protocol):
     def curve_features(self) -> List[FeatureInfo]: ...
     def insert_curve(self, path: str, name: str) -> str: ...
     def insert_composite_curve(self, sources: Sequence[str], name: str) -> str: ...
-    def composite_sources(self, name: str) -> List[str]: ...
+    def composite_parents(self, name: str) -> List[str]: ...
     def rename_feature(self, current: str, new: str) -> str: ...
     def feature_names(self) -> List[str]: ...
     def reload_curve(self, name: str, path: str) -> None: ...
@@ -325,9 +328,11 @@ def _join(
         # Already there, from an earlier push. Report it anyway, so a record
         # made before it existed still learns the name and stops calling it a
         # stray. A section can change how many pieces it comes in — a nose
-        # that has come to a corner is two — so what it joins is checked.
+        # that has come to a corner is two — so what it joins is checked. Which
+        # curves, not in what order: the order comes from the same outline
+        # every time, and reading it rolls the whole part back and forward.
         try:
-            same = list(sw.composite_sources(join_as)) == list(sources)
+            same = sorted(sw.composite_parents(join_as)) == sorted(sources)
         except SolidWorksError as exc:
             result.failures.append((join_as, str(exc)))
             return
@@ -447,7 +452,35 @@ def _named(folders: Dict[str, List[str]], wanted: Sequence[str], fallback: str,
         name for name, contents in folders.items()
         if name not in ignore and any(item in contents for item in wanted)
     ]
-    return holders[0] if len(holders) == 1 else fallback
+    if len(holders) == 1 and not _tag_named(holders[0]):
+        return holders[0]
+    return fallback
+
+
+def _tag_named(name: str) -> bool:
+    """A folder called what SolidWorks calls a folder's closing tag.
+
+    Nobody chose that: an earlier arrange, misreading the tree, handed a
+    closing tag's name to a folder it made (see ``swcom._closes_folder``).
+    """
+    return FOLDER_END_TAG in name
+
+
+def _renamed(sw: SolidWorks, folders: Dict[str, List[str]], holder: str, wanted: str,
+             result: ArrangeResult) -> str:
+    """The folder under its proper name, if it had been given a tag's."""
+    if not _tag_named(holder) or wanted in folders:
+        return holder
+    try:
+        kept = sw.rename_feature(holder, wanted)
+    except SolidWorksError as exc:
+        result.failures.append((holder, str(exc)))
+        return holder
+    folders[kept] = folders.pop(holder)
+    for contents in folders.values():
+        if holder in contents:
+            contents[contents.index(holder)] = kept
+    return kept
 
 
 def _clear_out(sw: SolidWorks, folders: Dict[str, List[str]], wanted: Sequence[str],
@@ -495,6 +528,7 @@ def arrange(
             continue
         holder = _holder(folders, wanted)
         if holder is not None:
+            holder = _renamed(sw, folders, holder, group.folder, result)
             inner.append(holder)
             result.kept.append(holder)
             continue
@@ -514,7 +548,7 @@ def arrange(
 
     holder = _holder(folders, inner)
     if holder is not None:
-        result.kept.append(holder)
+        result.kept.append(_renamed(sw, folders, holder, parent, result))
         return result
 
     name = _named(folders, inner, parent, ignore=inner)

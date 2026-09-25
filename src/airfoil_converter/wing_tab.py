@@ -32,8 +32,6 @@ from . import store, swcom, swlink, swloft, theme, ui_text, widgets, wing, wing_
 from .export import (
     OFFSET_DIRECTIONS,
     OFFSET_INWARD,
-    PROFILES_ALL,
-    PROFILES_ENDS,
     THICKNESS_BLENDED,
     THICKNESS_SCALED,
     ROLE_SECTION_JOINED,
@@ -56,7 +54,6 @@ CURVE_TYPES = [("Curve files", "*.sldcrv *.txt"), ("All files", "*.*")]
 
 EDGE_LABELS = {EDGE_FILE: "Curve file", EDGE_LINE: "Straight line"}
 END_LABELS = {wing.OPEN: "Open", wing.CLOSED: "Closed"}
-PROFILE_LABELS = {PROFILES_ENDS: "Root and tip only", PROFILES_ALL: "All sections"}
 THICKNESS_LABELS = {THICKNESS_BLENDED: "Blended root to tip",
                     THICKNESS_SCALED: "Airfoil scaled to chord"}
 
@@ -85,7 +82,6 @@ def form_to_spec(form: Dict[str, Any], ribs: List[str]) -> WingSpec:
         offset=form["offset"].strip(),
         offset_dir=form["offset_dir"],
         extension=form["extension"],
-        profiles=form.get("profiles", PROFILES_ENDS),
         thickness=form.get("thickness", THICKNESS_BLENDED),
     )
 
@@ -102,7 +98,6 @@ def spec_to_form(spec: WingSpec) -> Dict[str, Any]:
         "offset": spec.offset,
         "offset_dir": spec.offset_dir,
         "extension": spec.extension,
-        "profiles": spec.profiles,
         "thickness": spec.thickness,
     }
 
@@ -198,7 +193,6 @@ class WingTab(tk.Frame):
         self.swap_ends = tk.BooleanVar(value=False)
         self.offset = tk.StringVar()
         self.offset_dir = tk.StringVar(value=OFFSET_INWARD)
-        self.profiles = tk.StringVar(value=PROFILES_ENDS)
         self.thickness = tk.StringVar(value=THICKNESS_BLENDED)
         self.loft_after = tk.BooleanVar(value=False)
         self.ribs_text = tk.StringVar(value="")
@@ -238,7 +232,7 @@ class WingTab(tk.Frame):
 
         self._build()
         for var in (self.le_mode, self.te_mode, self.root_end, self.tip_end, self.offset,
-                    self.offset_dir, self.profiles, self.wing_name):
+                    self.offset_dir, self.wing_name):
             var.trace_add("write", lambda *_: self._refresh_text())
         self.refresh()
         self._show_result()
@@ -404,19 +398,11 @@ class WingTab(tk.Frame):
         widgets.Segmented(distance, self.offset_dir, OFFSET_DIRECTIONS,
                           width=140).grid(row=0, column=1, padx=(px(8), 0))
 
-        # Profiles only says what an offset wing exports, so it is greyed out
-        # while there is no offset — kept on screen, so it is not a surprise.
-        self.profiles_label = h._row_label(body, 1, "Profiles")
-        self.profiles_seg = widgets.Segmented(
-            body, self.profiles, (PROFILES_ENDS, PROFILES_ALL), labels=PROFILE_LABELS,
-        )
-        self.profiles_seg.grid(row=1, column=1, sticky="ew", pady=(0, px(6)))
-
-        h._row_label(body, 2, "Thickness")
+        h._row_label(body, 1, "Thickness")
         widgets.Segmented(
             body, self.thickness, (THICKNESS_BLENDED, THICKNESS_SCALED),
             labels=THICKNESS_LABELS,
-        ).grid(row=2, column=1, sticky="ew", pady=(0, px(6)))
+        ).grid(row=1, column=1, sticky="ew", pady=(0, px(6)))
 
         self._wrapped_hint(body, STRIP_WIDTH - 24 - 118,
                            textvariable=self.offset_hint).grid(row=3, column=1, sticky="w")
@@ -592,12 +578,10 @@ class WingTab(tk.Frame):
         self.ends_readout.set(ui_text.ends_readout(self.root_end.get(), self.tip_end.get()))
         self.root_hint.set(ui_text.END_HINTS.get(self.root_end.get(), ""))
         self.tip_hint.set(ui_text.END_HINTS.get(self.tip_end.get(), ""))
-        offset, profiles = self.offset.get(), self.profiles.get()
+        offset = self.offset.get()
         self.offset_readout.set(ui_text.offset_readout(offset, self.offset_dir.get()))
-        self.offset_hint.set(ui_text.offset_hint(offset, profiles))
+        self.offset_hint.set(ui_text.offset_hint(offset))
         has_offset = bool(offset.strip())
-        self.profiles_seg.set_enabled(has_offset)
-        self.profiles_label.configure(fg=theme.LABEL if has_offset else theme.FAINT)
 
         sidecar = self._sidecar()
         record = sidecar.find_wing(self._editing) if (sidecar and self._editing) else None
@@ -612,7 +596,6 @@ class WingTab(tk.Frame):
             live=len(record.live_curves()) if record else 0,
             te_line=self._te_line(),
             offset=has_offset,
-            all_sections=profiles == PROFILES_ALL,
         ))
         self._show_readout()
 
@@ -713,7 +696,6 @@ class WingTab(tk.Frame):
             "root_end": self.root_end.get(), "tip_end": self.tip_end.get(),
             "swap_ends": self.swap_ends.get(), "offset": self.offset.get(),
             "offset_dir": self.offset_dir.get(), "extension": self.extension.get(),
-            "profiles": self.profiles.get(),
             "thickness": self.thickness.get(),
         }
 
@@ -1065,18 +1047,25 @@ class WingTab(tk.Frame):
         snapshot = copy.deepcopy(sidecar)
         return sidecar, record, stem, index, spec, own, snapshot
 
+    @staticmethod
+    def _loft_sections(record) -> int:
+        """How many profiles the wing's loft runs through, when it was exported
+        with every section: an edit keeps that many so the loft follows it."""
+        return record.station_count if record is not None and record.station_count > 2 else 0
+
     def check(self) -> None:
         if self._pending_job is not None:
             return
         try:
-            _, _, stem, index, spec, own, snapshot = self._prepare()
+            _, record, stem, index, spec, own, snapshot = self._prepare()
         except (InputError, GeometryError) as exc:
             self._set_status(str(exc), ok=False)
             return
+        sections = self._loft_sections(record)
 
         def work(say):
             return wing_build.build_wing(spec, snapshot, stem, index, progress=say,
-                                         check=True, own_names=own)
+                                         check=True, own_names=own, sections=sections)
 
         self._open_work_tracker("check", wing_base(stem, index), "")
         self._start("check", work, {})
@@ -1106,9 +1095,12 @@ class WingTab(tk.Frame):
             self._set_status(str(exc), ok=False)
             return
 
+        sections = self._loft_sections(record)
+
         def work(say):
             return wing_build.build_wing(spec, snapshot, stem, index, progress=say,
-                                         check=bool(spec.offset_mm()), own_names=own)
+                                         check=bool(spec.offset_mm()), own_names=own,
+                                         sections=sections)
 
         base = wing_base(stem, index)
         self._open_work_tracker("export", base, base + swloft.LOFT_SUFFIX)
