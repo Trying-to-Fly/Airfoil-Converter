@@ -12,7 +12,7 @@ REM The bundled faces (Libre Franklin, JetBrains Mono) are registered privately
 REM at launch. The folder is carried whether or not the .ttf files are in it: a
 REM build without them falls back to Segoe UI and Consolas, which is a design
 REM the window is meant to survive, not a failure.
-pyinstaller --onefile --windowed --name "Airfoil Converter v1.8-dev2" ^
+pyinstaller --onefile --windowed --name "Airfoil Converter v1.8" ^
     --paths src ^
     --add-data "src\airfoil_converter\assets\fonts;assets/fonts" ^
     --hidden-import pythoncom ^
