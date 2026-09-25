@@ -480,7 +480,7 @@ natural cubic spline through the points, spaced by the distance between them,
 and straight lines between the same points cut up to 0.18 mm inside it at the
 nose. An offset wing's profile that comes to a corner — an inward offset deeper
 than the nose radius — would loop a spline round it, so every section of an
-offset wing is written in two halves meeting at its nose
+offset wing is written in two halves meeting at its foremost point
 (`wing_inner_s01_upper`, `…_lower`), corner or not: a loft will not join
 profiles cut into different numbers of pieces. The wing's own sections have a
 round nose, and go in as its ribs do, one curve round it: cut there, each half
@@ -567,8 +567,16 @@ longer made are left in the part, unused.
 An inward offset deeper than the airfoil's nose radius folds the nose into a
 crease, and on a tapered wing that crease grows along the span: on one 1 m
 wing offset 1.35 mm it went from none at the root to over 100° at 750–985 mm
-and back to 30° at the tip. Each section is cut at its crease, so a loft
-through all of them follows it. A loft through root and tip alone only meets
+and back to 30° at the tip. Each section is cut at its foremost point, where
+the leading-edge curve meets it, so the seam between the loft's upper and
+lower faces runs along that curve, and the crease lies just beside the cut,
+inside one half; a loft through all the sections follows it through their
+points. They used to be cut at the crease itself, but near a closed tip,
+where the leading edge sweeps into it, which side of the nose turns hardest
+changes from one section to the next: the seam jumped by up to 0.9 mm and
+back, the leading-edge curve ran beside it rather than along it, and
+SolidWorks refused the solid loft at 0.5–1.25 mm on the wing it was found on.
+A loft through root and tip alone only meets
 it through the leading-edge guide: SolidWorks cut across it, held the wall to
 ±0.05 mm over about three quarters of the surface against all of it with every
 section, and at 1.30–1.40 mm grew a sliver face along the tip that kept the

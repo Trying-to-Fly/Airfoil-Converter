@@ -604,13 +604,32 @@ def pointed_nose():
     return upper, lower
 
 
-def test_a_section_with_a_corner_is_cut_at_the_corner():
+def test_a_section_with_a_corner_at_its_nose_is_cut_there():
     upper, lower = pointed_nose()
-    # Told its nose is elsewhere: the corner wins.
-    pieces = wing_build.split_at_nose(upper + lower, False, (0.0, 1.0), (30.0, 3.0))
+    pieces = wing_build.split_at_nose(upper + lower, False, (0.0, 1.0), (0.0, 0.0))
     assert [role for role, _, _ in pieces] == [export.ROLE_SECTION_UPPER, export.ROLE_SECTION_LOWER]
     (_, top, _), (_, bottom, _) = pieces
     assert top == upper and bottom == [upper[-1]] + lower
+
+
+def test_a_section_is_cut_at_its_nose_not_at_a_sharper_turn_beside_it():
+    """The leading-edge guide runs through each section's foremost point, and
+    the seam has to run along it. Cut at the hardest turn instead, the seam
+    jumped from one side of the nose to the other near a closed tip, and the
+    solid loft was refused."""
+    # A round nose of 2 mm radius, foremost at (0, 0), turned 40° at a point
+    # 0.6 mm round its lower side: much the hardest turn on it.
+    loop = [(2.0 + 2.0 * math.cos(math.radians(a / 2)), 2.0 * math.sin(math.radians(a / 2)))
+            for a in range(120, 600)]
+    at = next(i for i, p in enumerate(loop) if p[1] < 0 and math.hypot(*p) >= 0.6)
+    c, s_ = math.cos(math.radians(40.0)), math.sin(math.radians(40.0))
+    ox, oy = loop[at]
+    kinked = loop[:at + 1] + [(ox + (x - ox) * c - (y - oy) * s_, oy + (x - ox) * s_ + (y - oy) * c)
+                              for x, y in loop[at + 1:]]
+    nose = min(kinked, key=lambda p: p[0])
+    assert math.hypot(*nose) < 1e-9
+    pieces = wing_build.split_at_nose(kinked, False, (0.0, 1.0), nose)
+    assert pieces[0][1][-1] == pieces[1][1][0] == nose
 
 
 def test_the_halves_are_named_by_which_way_is_up():
@@ -654,6 +673,24 @@ def test_every_section_of_an_offset_wing_comes_in_the_same_pieces(tmp_path):
             assert name == f"w_s{number:02d}_joined"
             assert sorted(sources) == [f"w_s{number:02d}_{piece}" for piece in ("lower", "te", "upper")]
 
+
+
+def test_the_leading_edge_curve_runs_along_the_seam_of_every_section():
+    """The loft's upper and lower faces meet where each section is cut, and the
+    leading-edge guide has to run along that seam: beside it, a few tenths of a
+    millimetre up one side of a crease, it refused the solid loft."""
+    synthetic = SyntheticWing([0.0, 300.0], lambda s: 0.0, lambda s: -200.0,
+                              te_mode=export.TE_LINE, te_thickness="0.8")
+    for direction in (export.OFFSET_OUTWARD, export.OFFSET_INWARD):
+        build = wing_build.build_wing(synthetic.wing_spec(offset="2", offset_dir=direction),
+                                      synthetic.sidecar(), "w")
+        curves = {c.feature: c.points for c in build.curves}
+        le = curves["w_le"]
+        for number in range(1, len(build.offset.sections) + 1):
+            upper, lower = curves[f"w_s{number:02d}_upper"], curves[f"w_s{number:02d}_lower"]
+            seam = min(((a, b) for a in (upper[0], upper[-1]) for b in (lower[0], lower[-1])),
+                       key=lambda ab: math.dist(*ab))[0]
+            assert min(math.dist(seam, p) for p in le) < 1e-9, (direction, number)
 
 def test_a_swallowtail_left_at_a_crease_is_cut_out_at_its_crossing():
     """A square whose top edge runs past its corner and whose left edge comes
