@@ -110,11 +110,9 @@ class FakeSolidWorks:
         self.loft_fails = set()
         self.surface_fails = set()
         self.cap_fails = set()       # the profiles whose end will not cap
-        self.cap_fails_at = set()    # the guide counts whose loft leaves a sliver
-        self.knit_sews_sheet = set() # the guide counts whose knit closes nothing
+        self.knit_sews_sheet = False # the knit closes nothing
         self.children = {}           # what a feature's suppression carries with it
         self.wont_unsuppress = set()
-        self.held_by = 0             # guides the surface loft standing now has
         self.knit_fails = False
         self.export_fails = False
         self.sketching = False
@@ -134,8 +132,6 @@ class FakeSolidWorks:
     def insert_loft(self, profiles, guides, name, merge=False, keep_tangency=True,
                     guide_influence=0, solid=True):
         self.calls.append(("loft", name) if solid else ("surface", name, len(guides)))
-        if not solid:
-            self.held_by = len(guides)
         if name in (self.loft_fails if solid else self.surface_fails):
             raise SolidWorksError("no loft")
         self.names.append(name)
@@ -144,7 +140,7 @@ class FakeSolidWorks:
 
     def cap_end(self, loft, profile, name):
         self.calls.append(("cap", loft, profile, name))
-        if profile in self.cap_fails or self.held_by in self.cap_fails_at:
+        if profile in self.cap_fails:
             raise SolidWorksError("no cap")
         # A planar cap is not one of the loft types features_of_type is asked for.
         self.names.append(name)
@@ -154,7 +150,7 @@ class FakeSolidWorks:
         self.calls.append(("knit", tuple(surfaces), name))
         if self.knit_fails:
             raise SolidWorksError("no knit")
-        if solid and self.held_by in self.knit_sews_sheet:
+        if solid and self.knit_sews_sheet:
             raise NotASolid("sewed a sheet")
         # What it knits stays in the tree, absorbed but still calling itself a
         # lofted surface; the knit itself is a type of its own.
@@ -170,9 +166,13 @@ class FakeSolidWorks:
 
     def delete_feature(self, name):
         self.calls.append(("delete", name))
-        for held in (self.names, self.lofts):
-            if name in held:
-                held.remove(name)
+        if name not in self.names:
+            raise SolidWorksError(f"No feature called {name!r}")
+        # What stands on a feature goes with it, as a cap on a surface's edges.
+        for gone in (name,) + tuple(self.children.get(name, ())):
+            for held in (self.names, self.lofts):
+                if gone in held:
+                    held.remove(gone)
 
     def set_suppressed(self, name, suppressed):
         self.calls.append(("suppress" if suppressed else "unsuppress", name))
@@ -208,11 +208,13 @@ class FakeSolidWorks:
 
 PLANS = [LoftPlan("wing_loft", ("a", "b"), ("g",)), LoftPlan("wing_inner_loft", ("c", "d"), ("h",))]
 
-# A wing's own guides, in the order the app makes them: the two edges, then the
-# surface guides by their station along the chord.
-LADDER_GUIDES = ("w_le", "w_upper_02", "w_lower_02", "w_upper_3p5", "w_lower_3p5",
-                 "w_upper_10", "w_te_upper", "w_te_lower")
-LADDER_PLAN = LoftPlan("w_loft", ("w_root_joined", "w_tip_joined"), LADDER_GUIDES)
+# A wing's own guides, in the order the app makes them: the leading edge, the
+# surface guides by their station along the chord, then the trailing edge.
+GUIDED_PLAN = LoftPlan(
+    "w_loft", ("w_root_joined", "w_tip_joined"),
+    ("w_le", "w_upper_02", "w_lower_02", "w_upper_3p5", "w_lower_3p5",
+     "w_upper_10", "w_te_upper", "w_te_lower"),
+)
 
 
 def test_each_loft_is_written_alone(tmp_path):
@@ -239,13 +241,17 @@ def test_replacing_a_capped_loft_clears_what_it_was_made_of(tmp_path):
     sw = FakeSolidWorks(features=["wing_loft", "wing_loft_surface",
                                   "wing_loft_root_cap", "wing_loft_tip_cap"])
     sw.lofts = ["wing_loft"]
-    loft_and_export(sw, PLANS[:1], str(tmp_path))
+    # Deleting the surface takes the caps on its edges with it, as SolidWorks
+    # does; asking for them by name afterwards was what lost a real loft.
+    sw.children = {"wing_loft_surface": ("wing_loft_root_cap", "wing_loft_tip_cap")}
+    first, = loft_and_export(sw, PLANS[:1], str(tmp_path))
 
+    assert first.ok
     assert [c for c in sw.calls if c[0] == "delete"] == [
         ("delete", "wing_loft"),
-        ("delete", "wing_loft_surface"),
-        ("delete", "wing_loft_root_cap"),
         ("delete", "wing_loft_tip_cap"),
+        ("delete", "wing_loft_root_cap"),
+        ("delete", "wing_loft_surface"),
     ]
 
 
@@ -457,127 +463,53 @@ def test_a_loft_that_fails_in_the_part_says_why():
     assert "could not be lofted: no loft" in first.describe()
 
 
-# -- taking guides off until the tip will close -----------------------------
+# -- a refused solid is never made by cutting the guides back ---------------
 
 
-def test_a_surface_guide_is_told_from_an_edge_guide_by_its_name():
-    """``_upper_3p5`` is 3.5% along the upper surface. The trailing edge's own
-    guides end in the same words and carry no station."""
-    assert swloft.surface_guide("w_upper_02") == ("upper", 2.0)
-    assert swloft.surface_guide("wing_inner_1.4mm_lower_3p5") == ("lower", 3.5)
-    assert swloft.surface_guide("w_upper_95") == ("upper", 95.0)
-    assert swloft.surface_guide("w_te_upper") is None
-    assert swloft.surface_guide("w_te_lower") is None
-    assert swloft.surface_guide("w_le") is None
-
-
-def test_the_ladder_takes_the_nose_guides_off_a_rung_at_a_time():
-    rungs = swloft.guide_ladder(LADDER_GUIDES)
-    assert [len(guides) for guides, _ in rungs] == [8, 7, 7, 6, 4, 3]
-    assert rungs[0][1] == ""
-    assert rungs[1][0] == tuple(g for g in LADDER_GUIDES if g != "w_lower_02")
-    assert "lower 2%" in rungs[1][1]
-    assert rungs[2][0] == tuple(g for g in LADDER_GUIDES if g != "w_upper_02")
-    assert rungs[4][0] == ("w_le", "w_upper_10", "w_te_upper", "w_te_lower")
-    assert rungs[5][0] == ("w_le", "w_te_upper", "w_te_lower")
-    # Whatever is dropped, what is left keeps the order the app made it in.
-    for guides, _ in rungs:
-        assert list(guides) == [g for g in LADDER_GUIDES if g in guides]
-
-
-def test_a_rung_that_would_drop_nothing_is_not_climbed_twice():
-    """A wing with no guides near its nose has only the last rung to offer."""
-    rungs = swloft.guide_ladder(("w_le", "w_upper_50", "w_te_upper"))
-    assert [len(guides) for guides, _ in rungs] == [3, 2]
-
-
-def test_a_tip_that_will_not_cap_is_lofted_again_with_fewer_guides():
-    """One guide's doing: on the wing this was found on, the lower one at 2% of
-    the chord left a sliver face along the tip that no surface would span."""
+def test_a_tip_that_will_not_cap_keeps_every_guide():
+    """On the wing this was found on, a loft through root and tip alone grew a
+    sliver face along the tip. Dropping guides until it capped hid that; the
+    surface the wing asked for is what stays, lofted once."""
     sw = FakeSolidWorks()
     sw.loft_fails = {"w_loft"}
-    sw.cap_fails_at = {8}
-    first, = loft_in_part(sw, [LADDER_PLAN])
+    sw.cap_fails = {"w_tip_joined"}
+    first, = loft_in_part(sw, [GUIDED_PLAN])
+
+    assert first.ok and first.surface and not first.capped
+    assert first.feature == "w_loft"
+    assert [c for c in sw.calls if c[0] == "surface"] == [("surface", "w_loft_surface", 8)]
+    assert "w_loft_root_cap" not in sw.names and "w_loft_surface" not in sw.names
+    assert first.describe() == (
+        "w_loft lofted as a surface: SolidWorks would not make it a solid "
+        "(8 guides). [no cap]")
+
+
+def test_a_knit_that_sews_a_sheet_leaves_the_surface():
+    """Three sheets in, one sheet out: the caps and the loft close nothing
+    between them."""
+    sw = FakeSolidWorks()
+    sw.loft_fails = {"w_loft"}
+    sw.knit_sews_sheet = True
+    first, = loft_in_part(sw, [GUIDED_PLAN])
+
+    assert first.surface and not first.capped and first.feature == "w_loft"
+    assert [c for c in sw.calls if c[0] == "delete"] == [
+        ("delete", "w_loft_root_cap"), ("delete", "w_loft_tip_cap"),
+    ]
+    assert "sewed a sheet" in first.note
+
+
+def test_a_wing_whose_surface_caps_is_a_solid_with_every_guide():
+    sw = FakeSolidWorks()
+    sw.loft_fails = {"w_loft"}
+    first, = loft_in_part(sw, [GUIDED_PLAN])
 
     assert first.capped and not first.surface
-    assert first.guides_used == 7 and first.feature == "w_loft"
-    assert first.describe() == (
-        "w_loft lofted as a surface and capped into a solid "
-        "(7 of 8 guides; the lower 2% guide was dropped to close the tip).")
-    assert [c for c in sw.calls if c[0] in ("loft", "surface", "cap", "knit", "delete")] == [
+    assert first.describe() == "w_loft lofted as a surface and capped into a solid (8 guides)."
+    assert [c for c in sw.calls if c[0] in ("loft", "surface", "cap", "knit")] == [
         ("loft", "w_loft"),
         ("surface", "w_loft_surface", 8),
-        ("cap", "w_loft_surface", "w_root_joined", "w_loft_root_cap"),
-        ("delete", "w_loft_surface"),
-        ("surface", "w_loft_surface", 7),
         ("cap", "w_loft_surface", "w_root_joined", "w_loft_root_cap"),
         ("cap", "w_loft_surface", "w_tip_joined", "w_loft_tip_cap"),
         ("knit", ("w_loft_surface", "w_loft_root_cap", "w_loft_tip_cap"), "w_loft"),
     ]
-
-
-def test_the_ladder_carries_on_to_the_rung_that_works():
-    """Dropping the upper 2% guide instead did nothing on the real wing, so the
-    rung after it drops both."""
-    sw = FakeSolidWorks()
-    sw.loft_fails = {"w_loft"}
-    sw.cap_fails_at = {8, 7}
-    first, = loft_in_part(sw, [LADDER_PLAN])
-
-    assert first.capped and first.guides_used == 6
-    assert "both 2% guides were dropped" in first.describe()
-    assert [c[2] for c in sw.calls if c[0] == "surface"] == [8, 7, 7, 6]
-
-
-def test_a_knit_that_sews_a_sheet_carries_on_down_the_ladder():
-    """Three sheets in, one sheet out: the caps and the loft close nothing
-    between them, which is the same kind of fault as an end that will not cap
-    and mends the same way."""
-    sw = FakeSolidWorks()
-    sw.loft_fails = {"w_loft"}
-    sw.knit_sews_sheet = {8}
-    first, = loft_in_part(sw, [LADDER_PLAN])
-
-    assert first.capped and first.guides_used == 7
-    assert [c[2] for c in sw.calls if c[0] == "surface"] == [8, 7]
-    assert [c[0] for c in sw.calls].count("knit") == 2
-    # The caps of the rung that sewed a sheet went with it.
-    assert [c for c in sw.calls if c[0] == "delete"] == [
-        ("delete", "w_loft_root_cap"), ("delete", "w_loft_tip_cap"),
-        ("delete", "w_loft_surface"),
-    ]
-
-
-def test_a_knit_solidworks_will_not_run_at_all_ends_the_ladder():
-    sw = FakeSolidWorks()
-    sw.loft_fails = {"w_loft"}
-    sw.knit_fails = True
-    first, = loft_in_part(sw, [LADDER_PLAN])
-
-    assert first.surface and not first.capped
-    assert [c[2] for c in sw.calls if c[0] == "surface"] == [8]
-    assert "no knit" in first.note
-
-
-def test_when_no_rung_closes_the_tip_the_wing_s_own_surface_is_what_stays():
-    sw = FakeSolidWorks()
-    sw.loft_fails = {"w_loft"}
-    sw.cap_fails_at = {8, 7, 6, 4, 3}
-    first, = loft_in_part(sw, [LADDER_PLAN])
-
-    assert first.ok and first.surface and not first.capped
-    assert first.feature == "w_loft" and first.guides_used == 8
-    assert [c[2] for c in sw.calls if c[0] == "surface"] == [8, 7, 7, 6, 4, 3, 8]
-    assert "no cap" in first.note
-    assert first.describe().startswith("w_loft lofted as a surface: SolidWorks would not")
-    assert "w_loft_surface" not in sw.names and "w_loft" in sw.names
-
-
-def test_a_wing_whose_full_guides_cap_is_not_put_through_the_ladder():
-    sw = FakeSolidWorks()
-    sw.loft_fails = {"w_loft"}
-    first, = loft_in_part(sw, [LADDER_PLAN])
-
-    assert first.capped and first.guides_used == 8 and not first.dropped
-    assert first.describe().endswith("capped into a solid (8 guides).")
-    assert [c[2] for c in sw.calls if c[0] == "surface"] == [8]
