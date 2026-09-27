@@ -516,6 +516,12 @@ class FakeCompositeFeature:
         self.doc = doc
         self.suppressed = False
         self.GetDefinition = FakeCompositeData(doc, sources, release_restores)
+        self.sources = list(sources)
+
+    @property
+    def GetParents(self):
+        # In an order of SolidWorks' own, and without touching the rollback.
+        return [FakeFeature(name) for name in reversed(self.sources)]
 
     @property
     def IsSuppressed(self):
@@ -582,6 +588,10 @@ class FakeExtension:
         self.calls.append(("SelectByID2", name, kind, append, mark))
         return name not in self.refuse
 
+    @property
+    def GetLastFeatureAdded(self):
+        return self.doc.features[-1] if self.doc.features else None
+
     def DeleteSelection2(self, options):
         gone = self.doc.selected
         self.calls.append(("DeleteSelection2", gone._name if gone else None))
@@ -641,6 +651,14 @@ class FakeDoc:
     @property
     def FirstFeature(self):
         return self.features[0] if self.features else None
+
+    def FeatureByName(self, name):
+        self.calls.append(("FeatureByName", name))
+        return next((f for f in self.features if f._name == name), None)
+
+    @property
+    def GetFeatureCount(self):
+        return len(self.features)
 
     def FeatureByPositionReverse(self, number):
         self.calls.append(("FeatureByPositionReverse", number))
@@ -774,6 +792,12 @@ def test_reading_what_a_composite_joins_releases_the_access_it_took(win32):
     assert not doc.rolled_back
     assert not any(c[0] == "EditRollback" for c in doc.calls)   # the release was enough
 
+
+def test_a_composite_s_parents_are_read_without_rolling_back():
+    session, doc = rebuilding_session()
+    doc.add_composite("rib_joined", ["rib_airfoil", "rib_airfoil_te"])
+    assert sorted(session.composite_parents("rib_joined")) == ["rib_airfoil", "rib_airfoil_te"]
+    assert not [c for c in doc.calls if c[0] in ("EditRollback", "AccessSelections")]
 
 def test_a_release_that_leaves_the_tree_rolled_back_is_followed_by_a_roll_forward(win32):
     session, doc = rebuilding_session()
@@ -999,6 +1023,52 @@ def test_a_knit_of_one_surface_is_refused_before_solidworks_sees_it():
         session.knit_to_solid(["a"], "knitted")
 
 
+
+# -- finding features without listing the tree ------------------------------
+
+
+class NamelessDoc(FakeDoc):
+    """A document that will not answer by name: the walk has to find it."""
+
+    def FeatureByName(self, name):
+        raise AttributeError("FeatureByName")
+
+
+class UnwalkableDoc(FakeDoc):
+    @property
+    def FirstFeature(self):
+        raise AssertionError("the tree was walked")
+
+
+def test_a_feature_is_found_by_name_without_walking_the_tree():
+    """One call against a walk of the whole tree: three seconds on a real part."""
+    doc = UnwalkableDoc(features=["a", "b", "c"])
+    session = swcom.Session(FakeApp(doc), (34, 0, 0), 1000)
+    assert session._curve_feature("c").Name == "c"
+    assert ("FeatureByName", "c") in doc.calls
+
+
+def test_a_document_that_will_not_answer_by_name_is_walked():
+    doc = NamelessDoc(features=["a", "b", "c"])
+    session = swcom.Session(FakeApp(doc), (34, 0, 0), 1000)
+    assert session._curve_feature("c").Name == "c"
+    with pytest.raises(SolidWorksError, match="No feature called 'd'"):
+        session._curve_feature("d")
+
+
+def test_an_insert_that_adds_two_features_cannot_be_told_apart(win32):
+    session, doc = capping_session()
+    refuse = doc.__class__.InsertPlanarRefSurface.fget
+
+    def twice(self):
+        self.add("Surface-Plane0", "RefSurface")
+        return refuse(self)
+
+    doc.__class__ = type("Twice", (FakeDoc,), {"InsertPlanarRefSurface": property(twice)})
+    with pytest.raises(SolidWorksError, match="added 2 features"):
+        session.cap_end("wing_loft_surface", "root_joined", "root_cap")
+
+
 # -- putting a suppression cascade back -------------------------------------
 
 
@@ -1010,6 +1080,40 @@ def suppression_session():
     doc.children["wing_loft"] = [f for f in doc.features if f.Name != "wing_loft"][:4]
     return session, doc
 
+
+class FolderFeature(FakeFeature):
+    """A feature with features under it, as SolidWorks has them: the first
+    reached by GetFirstSubFeature, the rest by GetNextSubFeature, and
+    GetNextFeature from any of them running on down the main tree."""
+
+    def __init__(self, name, subs=()):
+        super().__init__(name)
+        self.subs = [FolderFeature(sub) for sub in subs]
+        for a, b in zip(self.subs, self.subs[1:] + [None]):
+            a.next_sub = b
+
+    next_sub = None
+
+    @property
+    def GetFirstSubFeature(self):
+        return self.subs[0] if self.subs else None
+
+    @property
+    def GetNextSubFeature(self):
+        return self.next_sub
+
+
+def test_the_walk_takes_each_feature_under_a_folder_once():
+    doc = FakeDoc()
+    for made in (FolderFeature("Folder1", ["Curve1", "Curve2"]), FolderFeature("Loft1"),
+                 FolderFeature("Split1", ["Sketch9<3>"])):
+        doc._append(made)
+    for sub in doc.features[0].subs + doc.features[2].subs:
+        sub.next = doc.features[1]     # where the main tree carries on
+    session = swcom.Session(FakeApp(doc), (34, 0, 0), 1000)
+    assert [f.Name for f in session._walk_objects(doc.FirstFeature)] == [
+        "Folder1", "Curve1", "Curve2", "Loft1", "Split1", "Sketch9<3>",
+    ]
 
 def test_the_state_of_every_feature_is_read_in_tree_order():
     session, doc = suppression_session()

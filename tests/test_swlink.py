@@ -80,8 +80,8 @@ class FakeSolidWorks:
         self.joined_from[kept] = list(sources)
         return kept
 
-    def composite_sources(self, name):
-        return list(self.joined_from.get(name, ()))
+    def composite_parents(self, name):
+        return list(reversed(self.joined_from.get(name, ())))
 
     def rename_feature(self, current, new):
         self.calls.append(("rename", current, new))

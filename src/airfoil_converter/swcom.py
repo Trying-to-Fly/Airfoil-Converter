@@ -770,7 +770,11 @@ class Session:
                     child = None
                 if child is not None:
                     out.extend(self._walk_objects(child, depth + 1))
-            feature = call(feature, "GetNextFeature")
+            # A sub-feature's GetNextFeature carries on down the main tree, so
+            # a walk that used it went round the rest of the part again from
+            # inside every folder and sketch: 102,384 entries for a part of 632
+            # features (measured 2026-09-23). Its siblings are GetNextSubFeature.
+            feature = call(feature, "GetNextSubFeature" if depth else "GetNextFeature")
         return out
 
 
@@ -787,6 +791,15 @@ class Session:
         :meth:`_walk_objects`.
         """
         doc = self._active()
+        # A part answers by name in one call: a hundredth of a second, against
+        # three for the walk below on a part of 560 features (measured
+        # 2026-09-23), and every curve a push touches is looked up this way.
+        try:
+            found = call(doc, "FeatureByName", name)
+        except Exception:  # noqa: BLE001 - the walk below always works
+            found = None
+        if found is not None and str(call(found, "Name")) == name:
+            return found
         feature = call(doc, "FirstFeature")
         guard = 0
         while feature is not None and guard < 5000:
@@ -795,6 +808,29 @@ class Session:
                 return feature
             feature = call(feature, "GetNextFeature")
         raise SolidWorksError(f"No feature called {name!r} is in {call(doc, 'GetTitle')}.")
+
+    def _feature_count(self) -> int:
+        return int(call(self._active(), "GetFeatureCount"))
+
+    def _made_since(self, before: int) -> List[str]:
+        """What the call since ``before`` was counted made, as names.
+
+        Listing the tree either side of an insert is what used to tell, and on
+        a part of 560 features a listing takes 3.7 s over COM: two of them for
+        every curve a push inserted made an export of 60 curves take the best
+        part of ten minutes. The count and the last feature added take a
+        hundredth of a second, with the tree rolled back or not (measured
+        2026-09-23). Of more than one new feature only the last is known by
+        name; the rest are only counted.
+        """
+        added = self._feature_count() - before
+        if added <= 0:
+            return []
+        last = call(call(self._active(), "Extension"), "GetLastFeatureAdded")
+        name = str(call(last, "Name")) if last is not None else ""
+        if not name:
+            raise SolidWorksError("SolidWorks added a feature but would not say which.")
+        return [""] * (added - 1) + [name]
 
     def feature_names(self) -> List[str]:
         return [f.name for f in self.features()]
@@ -880,11 +916,11 @@ class Session:
         silent failure this whole design is built to avoid.
         """
         doc = self._active()
-        before = set(self.feature_names())
+        before = self._feature_count()
         if not call(doc, "InsertCurveFile", os.path.abspath(path)):
             raise SolidWorksError(f"SolidWorks refused to import {path}.")
 
-        created = [n for n in self.feature_names() if n not in before]
+        created = self._made_since(before)
         if len(created) != 1:
             raise SolidWorksError(
                 f"Importing {os.path.basename(path)} added {len(created)} features, "
@@ -994,7 +1030,7 @@ class Session:
         doc = self._active()
         self._select_all([(source, COMPOSITE_SELECT_MARK) for source in sources], "to join")
 
-        before = set(self.feature_names())
+        before = self._feature_count()
         made = call(doc, "InsertCompositeCurve")
         call(doc, "ClearSelection2", True)
         if not made:
@@ -1002,12 +1038,25 @@ class Session:
                 f"SolidWorks would not join {' and '.join(sources)} into one curve."
             )
 
-        created = [n for n in self.feature_names() if n not in before]
+        created = self._made_since(before)
         if len(created) != 1:
             raise SolidWorksError(
                 f"Joining added {len(created)} features, so which one it is cannot be told."
             )
         return self.rename_feature(created[0], name)
+
+    def composite_parents(self, name: str) -> List[str]:
+        """The curves a composite joins, by name, in no particular order.
+
+        What :meth:`composite_sources` reads in order, read without the
+        rollback that costs: a thousandth of a second against thirteen on a
+        part of 560 features (measured 2026-09-23), where a push checking every
+        section's join that way spent three minutes on it. Enough to tell
+        whether a composite still joins the curves it should, not which comes
+        first.
+        """
+        parents = call(self._curve_feature(name), "GetParents") or ()
+        return [str(call(parent, "Name")) for parent in parents]
 
     def composite_sources(self, name: str) -> List[str]:
         """The curves a composite joins, by name, in the order it holds them.
@@ -1162,7 +1211,7 @@ class Session:
         picks = [(p, LOFT_PROFILE_MARK) for p in profiles] + [(g, LOFT_GUIDE_MARK) for g in guides]
         self._select_all(picks, "for the loft")
 
-        before = set(self.feature_names())
+        before = self._feature_count()
         if not solid:
             # Returns nothing either way; whether it worked shows in the tree.
             call(doc, "InsertLoftRefSurface2", False, keep_tangency, False, 1.0, 0, 0)
@@ -1183,7 +1232,7 @@ class Session:
                 guide_influence,
             )
         call(doc, "ClearSelection2", True)
-        created = [n for n in self.feature_names() if n not in before]
+        created = self._made_since(before)
         if made is None or made is False or not created:
             kind = "solid" if solid else "surface"
             raise SolidWorksError(
@@ -1283,11 +1332,11 @@ class Session:
                 call(doc, "ClearSelection2", True)
                 raise SolidWorksError(f"An edge of {loft} at {profile} would not select.")
 
-        before = set(self.feature_names())
+        before = self._feature_count()
         made = call(doc, "InsertPlanarRefSurface")
         call(doc, "ClearSelection2", True)
 
-        created = [n for n in self.feature_names() if n not in before]
+        created = self._made_since(before)
         if not made or not created:
             raise SolidWorksError(
                 f"SolidWorks would not put a planar surface across the {len(edges)} "
@@ -1339,7 +1388,7 @@ class Session:
             [(body, KNIT_SELECT_MARK) for body in bodies], "to knit", SURFACE_BODY_TYPE,
         )
 
-        before = set(self.feature_names())
+        before = self._feature_count()
         made = call(
             call(doc, "FeatureManager"), "InsertSewRefSurface",
             True,            # UseGapFilters
@@ -1350,7 +1399,7 @@ class Session:
         )
         call(doc, "ClearSelection2", True)
 
-        created = [n for n in self.feature_names() if n not in before]
+        created = self._made_since(before)
         if made is None or made is False or not created:
             what = "a solid" if solid else "one surface"
             raise SolidWorksError(
