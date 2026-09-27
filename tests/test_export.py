@@ -308,5 +308,5 @@ def test_a_wing_spec_keeps_its_profiles_choice():
     assert (back.profiles, back.thickness) == (export.PROFILES_ALL, export.THICKNESS_SCALED)
     # Root and tip with guides is what an export gives unless told otherwise,
     # and the thickness follows the loft SolidWorks would make on its own.
-    assert export.WingSpec.from_dict({}).profiles == export.PROFILES_ENDS
+    assert export.WingSpec.from_dict({}).profiles == export.PROFILES_ALL
     assert export.WingSpec.from_dict({}).thickness == export.THICKNESS_BLENDED

@@ -615,11 +615,58 @@ def test_every_section_of_an_offset_wing_comes_in_the_same_pieces(tmp_path):
     for direction in (export.OFFSET_OUTWARD, export.OFFSET_INWARD):
         spec = synthetic.wing_spec(offset="2", offset_dir=direction)
         build = wing_build.build_wing(spec, synthetic.sidecar(), "w")
-        assert [sorted(s) for s, _ in build.joins] == [
-            ["w_root_lower", "w_root_te", "w_root_upper"],
-            ["w_tip_lower", "w_tip_te", "w_tip_upper"],
-        ]
+        assert len(build.joins) == len(build.offset.sections) > 2
+        for number, (sources, name) in enumerate(build.joins, start=1):
+            assert name == f"w_s{number:02d}_joined"
+            assert sorted(sources) == [f"w_s{number:02d}_{piece}" for piece in ("lower", "te", "upper")]
 
+
+def test_a_swallowtail_left_at_a_crease_is_cut_out_at_its_crossing():
+    """A square whose top edge runs past its corner and whose left edge comes
+    back through it: the small loop goes, and where they crossed is the corner."""
+    loop = [(0.0, 0.0), (10.0, 0.0), (10.0, 10.0), (-1.0, 10.0), (0.0, 11.0)]
+    assert len(wing_offset._crossing_pairs(loop)) == 1
+    assert wing_offset._untangle(loop) == [(0.0, 0.0), (10.0, 0.0), (10.0, 10.0), (0.0, 10.0)]
+    # The same loop started inside the little loop keeps the square all the same.
+    turned = loop[3:] + loop[:3]
+    assert sorted(wing_offset._untangle(turned)) == sorted([(0.0, 0.0), (10.0, 0.0), (10.0, 10.0), (0.0, 10.0)])
+    square = [(0.0, 0.0), (1.0, 0.0), (1.0, 1.0), (0.0, 1.0)]
+    assert wing_offset._untangle(square) == square
+
+def _blunt_wing():
+    return SyntheticWing([0.0, 300.0], lambda s: 0.0, lambda s: -200.0,
+                         te_mode=export.TE_LINE, te_thickness="0.8")
+
+
+def test_an_edit_keeps_the_sections_the_loft_runs_through():
+    """A loft runs through its profiles by name, and one that gained or lost a
+    profile broke on every change of offset."""
+    synthetic = _blunt_wing()
+    first = wing_build.build_wing(synthetic.wing_spec(offset="2"), synthetic.sidecar(), "w")
+    for offset in ("1.5", "3"):
+        edited = wing_build.build_wing(synthetic.wing_spec(offset=offset), synthetic.sidecar(),
+                                       "w", sections=first.station_count)
+        assert edited.station_count == first.station_count
+        assert [name for _, name in edited.joins] == [name for _, name in first.joins]
+
+
+def test_a_wing_lofted_through_every_section_has_some_to_spare():
+    synthetic = _blunt_wing()
+    every = wing_build.build_wing(synthetic.wing_spec(offset="2"), synthetic.sidecar(), "w")
+    ends = wing_build.build_wing(
+        synthetic.wing_spec(offset="2", profiles=export.PROFILES_ENDS), synthetic.sidecar(), "w")
+    assert len(every.offset.sections) == len(ends.offset.sections) + wing_offset.SPARE_SECTIONS
+    assert ends.station_count == 2
+
+
+def test_a_count_the_wall_cannot_be_kept_to_is_not_forced():
+    """Too few to hold the wall: the loft will have to be picked again, so the
+    wing comes out as a first export would, spare sections and all."""
+    synthetic = _blunt_wing()
+    spec = synthetic.wing_spec(offset="2")
+    free = wing_build.build_wing(spec, synthetic.sidecar(), "w")
+    squeezed = wing_build.build_wing(spec, synthetic.sidecar(), "w", sections=3)
+    assert squeezed.station_count == free.station_count
 
 def test_a_hairpin_left_by_the_trim_is_taken_out():
     # A nose corner at (0, 0), turning about 100°, with a point 0.07 mm past it

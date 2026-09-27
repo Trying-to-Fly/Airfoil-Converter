@@ -1002,13 +1002,23 @@ def _subdivide(loft: Loft, a: float, b: float, out: List[float]) -> None:
         _subdivide(loft, m, b, out)
 
 
+def _between(knots: Sequence[float], to: Sequence[float], s: float) -> float:
+    """``s`` carried from between ``knots`` to between ``to``, gap by gap."""
+    k = min(max(bisect.bisect_right(knots, s) - 1, 0), len(knots) - 2)
+    t = (s - knots[k]) / (knots[k + 1] - knots[k])
+    return to[k] + t * (to[k + 1] - to[k])
+
+
 def plan_stations(loft: Loft, offset: float, root_end: str, tip_end: str) -> List[Station]:
     """The offset wing's sections, root to tip.
 
     ``offset`` is signed: positive grows the wing, negative shrinks it. Where
-    the sections fall between the ribs depends only on the wing itself, so a
-    change of offset does not move them — only a closed end, which moves with
-    the offset, can take some away.
+    the sections fall between the ribs depends only on the wing itself. A
+    closed end moves in with an inward offset, and the gap between it and the
+    rib next to it is squeezed to fit rather than cut short, so every offset
+    of a wing gets the same sections, a little closer together there: a loft
+    runs through its profiles by name, and one whose profiles came and went
+    with the offset broke on every change of it.
     """
     for end in (root_end, tip_end):
         if end not in END_KINDS:
@@ -1029,7 +1039,15 @@ def plan_stations(loft: Loft, offset: float, root_end: str, tip_end: str) -> Lis
             raise GeometryError(
                 f"An inward offset of {d:g} mm from both closed ends leaves no span."
             )
-        kept = [s for s in stations if lo + MIN_SPACING <= s <= hi - MIN_SPACING]
+        # The ribs between the ends stay where they are; only the end gaps
+        # are squeezed. A closed end moved past the rib next to it leaves
+        # nothing to squeeze, and whatever it passed is dropped as before.
+        knots = list(loft.stations)
+        ends = [lo] + knots[1:-1] + [hi]
+        if all(b - a >= MIN_SPACING for a, b in zip(ends, ends[1:])):
+            kept = [_between(knots, ends, s) for s in stations[1:-1]]
+        else:
+            kept = [s for s in stations if lo + MIN_SPACING <= s <= hi - MIN_SPACING]
         return [Station(lo)] + [Station(s) for s in kept] + [Station(hi)]
 
     chosen = [Station(s) for s in stations]

@@ -66,7 +66,16 @@ REFINE_MIN = 0.05
 REFINE_PASSES = 6
 # However the blend behaves, a loft through more sections than this is no use.
 MAX_SECTIONS = 60
-
+# A wing lofted through every section gets this many more than the refinement
+# asks for, placed where the blend strays most, so that a later change of
+# offset that wants a section or two more can keep the count the loft has. On
+# one 1 m wing the refinement asked for 16 to 21 across offsets of 1.20 to
+# 2.50 mm.
+SPARE_SECTIONS = 3
+# Kept to the loft's count with fewer sections than the refinement asks for, a
+# wing's wall may stray this much of the offset: a loft that loses a profile
+# breaks, which is worse than a few hundredths of a millimetre of wall.
+KEEP_WALL = 0.05
 Progress = Callable[[str], None]
 
 
@@ -703,6 +712,7 @@ def offset_outline(
             trimmed, bridges = _fill_gaps(skin, s, trimmed, bridges, d, sign < 0)
             if not any(bridges):
                 break
+    trimmed = _untangle(trimmed)
     _, u, _ = loft.axes(s)
     along = [p[0] * u[0] + p[1] * u[1] for p in trimmed]
     middle = 0.5 * (min(along) + max(along))
@@ -712,6 +722,58 @@ def offset_outline(
         trimmed.reverse()
     looped = _start_at_tail(trimmed, lambda p: p[0] * u[0] + p[1] * u[1])
     return g.auto_close(looped)
+
+
+def _crossing_pairs(loop: Sequence[Point2]) -> List[Tuple[int, int, Point2]]:
+    """Every pair of non-neighbouring segments of a closed loop that cross."""
+    n = len(loop)
+    boxes = []
+    for i in range(n):
+        a, b = loop[i], loop[(i + 1) % n]
+        boxes.append((min(a[0], b[0]), max(a[0], b[0]), min(a[1], b[1]), max(a[1], b[1])))
+    out = []
+    for i in range(n):
+        x0, x1, y0, y1 = boxes[i]
+        for j in range(i + 2, n):
+            if i == 0 and j == n - 1:
+                continue
+            u0, u1, v0, v1 = boxes[j]
+            if u0 > x1 or u1 < x0 or v0 > y1 or v1 < y0:
+                continue
+            hit = g._segment_crossing(loop[i], loop[(i + 1) % n], loop[j], loop[(j + 1) % n])
+            if hit is not None:
+                out.append((i, j, hit[2]))
+    return out
+
+
+def _untangle(loop: List[Point2]) -> List[Point2]:
+    """Cut out any little loop the offset still makes, keeping the crossing as a corner.
+
+    Where two branches of an offset meet at a crease, what lies past the
+    crossing — a swallowtail — stands closer to the skin than the offset, and
+    the trim takes it out. Not all of it, always: its points can stand within
+    the trim's tolerance of the wall, and a few are kept. Walking onto the wall
+    across a gap near it can then find the far side of the nose, and the next
+    pass walks on from there. At the tip of the 1.20, 1.22, 1.23 and 1.33 mm
+    offsets of one wing that grew into loops round the nose — thirty-seven
+    crossings at 1.33 — which SolidWorks will not take as a curve, and which
+    the wall model measured at a hundredth of a millimetre. Of the two loops a
+    crossing makes, the smaller is the one that does not belong: cutting it
+    out, crossing by crossing, left every section of those wings within 0.06
+    mm of the offset.
+    """
+    for _ in range(len(loop)):
+        pairs = _crossing_pairs(loop)
+        if not pairs:
+            break
+        i, j, at = pairs[0]
+        between = loop[i + 1:j + 1]
+        rest = loop[j + 1:] + loop[:i + 1]
+        if abs(g.signed_area(between + [at])) <= abs(g.signed_area(rest + [at])):
+            loop = loop[:i + 1] + [at] + loop[j + 1:]
+        else:
+            loop = [at] + between
+    return loop
 
 
 # A loop that turns back on itself by more than this at a point has a spike
@@ -1094,8 +1156,15 @@ def offset_wing(
     thickness: float,
     progress: Optional[Progress] = None,
     check: bool = False,
+    sections_wanted: int = 0,
+    spare: int = 0,
 ) -> OffsetWing:
-    """Offset the whole wing by ``offset`` mm (signed: positive grows it)."""
+    """Offset the whole wing by ``offset`` mm (signed: positive grows it).
+
+    ``sections_wanted`` is how many sections a loft already runs through,
+    when one does: the wing comes out with that many if the wall allows it.
+    Otherwise ``spare`` more sections than the refinement asks for are added.
+    """
     if not math.isfinite(offset) or abs(offset) <= g.POINT_TOL:
         raise GeometryError("The wing offset must be a distance other than zero.")
     say = progress or (lambda _message: None)
@@ -1144,13 +1213,16 @@ def offset_wing(
         return max(abs(report.thinnest - d), abs(report.thickest - d))
 
     own: Dict[float, float] = {}
-    for _ in range(REFINE_PASSES):
+
+    def strays(sections: List[OffsetSection], le: Guide, te: Guide) -> List[Tuple[float, float]]:
+        """For each gap that can still be split, how far its blend strays past
+        what the sections either side carry, and the station halfway across."""
         trial = OffsetWing(frame, offset, sections, le, te, thickness=loft.thickness)
         body = [sec for sec in sections if not sec.station.rim]
         for sec in body:
             if sec.station.station not in own:
                 own[sec.station.station] = error(trial, [sec.station.station])
-        added = []
+        out = []
         for a, b in zip(body, body[1:]):
             gap = b.station.station - a.station.station
             if gap < 2.0 * REFINE_MIN:
@@ -1163,16 +1235,79 @@ def offset_wing(
             # Only a blend worse than the sections either side is the blend's
             # fault; more sections cannot fix what the sections themselves carry.
             floor = max(own[a.station.station], own[b.station.station])
-            if error(trial, probes) > floor + REFINE_TOL * d:
-                added.append(Station(a.station.station + 0.5 * gap))
+            out.append((error(trial, probes) - floor, a.station.station + 0.5 * gap))
+        return out
+
+    def with_more(sections: List[OffsetSection], added: Sequence[Station]):
+        sections = sorted(
+            sections + [make(station) for station in added], key=lambda sec: sec.station.station
+        )
+        return (sections,) + _inner_guides(skin, sections, offset)
+
+    planned = (sections, le, te, le_samples, te_samples)
+    for _ in range(REFINE_PASSES):
+        added = [Station(at) for stray, at in strays(sections, le, te) if stray > REFINE_TOL * d]
         added = added[: max(0, MAX_SECTIONS - len(sections))]
         if not added:
             break
         say(f"Adding {len(added)} section{'s' if len(added) != 1 else ''} where the blend strays...")
-        sections = sorted(
-            sections + [make(station) for station in added], key=lambda sec: sec.station.station
+        sections, le, te, le_samples, te_samples = with_more(sections, added)
+
+    def worst_first(state, count: int):
+        """Sections added one at a time where the blend strays most, up to ``count``.
+
+        The edge guides run through every section's edge point, and a section
+        crowded in among others a tenth of a millimetre apart can set them
+        swinging in the gap next door: at the tip of one wing a third spare
+        section made the wall there 0.06 mm thin. So a section that leaves the
+        worst gap worse than it was is taken out again and its gap passed over;
+        and if every gap is passed over before the count is reached, the widest
+        are split, which is where a section cannot crowd anything.
+        """
+        gaps = strays(state[0], state[1], state[2])
+        passed: set = set()
+        while len(state[0]) < count:
+            options = [(stray, at) for stray, at in gaps if at not in passed]
+            if not options:
+                break
+            _, at = max(options)
+            tried = with_more(state[0], [Station(at)])
+            after = strays(tried[0], tried[1], tried[2])
+            if max(stray for stray, _ in after) > max(stray for stray, _ in gaps) + 1e-9:
+                passed.add(at)
+                continue
+            state, gaps = tried, after
+        while len(state[0]) < count:
+            body = [sec.station.station for sec in state[0] if not sec.station.rim]
+            a, b = max(zip(body, body[1:]), key=lambda pair: pair[1] - pair[0])
+            state = with_more(state[0], [Station(0.5 * (a + b))])
+        return state
+
+    if sections_wanted and len(sections) > sections_wanted:
+        # A loft already runs through this wing's sections by name, and one
+        # that loses a profile breaks. Fewer than the refinement asked for,
+        # placed where the blend strays most, will do if the wall they make
+        # still holds to KEEP_WALL.
+        say(f"Placing {sections_wanted} sections, as the loft has...")
+        fewer = worst_first(planned, sections_wanted)
+        trial = OffsetWing(frame, offset, fewer[0], fewer[1], fewer[2], thickness=loft.thickness)
+        report = measure_wall(skin, trial)
+        if len(fewer[0]) == sections_wanted and not report.outside and max(
+            abs(report.thinnest - d), abs(report.thickest - d)
+        ) <= KEEP_WALL * d:
+            sections, le, te, le_samples, te_samples = fewer
+    if sections_wanted and len(sections) <= sections_wanted:
+        wanted = sections_wanted
+    else:
+        # The first time, or a count that could not be kept: the loft will be
+        # picked afresh, and a few spare keep the next change of offset from
+        # needing more.
+        wanted = len(sections) + spare
+    if len(sections) < wanted:
+        say(f"Placing {wanted} sections...")
+        sections, le, te, le_samples, te_samples = worst_first(
+            (sections, le, te, le_samples, te_samples), wanted
         )
-        le, te, le_samples, te_samples = _inner_guides(skin, sections, offset)
 
     body = [sec for sec in sections if not sec.station.rim]
     shifts = []

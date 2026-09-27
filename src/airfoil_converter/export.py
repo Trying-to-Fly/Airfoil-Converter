@@ -446,7 +446,9 @@ class WingSpec:
     offset: str = ""
     offset_dir: str = OFFSET_INWARD
     extension: str = ".sldcrv"
-    profiles: str = PROFILES_ENDS
+    # Every section: a nose the offset folds into a crease reaches the loft only
+    # through its sections, and a loft through root and tip alone cuts across it.
+    profiles: str = PROFILES_ALL
     thickness: str = THICKNESS_BLENDED
 
     def to_dict(self) -> Dict[str, Any]:

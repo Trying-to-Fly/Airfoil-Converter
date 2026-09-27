@@ -475,8 +475,10 @@ numbers of pieces. The joined curve is still the one to pick.
 `wing_loft`, `wing_inner_loft` — through every profile and guide it exported;
 tick *Loft in SolidWorks after export* to have it done after each export. A
 loft already there is left alone, since it follows its curves; delete it to
-loft again. Where SolidWorks will not make the solid, a surface loft is made
-instead and the status line says so. Each passes through a point
+loft again. Where SolidWorks will not make the solid, the surface loft is
+made, flat caps put across its two ends, and the three knitted into a solid;
+where even that will not close, the surface loft is left and the status line
+says so. Each passes through a point
 of every profile the loft is given, so the loft accepts it. **Thickness** says
 which shape they hold:
 
@@ -540,14 +542,27 @@ through all of them.
 
 **Profiles** says what is exported:
 
-- **Root and tip only** (the default) — the offset wing's two end profiles,
+- **All sections** (the default) — every section, numbered root to tip,
+  `wing_inner_s01`, `wing_inner_s02`, …, with the edges but no surface guides.
+  A first export gets a few more sections than the wall needs, and a later
+  change of offset keeps the number the loft already has, so the edit reloads
+  the same curves and the loft follows it. Only if the new offset cannot be
+  held to the wall with that many does the number change; then the app asks
+  first, because the loft needs its profiles picked again, and sections no
+  longer made are left in the part, unused.
+- **Root and tip only** — the offset wing's two end profiles,
   `wing_inner_root` and `wing_inner_tip`, with its edges and surface guides.
   The sections between shape the guides and are not exported.
-- **All sections** — every section, numbered root to tip, `wing_inner_s01`,
-  `wing_inner_s02`, …, with the edges but no surface guides. The number of
-  sections depends on the offset where an end is closed; when an export would
-  change it, the app asks first, because the loft needs its profiles picked
-  again, and sections no longer made are left in the part, unused.
+
+An inward offset deeper than the airfoil's nose radius folds the nose into a
+crease, and on a tapered wing that crease grows along the span: on one 1 m
+wing offset 1.35 mm it went from none at the root to over 100° at 750–985 mm
+and back to 30° at the tip. Each section is cut at its crease, so a loft
+through all of them follows it. A loft through root and tip alone only meets
+it through the leading-edge guide: SolidWorks cut across it, held the wall to
+±0.05 mm over about three quarters of the surface against all of it with every
+section, and at 1.30–1.40 mm grew a sliver face along the tip that kept the
+loft from ever being a solid.
 
 With *Close with TE line*, each exported profile also gets its straight line
 and a joined curve, `wing_inner_root_joined`; loft those.

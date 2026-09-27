@@ -35,10 +35,11 @@ from .geometry import GeometryError, Point2, Vec3
 from .parser import AirfoilParseError
 
 WING_FOLDER = "Wing Curves"
-# A turn this sharp between two neighbouring points of an offset section is a
-# corner, and the section is cut there rather than at the point nearest its
-# leading edge.
-CORNER_DEG = 30.0
+# How far along an offset section its turning is added up, either way from a
+# point, to find its nose's corner. A crease the gap filling drew as a small
+# arc of ten-degree steps turns just as hard over this stretch as one drawn
+# with a single point.
+CORNER_REACH = 0.15
 
 Progress = Callable[[str], None]
 
@@ -197,8 +198,14 @@ def build_wing(
     progress: Optional[Progress] = None,
     check: bool = False,
     own_names: Sequence[str] = (),
+    sections: int = 0,
 ) -> WingBuild:
-    """Every curve a wing export produces, named and placed in space."""
+    """Every curve a wing export produces, named and placed in space.
+
+    ``sections`` is how many profiles a loft of this wing already runs
+    through, when it was exported with every section: an offset wing keeps
+    that many if its wall allows, so the loft follows the edit.
+    """
     if spec.extension not in writer.EXTENSIONS:
         raise InputError(f"Unsupported extension {spec.extension!r}.")
     say = progress or (lambda _message: None)
@@ -251,6 +258,8 @@ def build_wing(
             model.te_thickness,
             progress=say,
             check=check,
+            sections_wanted=0 if spec.profiles == export.PROFILES_ENDS else sections,
+            spare=0 if spec.profiles == export.PROFILES_ENDS else wing_offset.SPARE_SECTIONS,
         )
         ends_only = spec.profiles == export.PROFILES_ENDS
         if ends_only:
@@ -311,6 +320,15 @@ def split_at_nose(
     Every section is cut, corner or not: a loft will not join profiles cut
     into different numbers of pieces. Offset sections are dense enough at the
     nose that a cut through a smooth one changes nothing to speak of.
+
+    Where the cut falls is the seam between the loft's upper and lower faces,
+    so it has to run smoothly from one section to the next. It is the point of
+    the front half that turns hardest over CORNER_REACH either way — the
+    corner, or where a smooth nose is tightest. It used to be the sharpest
+    single point, or the point nearest the leading edge when no point turned
+    thirty degrees; a crease drawn as a small arc in one section and as one
+    point in the next then had its cut jump half a millimetre and back from
+    section to section, and SolidWorks would not make even the surface.
     """
     pts = list(points)
     # Only the front half is searched for the corner. A blunt trailing edge
@@ -319,15 +337,27 @@ def split_at_nose(
     # very thing the cut is for — and name the pieces upper and lower of
     # nothing.
     reach = 0.5 * max((math.hypot(p[0] - nose[0], p[1] - nose[1]) for p in pts), default=0.0)
-    sharpest, at = 0.0, -1
+    turns = [0.0] + [_turn(pts[i - 1], pts[i], pts[i + 1]) for i in range(1, len(pts) - 1)] + [0.0]
+    along = [0.0]
+    for a, b in zip(pts, pts[1:]):
+        along.append(along[-1] + math.hypot(b[0] - a[0], b[1] - a[1]))
+    best, at = -1.0, -1
+    lo = 0
     for i in range(1, len(pts) - 1):
+        while along[i] - along[lo] > CORNER_REACH:
+            lo += 1
         if math.hypot(pts[i][0] - nose[0], pts[i][1] - nose[1]) > reach:
             continue
-        turn = _turn(pts[i - 1], pts[i], pts[i + 1])
-        if turn > sharpest:
-            sharpest, at = turn, i
-    if sharpest < CORNER_DEG:
-        at = min(range(len(pts)), key=lambda i: math.hypot(pts[i][0] - nose[0], pts[i][1] - nose[1]))
+        hi = i
+        while hi + 1 < len(pts) and along[hi + 1] - along[i] <= CORNER_REACH:
+            hi += 1
+        total = sum(turns[lo:hi + 1])
+        if total > best:
+            best, at = total, i
+    if at > 0:
+        # The cut goes at the sharpest point of that stretch.
+        near = [j for j in range(1, len(pts) - 1) if abs(along[j] - along[at]) <= CORNER_REACH]
+        at = max(near, key=lambda j: turns[j])
     if not 0 < at < len(pts) - 1:
         return [(ROLE_SECTION, pts, closed)]
     first, second = pts[: at + 1], pts[at:]

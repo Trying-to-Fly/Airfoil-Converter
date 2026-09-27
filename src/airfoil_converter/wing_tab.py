@@ -85,7 +85,7 @@ def form_to_spec(form: Dict[str, Any], ribs: List[str]) -> WingSpec:
         offset=form["offset"].strip(),
         offset_dir=form["offset_dir"],
         extension=form["extension"],
-        profiles=form.get("profiles", PROFILES_ENDS),
+        profiles=form.get("profiles", PROFILES_ALL),
         thickness=form.get("thickness", THICKNESS_BLENDED),
     )
 
@@ -198,7 +198,7 @@ class WingTab(tk.Frame):
         self.swap_ends = tk.BooleanVar(value=False)
         self.offset = tk.StringVar()
         self.offset_dir = tk.StringVar(value=OFFSET_INWARD)
-        self.profiles = tk.StringVar(value=PROFILES_ENDS)
+        self.profiles = tk.StringVar(value=PROFILES_ALL)
         self.thickness = tk.StringVar(value=THICKNESS_BLENDED)
         self.loft_after = tk.BooleanVar(value=False)
         self.ribs_text = tk.StringVar(value="")
@@ -408,7 +408,7 @@ class WingTab(tk.Frame):
         # while there is no offset — kept on screen, so it is not a surprise.
         self.profiles_label = h._row_label(body, 1, "Profiles")
         self.profiles_seg = widgets.Segmented(
-            body, self.profiles, (PROFILES_ENDS, PROFILES_ALL), labels=PROFILE_LABELS,
+            body, self.profiles, (PROFILES_ALL, PROFILES_ENDS), labels=PROFILE_LABELS,
         )
         self.profiles_seg.grid(row=1, column=1, sticky="ew", pady=(0, px(6)))
 
@@ -1065,18 +1065,25 @@ class WingTab(tk.Frame):
         snapshot = copy.deepcopy(sidecar)
         return sidecar, record, stem, index, spec, own, snapshot
 
+    @staticmethod
+    def _loft_sections(record) -> int:
+        """How many profiles the wing's loft runs through, when it was exported
+        with every section: an edit keeps that many so the loft follows it."""
+        return record.station_count if record is not None and record.station_count > 2 else 0
+
     def check(self) -> None:
         if self._pending_job is not None:
             return
         try:
-            _, _, stem, index, spec, own, snapshot = self._prepare()
+            _, record, stem, index, spec, own, snapshot = self._prepare()
         except (InputError, GeometryError) as exc:
             self._set_status(str(exc), ok=False)
             return
+        sections = self._loft_sections(record)
 
         def work(say):
             return wing_build.build_wing(spec, snapshot, stem, index, progress=say,
-                                         check=True, own_names=own)
+                                         check=True, own_names=own, sections=sections)
 
         self._open_work_tracker("check", wing_base(stem, index), "")
         self._start("check", work, {})
@@ -1106,9 +1113,12 @@ class WingTab(tk.Frame):
             self._set_status(str(exc), ok=False)
             return
 
+        sections = self._loft_sections(record)
+
         def work(say):
             return wing_build.build_wing(spec, snapshot, stem, index, progress=say,
-                                         check=bool(spec.offset_mm()), own_names=own)
+                                         check=bool(spec.offset_mm()), own_names=own,
+                                         sections=sections)
 
         base = wing_base(stem, index)
         self._open_work_tracker("export", base, base + swloft.LOFT_SUFFIX)
