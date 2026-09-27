@@ -232,10 +232,17 @@ def _make_lofts(
                 # deleting the knit left of it goes too, or the next attempt
                 # builds under names SolidWorks has had to make up. The caps go
                 # first: they stand on the surface's edges, and deleting the
-                # surface takes them with it.
+                # surface takes them with it. A listing of the tree is 3.7 s on
+                # a big part, so one is only asked for when a piece that was
+                # there will not go, to tell gone from stuck.
                 for piece in reversed(_capping_pieces(result)):
-                    if piece in sw.feature_names():
+                    if piece not in present:
+                        continue
+                    try:
                         sw.delete_feature(piece)
+                    except SolidWorksError:
+                        if piece in sw.feature_names():
+                            raise
             try:
                 result.feature = sw.insert_loft(
                     plan.profiles, plan.guides, plan.name,
@@ -362,16 +369,24 @@ def loft_and_export(
     os.makedirs(step_folder, exist_ok=True)
     results = _make_lofts(sw, plans, replace, surface_fallback)
 
-    # The body a capped loft offers is its knit, which counts here by type; the
-    # surface it was knitted from is still in the tree beside it, absorbed but
-    # still calling itself a lofted surface. Suppressing that would take the
-    # solid with it, so the pieces are known by name rather than by type.
-    absorbed = {name for result in results if result.capped for name in _capping_pieces(result)}
-    bodies = [b for b in sw.features_of_type(*BODY_FEATURE_TYPES) if b not in absorbed]
+    bodies = sw.features_of_type(*BODY_FEATURE_TYPES)
     for result in results:
         if not result.ok:
             continue
-        others = [name for name in bodies if name != result.feature]
+        # The body a capped loft offers is its knit, which counts here by type;
+        # the surface it was knitted from is still in the tree beside it,
+        # absorbed but still calling itself a lofted surface. Suppressing that
+        # takes the caps and the solid with it. For the loft being written that
+        # would leave nothing to write, so its pieces are known by name — a
+        # loft kept from an earlier run says nothing of having been capped. For
+        # every other loft it is what is wanted: suppressing only the knit
+        # brings the surface and caps back as loose sheets, and they would be
+        # written beside this one.
+        own = {result.feature, *_capping_pieces(result)}
+        others = [name for name in bodies if name not in own]
+        # A knit before the surface it stands on, so that nothing is asked to
+        # be suppressed that suppressing something else already took.
+        others.sort(key=lambda name: name.endswith(SURFACE_SUFFIX))
         # Suppressing a body feature suppresses everything built on it — on one
         # real part, 74 features — and unsuppressing it brings none of them
         # back. So what the tree looked like before is written down first, and

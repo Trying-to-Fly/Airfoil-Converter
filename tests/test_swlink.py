@@ -12,7 +12,7 @@ import pytest
 from airfoil_converter import swlink
 from airfoil_converter.export import Curve
 from airfoil_converter.swcom import DocInfo, FeatureInfo, SolidWorksError
-from airfoil_converter.swlink import LinkError, orphaned, push
+from airfoil_converter.swlink import ROLLBACK_BAR, LinkError, orphaned, push
 
 
 class FakeSolidWorks:
@@ -35,6 +35,8 @@ class FakeSolidWorks:
         self.rename_fails = False
         self.bar = None          # the feature the rollback bar sits after
         self.rollback_fails = False
+        self.rollforward_fails = False
+        self.listed = None       # the order the tree is listed in, when not its own
 
     def active_document(self):
         return self.doc
@@ -66,10 +68,19 @@ class FakeSolidWorks:
 
     def roll_forward(self):
         self.calls.append(("rollforward",))
+        if self.rollforward_fails:
+            raise SolidWorksError("The tree could not be rolled forward again.")
         self.bar = None
 
+    def rolled_back(self, names):
+        if self.bar is None:
+            return []
+        tree = self.curves
+        return [n for n in names if n in tree and tree.index(n) > tree.index(self.bar)]
+
     def feature_names(self):
-        return list(self.curves) + list(self.composites) + list(self.tree)
+        curves = self.curves if self.listed is None else self.listed
+        return list(curves) + list(self.composites) + list(self.tree)
 
     def insert_composite_curve(self, sources, name):
         self.calls.append(("join", tuple(sources), name))
@@ -200,6 +211,55 @@ def test_the_bar_comes_forward_even_when_a_reload_fails(tmp_path, curves):
     assert kinds.index("rollforward") < kinds.index("rebuild")
     assert sw.calls.index(("rollforward",)) < sw.calls.index(("suppress", False))
     assert sw.bar is None
+
+
+def test_the_bar_goes_after_the_last_curve_in_the_tree_not_the_listing(tmp_path, curves):
+    """GetFeatures' order means nothing, by its own help. A bar set after the
+    last curve listed can stop short of one the tree holds further down."""
+    sw = FakeSolidWorks(features=["rib_airfoil", "rib_camber"])
+    sw.listed = ["rib_camber", "rib_airfoil"]
+    push(sw, curves, str(tmp_path))
+
+    rollbacks = [c for c in sw.calls if c[0] == "rollback"]
+    assert rollbacks == [("rollback", "rib_airfoil"), ("rollback", "rib_camber")]
+    assert sw.calls.index(rollbacks[-1]) < min(indexes(sw.calls, "reload"))
+    assert sw.bar is None
+
+
+def test_a_bar_that_will_not_settle_is_brought_back_before_the_push(tmp_path, curves):
+    """Moved once and then refused, the bar must not be left partway down."""
+    sw = FakeSolidWorks(features=["rib_airfoil", "rib_camber"])
+    sw.listed = ["rib_camber", "rib_airfoil"]
+    moves = []
+    roll = sw.roll_back_to
+
+    def once(name):
+        moves.append(name)
+        if len(moves) > 1:
+            raise SolidWorksError("no")
+        roll(name)
+
+    sw.roll_back_to = once
+    result = push(sw, curves, str(tmp_path))
+
+    assert result.refreshed == ["rib_airfoil", "rib_camber"]
+    assert sw.calls.index(("rollforward",)) < min(indexes(sw.calls, "reload"))
+    assert indexes(sw.calls, "rollforward") == [sw.calls.index(("rollforward",))]
+    assert sw.bar is None
+
+
+def test_a_bar_that_will_not_come_back_keeps_what_the_push_did(tmp_path, curves):
+    """Raising would lose the curves already inserted: never recorded, and
+    inserted again under made-up names by the next push."""
+    sw = FakeSolidWorks(features=["rib_airfoil"])
+    sw.rollforward_fails = True
+    result = push(sw, curves, str(tmp_path))
+
+    assert result.inserted == ["rib_camber"]
+    assert result.refreshed == ["rib_airfoil"]
+    assert [name for name, _ in result.failures] == [ROLLBACK_BAR]
+    assert "rollback bar" in result.failures[0][1]
+    assert sw.calls.index(("suppress", False)) < indexes(sw.calls, "rebuild")[0]
 
 
 def test_a_bar_that_will_not_move_does_not_stop_the_push(tmp_path, curves):
