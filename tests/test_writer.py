@@ -3,20 +3,27 @@ import pytest
 from airfoil_converter import writer
 
 
-def test_format_points_uses_tabs_six_decimals_and_a_unit():
+def test_format_points_uses_tabs_ten_decimals_and_a_unit():
     text = writer.format_points([(175.0, 0.0, 75.0), (1.5, -2.25, 0.0)])
     assert text == (
-        "175.000000mm\t0.000000mm\t75.000000mm\r\n"
-        "1.500000mm\t-2.250000mm\t0.000000mm\r\n"
+        "175.0000000000mm\t0.0000000000mm\t75.0000000000mm\r\n"
+        "1.5000000000mm\t-2.2500000000mm\t0.0000000000mm\r\n"
     )
 
 
+def test_a_written_section_stays_flat_to_well_under_a_millionth():
+    """SolidWorks refused solid lofts ending on sections that six decimals left
+    half a millionth of a millimetre off their plane."""
+    value = 998.0955123456789
+    assert abs(float(writer.format_value(value)[:-2]) - value) < 1e-9
+
+
 def test_format_value_strips_a_signed_zero_that_only_appears_when_rounded():
-    # -1e-9 is not equal to zero, so a pre-format test would miss it and leave
-    # "-0.000000mm" — enough to make a section differ from its own mirror.
-    assert writer.format_value(-1e-9) == "0.000000mm"
-    assert writer.format_value(-0.0) == "0.000000mm"
-    assert writer.format_value(-0.5) == "-0.500000mm"
+    # -1e-12 is not equal to zero, so a pre-format test would miss it and leave
+    # "-0.0000000000mm" — enough to make a section differ from its own mirror.
+    assert writer.format_value(-1e-12) == "0.0000000000mm"
+    assert writer.format_value(-0.0) == "0.0000000000mm"
+    assert writer.format_value(-0.5) == "-0.5000000000mm"
 
 
 def test_sanitize_strips_characters_a_name_cannot_hold():
@@ -30,8 +37,8 @@ def test_write_curve_round_trip(tmp_path):
     assert count == 2
     with open(path, "rb") as handle:
         assert handle.read() == (
-            b"0.000000mm\t0.000000mm\t0.000000mm\r\n"
-            b"1.000000mm\t2.000000mm\t3.000000mm\r\n"
+            b"0.0000000000mm\t0.0000000000mm\t0.0000000000mm\r\n"
+            b"1.0000000000mm\t2.0000000000mm\t3.0000000000mm\r\n"
         )
 
 
@@ -72,5 +79,5 @@ def test_write_curve_if_changed_rewrites_and_leaves_no_temp_file(tmp_path):
 
     assert changed is True
     assert digest == writer.sha256_hex(writer.curve_bytes([(9.0, 0.0, 0.0)]))
-    assert path.read_bytes().startswith(b"9.000000mm")
+    assert path.read_bytes().startswith(b"9.0000000000mm")
     assert [p.name for p in tmp_path.iterdir()] == ["curve.sldcrv"]

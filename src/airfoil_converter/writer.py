@@ -1,11 +1,20 @@
 """Write SolidWorks Curve Through XYZ Points files (.sldcrv / .txt).
 
-Three tab-separated columns, six decimals, every value carrying its unit, CRLF
+Three tab-separated columns, ten decimals, every value carrying its unit, CRLF
 line endings. Tab is the delimiter SolidWorks documents as safe for the import
 dialog, and the unit suffix is what stops the document's own unit setting
 changing the result: the API holds curve points in metres whatever the file
-says, so ``175.000000mm`` lands as 175 mm in an inch document just as it does
-in a millimetre one.
+says, so ``175.0000000000mm`` lands as 175 mm in an inch document just as it
+does in a millimetre one.
+
+Ten decimals, not the six a millimetre file needs to hold a shape: SolidWorks
+asks whether a loft's end section is flat, and asks strictly. A section
+rounded to six decimals stands up to half a millionth of a millimetre off its
+own plane, and on one wing that was enough for SolidWorks to call one section
+in three a 3D curve and refuse every solid loft that ended on it — silently,
+through the API, and with "a 3D section that does not bound a face cannot be
+used as an end section" in the Loft page. The same points to ten decimals
+lofted as a solid through every section (measured 2026-09-27).
 
 Curve files are read back by :mod:`airfoil_converter.parser`, which strips the
 suffix again, so a file written here is still valid input to the app.
@@ -21,7 +30,7 @@ from typing import List, Optional, Sequence, Tuple
 Vec3 = Tuple[float, float, float]
 
 EXTENSIONS = (".sldcrv", ".txt")
-DECIMALS = 6
+DECIMALS = 10
 DELIMITER = "\t"
 UNIT_SUFFIX = "mm"
 LINE_ENDING = "\r\n"
@@ -31,8 +40,8 @@ def format_value(value: float, decimals: int = DECIMALS, unit: str = UNIT_SUFFIX
     """One coordinate, fixed-point, with its unit and without a signed zero.
 
     The sign is stripped *after* formatting, not before. Testing ``value == 0``
-    would leave -1e-9 to print as ``-0.000000``, and a section that differs from
-    its mirror by a minus sign on a zero is not bit-identical to it.
+    would leave -1e-12 to print as ``-0.0000000000``, and a section that differs
+    from its mirror by a minus sign on a zero is not bit-identical to it.
     """
     text = f"{value:.{decimals}f}"
     if text.startswith("-") and float(text) == 0.0:
