@@ -433,12 +433,12 @@ rib.
    rib to the tip rib.
 4. Say whether each **end** is open or closed (see below).
 5. Pick how the **thickness** runs between ribs (see *Shape between ribs*).
-6. Leave **Offset** blank and **Export**: the wing's edge curves and its
-   surface guides go into the part beside the ribs. Loft the ribs with all of
-   them as guide curves.
+6. Leave **Offset** blank and **Export**: the wing's own sections, its edge
+   curves and its surface guides go into the part beside the ribs. Loft the
+   sections, root to tip, with all of the rest as guide curves.
 7. Press **Make offset copy**, enter a distance, pick *Inward* or *Outward*, and
-   **Export** again: the offset wing's root and tip, its edges and its surface
-   guides go in beside it. Loft its root and tip the same way.
+   **Export** again: the offset wing's sections, its edges and its surface
+   guides go in beside it. Loft them the same way.
 
 **Check** works the wing out without exporting anything and says what it found,
 including the wall thickness it expects. Loft the curves yourself afterwards;
@@ -462,14 +462,30 @@ guides — up to 0.15 mm with them 10 to 25 % apart — and this spacing holds a
 real loft to 0.05 mm over 99 % of the skin. An offset wing's guides start at
 2 %: nearer an inward offset's nose SolidWorks will not loft through them.
 
+Every wing goes in as **sections and guides together**: sections where its
+shape is planned to change — at least every 140 mm, and more wherever an
+edge's sweep turns — and guides that meet every section at a point of its own,
+at the same place on each. For the wing itself that point is one of the
+numbered points every section of the model is drawn with; for an offset wing,
+whose sections are its own outlines, each section is given a point at every
+guide's chord fraction. A guide that only landed on each section's nearest
+point zigzagged between sections close together, and SolidWorks would not loft
+two of them. Measured from STEP on a 1 m wing offset 1.35 mm, lofted this way
+99.9 % of the inner skin is within 0.05 mm of the intended wall, against 91 %
+for root-and-tip lofts; both lofts stay within 0.005 mm of the model over 99 %
+of their skin.
+
 A rib is modelled as SolidWorks draws it: a Curve Through XYZ Points is a
 natural cubic spline through the points, spaced by the distance between them,
 and straight lines between the same points cut up to 0.18 mm inside it at the
 nose. An offset wing's profile that comes to a corner — an inward offset deeper
-than the nose radius — would loop a spline round it, so every profile of an offset
-wing is written in two halves meeting at its nose (`wing_inner_root_upper`,
-`…_lower`), corner or not: a loft will not join profiles cut into different
-numbers of pieces. The joined curve is still the one to pick.
+than the nose radius — would loop a spline round it, so every section of an
+offset wing is written in two halves meeting at its nose
+(`wing_inner_s01_upper`, `…_lower`), corner or not: a loft will not join
+profiles cut into different numbers of pieces. The wing's own sections have a
+round nose, and go in as its ribs do, one curve round it: cut there, each half
+of a spline ends with no curvature, and a round nose drawn that way comes out a
+wedge. The joined curve is still the one to pick.
 
 **Loft** on the Wing tab builds the chosen wing's loft in the open part —
 `wing_loft`, `wing_inner_loft` — through every profile and guide it exported;
@@ -488,8 +504,8 @@ which shape they hold:
   span.
 
 Loft the outer wing *and* the offset wing with their surface guides. Without
-them the lofts take their own shape, and the wall between is not the one
-worked out.
+them the lofts take their own shape between sections, and the wall between is
+not the one worked out.
 
 ### What a wing needs
 
@@ -538,21 +554,15 @@ offset wing is worked out through sections of its own**: at least every 140 mm,
 more wherever an edge's sweep turns, and more again wherever the blend between
 two of them would stray off the wall — a few times as many as the wing has
 ribs, crowded toward a hooked tip. Its edge curves and surface guides are drawn
-through all of them.
+through all of them, and every section is exported, numbered root to tip:
+`wing_inner_s01`, `wing_inner_s02`, ….
 
-**Profiles** says what is exported:
-
-- **All sections** (the default) — every section, numbered root to tip,
-  `wing_inner_s01`, `wing_inner_s02`, …, with the edges but no surface guides.
-  A first export gets a few more sections than the wall needs, and a later
-  change of offset keeps the number the loft already has, so the edit reloads
-  the same curves and the loft follows it. Only if the new offset cannot be
-  held to the wall with that many does the number change; then the app asks
-  first, because the loft needs its profiles picked again, and sections no
-  longer made are left in the part, unused.
-- **Root and tip only** — the offset wing's two end profiles,
-  `wing_inner_root` and `wing_inner_tip`, with its edges and surface guides.
-  The sections between shape the guides and are not exported.
+A first export gets a few more sections than the wall needs, and a later
+change of offset keeps the number the loft already has, so the edit reloads
+the same curves and the loft follows it. Only if the new offset cannot be
+held to the wall with that many does the number change; then the app asks
+first, because the loft needs its profiles picked again, and sections no
+longer made are left in the part, unused.
 
 An inward offset deeper than the airfoil's nose radius folds the nose into a
 crease, and on a tapered wing that crease grows along the span: on one 1 m
@@ -564,8 +574,8 @@ it through the leading-edge guide: SolidWorks cut across it, held the wall to
 section, and at 1.30–1.40 mm grew a sliver face along the tip that kept the
 loft from ever being a solid.
 
-With *Close with TE line*, each exported profile also gets its straight line
-and a joined curve, `wing_inner_root_joined`; loft those.
+With *Close with TE line*, each exported section also gets its straight line
+and a joined curve, `wing_inner_s01_joined`; loft those.
 
 ### A blunt trailing edge
 

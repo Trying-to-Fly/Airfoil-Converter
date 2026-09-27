@@ -166,13 +166,14 @@ def wing_plan(
 ) -> LoftPlan:
     """The loft a wing record describes.
 
-    An outer wing lofts its ribs; an offset wing lofts its own sections, joined
-    where they have a trailing-edge line. Either way every edge curve and
-    surface guide the wing wrote is a guide. ``rib_order`` gives the ribs'
-    export ids root to tip, when the record's own order may not be.
+    A wing lofts its own sections, joined where they have a trailing-edge line,
+    and every edge curve and surface guide it wrote is a guide. A wing itself
+    exported before it had sections of its own lofts its ribs instead;
+    ``rib_order`` gives their export ids root to tip, when the record's own
+    order may not be.
     """
     spec = wing.spec
-    if spec.offset_mm():
+    if spec.offset_mm() or _live(wing.curves, *export.SECTION_HEAD_ROLES):
         joined = {c.feature for c in _live(wing.curves, ROLE_SECTION_JOINED)}
         profiles = []
         for curve in _live(wing.curves, *export.SECTION_HEAD_ROLES):
@@ -404,7 +405,7 @@ def plan_for_wing(wing: store.WingRecord, sidecar: store.Sidecar) -> LoftPlan:
     from . import wing_build  # reading the ribs back is slow; only here is it needed
 
     order = None
-    if not wing.spec.offset_mm():
+    if not wing.spec.offset_mm() and not _live(wing.curves, *export.SECTION_HEAD_ROLES):
         model = wing_build.stand_up(wing.spec, sidecar)
         by_name = {}
         for rib_id in wing.spec.ribs:

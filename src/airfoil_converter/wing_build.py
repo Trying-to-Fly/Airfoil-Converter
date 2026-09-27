@@ -202,9 +202,10 @@ def build_wing(
 ) -> WingBuild:
     """Every curve a wing export produces, named and placed in space.
 
-    ``sections`` is how many profiles a loft of this wing already runs
-    through, when it was exported with every section: an offset wing keeps
-    that many if its wall allows, so the loft follows the edit.
+    A wing is exported as its sections and the guides between them, whether it
+    is the wing itself or an offset of it. ``sections`` is how many profiles a
+    loft of an offset wing already runs through: it keeps that many if its wall
+    allows, so the loft follows the edit.
     """
     if spec.extension not in writer.EXTENSIONS:
         raise InputError(f"Unsupported extension {spec.extension!r}.")
@@ -229,24 +230,30 @@ def build_wing(
     joins: List[Tuple[Tuple[str, ...], str]] = []
     result: Optional[wing_offset.OffsetWing] = None
 
+    up = model.sections[0].up or (0.0, 1.0)
+
+    def section(number: int, s: float, pieces) -> None:
+        sources = []
+        for kind, piece, shut in pieces:
+            curves.append(named(kind, [model.frame.to_3d(s, p) for p in piece], shut, number))
+            sources.append(wing_feature_name(stem, kind, index, number))
+        if len(sources) > 1:
+            joins.append((tuple(sources), wing_feature_name(stem, ROLE_SECTION_JOINED, index, number)))
+
     if not offset:
-        curves.append(named(ROLE_WING_LE, model.le_points, False))
-        for role, points in model.te_edges:
-            curves.append(named(role, points, False))
-        # The ribs alone would let the loft take its own shape between them;
-        # these hold it to the one the wing is meant to have, and the one the
-        # offset wing is worked out from.
+        # The wing's own sections, where its shape is planned to change, and
+        # guides that each follow one point of every section. Lofted through
+        # the two ribs alone, held by guides, SolidWorks' loft sagged up to
+        # 0.08 mm off the wing aft of mid-chord; through these it stays within
+        # 0.005 mm of it.
         loft = model.loft
-        # The outline is the curve SolidWorks draws through the rib's points, to
-        # well under its own tolerance, so a guide may land anywhere along it.
-        profiles = [wing.Profile(sec.station, sec.outline, sec.le) for sec in model.sections]
-        samples = wing.span_samples(
-            loft.start, loft.end, loft.le_guide.stations, loft.te_guide.stations
-        )
-        up = model.sections[0].up or (0.0, 1.0)
-        for tag, guide in wing.surface_guides(loft, profiles, samples, up):
-            curves.append(named(export.ROLE_WING_SURFACE, guide.to_3d(model.frame), False,
-                                tag=tag))
+        stations = [st.station for st in wing.plan_stations(loft, 0.0, spec.root_end, spec.tip_end)]
+        for number, s in enumerate(stations, start=1):
+            section(number, s, outline_pieces(loft, s, up))
+        samples = wing.guide_samples(stations, loft.le_guide.stations, loft.te_guide.stations)
+        for role, tag, i in wing.guide_indices(loft, up):
+            points = [model.frame.to_3d(s, loft.point(s, i)) for s in samples]
+            curves.append(named(role, points, False, tag=tag))
     else:
         result = wing_offset.offset_wing(
             model.frame,
@@ -258,31 +265,27 @@ def build_wing(
             model.te_thickness,
             progress=say,
             check=check,
-            sections_wanted=0 if spec.profiles == export.PROFILES_ENDS else sections,
-            spare=0 if spec.profiles == export.PROFILES_ENDS else wing_offset.SPARE_SECTIONS,
+            sections_wanted=sections,
+            spare=wing_offset.SPARE_SECTIONS,
         )
-        ends_only = spec.profiles == export.PROFILES_ENDS
-        if ends_only:
-            exported = [(result.sections[0], 0, "root"), (result.sections[-1], 0, "tip")]
-        else:
-            exported = [(sec, number, "") for number, sec in enumerate(result.sections, start=1)]
-        up = model.sections[0].up or (0.0, 1.0)
-        for sec, number, tag in exported:
+        # Every section, each given a point at every surface guide's chord
+        # fraction so the guides meet it exactly, as they meet each other.
+        inner = result.loft()
+        fractions = [f for f in wing.SURFACE_GUIDES if f >= wing.OFFSET_GUIDES_FROM]
+        profiles = []
+        for number, sec in enumerate(result.sections, start=1):
             s = sec.station.station
-            sources = []
+            body = wing.with_guide_points(
+                inner, wing.Profile(s, sec.curves[0][1], sec.le), fractions
+            )
+            profiles.append(body)
+            pieces = []
             for role, points, closed in sec.curves:
                 if role == export.ROLE_TE:
-                    pieces = [(ROLE_SECTION_TE, points, closed)]
+                    pieces.append((ROLE_SECTION_TE, points, closed))
                 else:
-                    pieces = split_at_nose(points, closed, up, sec.le)
-                for kind, piece, shut in pieces:
-                    placed = wing_offset.to_3d(model.frame, s, piece)
-                    curves.append(named(kind, placed, shut, number, tag))
-                    sources.append(wing_feature_name(stem, kind, index, number, tag))
-            if len(sources) > 1:
-                joins.append(
-                    (tuple(sources), wing_feature_name(stem, ROLE_SECTION_JOINED, index, number, tag))
-                )
+                    pieces += split_at_nose(body.points, closed, up, sec.le)
+            section(number, s, pieces)
         curves.append(named(ROLE_WING_LE, result.le.to_3d(model.frame), False))
         if result.te_corners is not None:
             upper, lower = result.te_corners
@@ -290,12 +293,11 @@ def build_wing(
             curves.append(named(ROLE_WING_TE_LOWER, lower.to_3d(model.frame), False))
         else:
             curves.append(named(ROLE_WING_TE, result.te.to_3d(model.frame), False))
-        if ends_only:
-            up = model.sections[0].up or (0.0, 1.0)
-            ends = (result.sections[0], result.sections[-1])
-            for tag, guide in wing_offset.surface_guides(result, ends, up):
-                curves.append(named(export.ROLE_WING_SURFACE, guide.to_3d(model.frame), False,
-                                    tag=tag))
+        stations = [sec.station.station for sec in result.sections]
+        samples = wing.guide_samples(stations, result.le_samples)
+        for tag, guide in wing.surface_guides(inner, profiles, samples, up, fractions):
+            curves.append(named(export.ROLE_WING_SURFACE, guide.to_3d(model.frame), False,
+                                tag=tag))
 
     taken = set(sidecar.all_feature_names()) - set(own_names)
     wanted = [c.feature for c in curves] + [name for _, name in joins]
@@ -306,6 +308,21 @@ def build_wing(
             "Give the wing another name."
         )
     return WingBuild(curves=curves, joins=joins, model=model, offset=result)
+
+
+def outline_pieces(loft: wing.Loft, s: float, up: Point2) -> List[Tuple[str, List[Point2], bool]]:
+    """The wing's own section at ``s`` as the curves to export, as a rib is.
+
+    One curve round the nose, closed on itself where the trailing edge is
+    sharp, and with the trailing edge's own straight line where it is blunt.
+    Not cut at the nose, as an offset wing's sections are: SolidWorks draws
+    each half of a cut curve with no curvature at its end, and a round nose
+    drawn as two such halves came out a wedge, up to 0.36 mm off the wing.
+    """
+    pts = loft.outline(s)
+    if loft.sharp:
+        return [(ROLE_SECTION, pts + [pts[0]], True)]
+    return [(ROLE_SECTION, pts, False), (ROLE_SECTION_TE, [pts[-1], pts[0]], False)]
 
 
 def split_at_nose(

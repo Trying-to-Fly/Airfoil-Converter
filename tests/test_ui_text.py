@@ -277,31 +277,29 @@ def test_the_guide_counts_come_from_the_wing_itself():
 
 
 def test_the_offset_hint_follows_the_settings():
-    assert ui_text.offset_hint("", export.PROFILES_ENDS) == (
-        "Blank exports the wing's own edges and 32 surface guides."
+    assert ui_text.offset_hint("") == (
+        "Blank exports the wing's own sections, its edges and 32 surface guides."
     )
-    assert ui_text.offset_hint("2.5", export.PROFILES_ENDS) == (
-        "Root and tip go in, held by 30 guides worked out through every section."
+    assert ui_text.offset_hint("2.5") == (
+        "The offset wing's sections go in, with its edges and 30 surface guides "
+        "through every one."
     )
-    assert "Every section" in ui_text.offset_hint("2.5", export.PROFILES_ALL)
 
 
 def test_the_export_line_names_what_a_new_wing_will_make():
     runs = ui_text.export_line("wing", 1)
     assert ui_text.plain(runs) == (
-        "Export will make wing_le, wing_te and 32 surface guides under Wing Curves."
+        "Export will make wing's sections, wing_le, wing_te and 32 surface guides "
+        "under Wing Curves."
     )
     assert ("wing_le", ui_text.MONO) in runs and ("Wing Curves", ui_text.STRONG) in runs
     assert ui_text.plain(ui_text.export_line("wing", 2, te_line=True)) == (
-        "Export will make wing_2_le, wing_2_te_upper, wing_2_te_lower and 32 surface "
-        "guides under Wing Curves."
+        "Export will make wing_2's sections, wing_2_le, wing_2_te_upper, wing_2_te_lower "
+        "and 32 surface guides under Wing Curves."
     )
     assert ui_text.plain(ui_text.export_line("wing_inner", 1, offset=True)) == (
-        "Export will make wing_inner's root and tip, wing_inner_le, wing_inner_te and "
+        "Export will make wing_inner's sections, wing_inner_le, wing_inner_te and "
         "30 surface guides under Wing Curves."
-    )
-    assert ui_text.plain(ui_text.export_line("w", 1, offset=True, all_sections=True)) == (
-        "Export will make w's sections, w_le and w_te under Wing Curves."
     )
     assert "once it has a name" in ui_text.plain(ui_text.export_line(" ", 1))
 

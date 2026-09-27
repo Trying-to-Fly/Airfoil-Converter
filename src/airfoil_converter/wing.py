@@ -970,6 +970,106 @@ def span_samples(start: float, end: float, *extra: Sequence[float]) -> List[floa
     return sorted(grid)
 
 
+
+# -- guides that pass through every section ---------------------------------
+#
+# A wing goes to SolidWorks as sections, each lofted through in turn, and
+# guides that hold the loft between them. SolidWorks takes a guide only if it
+# meets every section, and a guide that zigzags from one section to the next
+# it will not loft at all: a surface guide landed on each section's point
+# nearest its chord fraction, a millimetre or more off it where points are
+# sparse, and between sections a tenth of a millimetre apart that was a zigzag
+# no loft of two such guides would take. Guides here meet every section at a
+# point of its own, and at the same place on each.
+
+# However closely the span is sampled between sections, no sample this close
+# to one, so that thinning a guide cannot take its point at a section away.
+GUIDE_CLEARANCE = 0.05
+
+
+def guide_samples(stations: Sequence[float], *extra: Sequence[float]) -> List[float]:
+    """Where a guide through every section is sampled: at each section, and
+    every few millimetres between, clear of the sections."""
+    stations = sorted(stations)
+    grid = span_samples(stations[0], stations[-1], *extra)
+    clear = []
+    for s in grid:
+        k = bisect.bisect_left(stations, s)
+        near = [stations[j] for j in (k - 1, k) if 0 <= j < len(stations)]
+        if all(abs(s - t) >= GUIDE_CLEARANCE for t in near):
+            clear.append(s)
+    return sorted(set(stations) | set(clear))
+
+
+def guide_indices(
+    loft: "Loft", up: Point2, fractions: Sequence[float] = SURFACE_GUIDES
+) -> List[Tuple[str, str, int]]:
+    """Which point of every section each of a wing's guides follows, as
+    ``(role, tag, index)``.
+
+    Every section of a :class:`Loft` is the same numbered points, a surface's
+    length apart at the same fractions on every one, so a guide that follows
+    one number meets every section exactly and runs as smoothly along the span
+    as the wing does. The leading edge is the nose point, the trailing edge the
+    tail points, and a surface guide the point nearest its chord fraction at
+    the root.
+    """
+    x = [loft.local_point(loft.start, i)[0] for i in range(loft.count)]
+    upper = loft.upper_side(up)
+    sides = {0: range(1, SAMPLES), 1: range(SAMPLES + 1, 2 * SAMPLES)}
+    out = [(export.ROLE_WING_LE, "", SAMPLES)]
+    if loft.sharp:
+        out.append((export.ROLE_WING_TE, "", 0))
+    else:
+        tails = {0: 0, 1: 2 * SAMPLES}
+        out += [(export.ROLE_WING_TE_UPPER, "", tails[upper]),
+                (export.ROLE_WING_TE_LOWER, "", tails[1 - upper])]
+    for side, name in ((upper, "upper"), (1 - upper, "lower")):
+        for fraction in fractions:
+            i = min(sides[side], key=lambda j: abs(x[j] - fraction))
+            out.append((export.ROLE_WING_SURFACE, guide_tag(name, fraction), i))
+    return out
+
+
+# Nearer than this to a point a section already has, a guide's point is that one.
+GUIDE_POINT_GAP = 0.01
+
+
+def with_guide_points(
+    loft: "Loft", profile: "Profile", fractions: Sequence[float]
+) -> "Profile":
+    """The profile with a point of its own at each chord fraction, on both surfaces.
+
+    An offset wing's sections are its own outlines, with no numbering in
+    common, so a surface guide is given a point on each to meet instead: where
+    the outline crosses the guide's chord fraction, between two of its points.
+    The outline runs straight between them to well under a thousandth of a
+    millimetre off the wall, so the section keeps its shape, and the guide
+    meets it exactly and at the same fraction on every section.
+    """
+    s = profile.station
+    pts = list(profile.points)
+    for side in (0, 1):
+        for fraction in fractions:
+            x = [loft.unplace(s, p)[0] for p in pts]
+            nose = min(range(len(pts)), key=lambda i: math.hypot(
+                pts[i][0] - profile.le[0], pts[i][1] - profile.le[1]))
+            # Walked from the tail towards the nose, so that it is the surface
+            # the guide runs along that is crossed, not the far side of a crease.
+            order = range(0, nose) if side == 0 else range(len(pts) - 2, nose - 1, -1)
+            for i in order:
+                a, b = pts[i], pts[i + 1]
+                if (x[i] - fraction) * (x[i + 1] - fraction) > 0.0 or x[i] == x[i + 1]:
+                    continue
+                t = (fraction - x[i]) / (x[i + 1] - x[i])
+                q = (a[0] + t * (b[0] - a[0]), a[1] + t * (b[1] - a[1]))
+                if min(math.hypot(q[0] - a[0], q[1] - a[1]),
+                       math.hypot(q[0] - b[0], q[1] - b[1])) > GUIDE_POINT_GAP:
+                    pts.insert(i + 1, q)
+                break
+    return Profile(s, pts, profile.le)
+
+
 # -- where the offset wing's sections go ------------------------------------
 
 

@@ -59,7 +59,23 @@ def part():
                          wings=[outer_wing(), inner_wing()])
 
 
-def test_an_outer_wing_lofts_its_ribs_joined_curves_along_every_guide():
+def test_a_wing_exported_as_its_sections_lofts_them_not_its_ribs():
+    sections = []
+    for number in (1, 2, 3):
+        for piece in ("upper", "lower", "te"):
+            role = {"upper": export.ROLE_SECTION_UPPER, "lower": export.ROLE_SECTION_LOWER,
+                    "te": export.ROLE_SECTION_TE}[piece]
+            sections.append(CurveRecord(role=role, feature=f"wing_s0{number}_{piece}", file="x"))
+        sections.append(CurveRecord(role=export.ROLE_SECTION_JOINED,
+                                    feature=f"wing_s0{number}_joined", file=""))
+    wing = outer_wing()
+    wing.curves = sections + guides("wing")
+    plan = wing_plan(wing, part())
+    assert plan.profiles == ("wing_s01_joined", "wing_s02_joined", "wing_s03_joined")
+    assert plan.guides[0] == "wing_le" and len(plan.guides) == 5
+
+
+def test_an_outer_wing_exported_before_its_sections_lofts_its_ribs():
     plan = wing_plan(outer_wing(), part())
     assert plan.name == "wing_loft"
     assert plan.profiles == ("r275_airfoil_joined", "r136_airfoil_joined")

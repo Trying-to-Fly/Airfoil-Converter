@@ -34,23 +34,18 @@ from . import export, geometry as g
 from .geometry import GeometryError, Point2, Vec3
 from .wing import (
     CLOSED,
-    OFFSET_GUIDES_FROM,
     OPEN,
     STEEP_SWEEP,
-    SURFACE_GUIDES,
     Guide,
     Loft,
     Section,
     Station,
     WingFrame,
     corner_guides,
-    Profile,
     plan_stations,
-    span_samples,
     te_point,
     upper_first,
 )
-from .wing import surface_guides as wing_surface_guides
 
 # Arc points on the outside of a turn, as geometry's own offset does.
 ARC_STEP = math.radians(g.ARC_STEP_DEG)
@@ -1334,21 +1329,6 @@ def offset_wing(
         say("Measuring the wall...")
         result.report = measure_wall(skin, result)
     return result
-
-
-def surface_guides(
-    wing_: OffsetWing, ends: Sequence[OffsetSection], up: Point2
-) -> List[Tuple[str, Guide]]:
-    """The offset wing's surface guides, through its end profiles alone."""
-    inner = wing_.loft()
-    first, last = ends
-    profiles = [
-        Profile(sec.station.station, sec.curves[0][1], sec.le) for sec in (first, last)
-    ]
-    samples = list(wing_.le_samples) + [sec.station.station for sec in wing_.sections]
-    samples = span_samples(first.station.station, last.station.station, samples)
-    fractions = [f for f in SURFACE_GUIDES if f >= OFFSET_GUIDES_FROM]
-    return wing_surface_guides(inner, profiles, samples, up, fractions)
 
 
 def measure_wall(
