@@ -6,7 +6,7 @@ import os
 
 import pytest
 
-from airfoil_converter import export, geometry, parser
+from airfoil_converter import export, geometry, parser, writer
 from airfoil_converter.export import ExportSpec, InputError
 
 SAMPLE_CSV = os.path.join(os.path.dirname(os.path.dirname(__file__)), "sd7037-il.csv")
@@ -199,73 +199,90 @@ def test_the_trailing_edge_lands_a_chord_away_along_the_chord_axis(data):
     assert (10.0 + 175.0, 20.0, 30.0) in [pytest.approx(p, abs=1e-9) for p in points]
 
 
-# -- the twist pivot --------------------------------------------------------
+# -- the reference point ----------------------------------------------------
 
 
-def _trailing_edge(points, near):
+def _nearest(points, near):
     return min(points, key=lambda p: sum((a - b) ** 2 for a, b in zip(p, near)))
 
 
-@pytest.mark.parametrize("percent, target", [("25", ""), ("25", "200"), ("40", "120")])
-def test_pitch_turns_about_the_pivot(data, percent, target):
-    """The pivot stays where it sat unpitched, and the chord swings round it."""
-    le = (10.0, 20.0, 30.0)
-    spec = flat(leading_edge=tuple(str(c) for c in le), target_chord=target,
-                pivot=percent, pitch="-3")
+@pytest.mark.parametrize("percent, target", [("25", ""), ("25", "200"), ("40", "120"), ("100", "")])
+@pytest.mark.parametrize("pitch", ["0", "-3", "7"])
+def test_the_reference_point_lands_on_the_typed_point(data, percent, target, pitch):
+    """Whatever the angle, the point that far along the chord is the one typed in,
+    and the chord runs from it at the angle asked for."""
+    typed = (10.0, 20.0, 30.0)
+    spec = flat(leading_edge=tuple(str(c) for c in typed), target_chord=target,
+                reference=percent, pitch=pitch)
     chord = float(target) if target else 175.0
     f = float(percent) / 100.0
-    # Unpitched, the chord runs +X from the nose; the pivot sits f of it along.
-    pivot = (le[0] + f * chord, le[1], le[2])
-    a = math.radians(-3.0)
-    tail = (pivot[0] + (1 - f) * chord * math.cos(a),
-            pivot[1] - (1 - f) * chord * math.sin(a), pivot[2])
-    points = export.build_curves(data, spec, "s")[0].points
-    assert _trailing_edge(points, tail) == pytest.approx(tail, abs=1e-9)
-
     nose, u, _ = export.placement(data, spec, None)
-    assert geometry.add(nose, geometry.scale(u, f * chord)) == pytest.approx(pivot, abs=1e-9)
+    assert geometry.add(nose, geometry.scale(u, f * chord)) == pytest.approx(typed, abs=1e-9)
+
+    # Unpitched the chord runs +X; nose-up swings the tail toward -Y.
+    a = math.radians(float(pitch))
+    tail = (typed[0] + (1 - f) * chord * math.cos(a),
+            typed[1] - (1 - f) * chord * math.sin(a), typed[2])
+    points = export.build_curves(data, spec, "s")[0].points
+    assert _nearest(points, tail) == pytest.approx(tail, abs=1e-9)
 
 
 @pytest.mark.parametrize("overrides", [dict(flip=True), dict(rotation="180°"),
                                        dict(plane_mode="YZ", chord_axis="+Z", up_axis="+Y")])
-def test_the_pivot_holds_however_the_section_is_turned(data, overrides):
-    """The pivot is found along the chord as laid out before the pitch, so a flip,
-    a turn or another plane moves it with the section and the pitch keeps it."""
-    flat_spec = flat(target_chord="200", leading_edge=("5", "6", "7"), **overrides)
-    nose, u, _ = export.placement(data, flat_spec, None)
-    pivot = geometry.add(nose, geometry.scale(u, 50.0))
-    for pitch in ("-4", "7"):
-        twisted = dataclasses.replace(flat_spec, pitch=pitch, pivot="25")
-        nose, u, _ = export.placement(data, twisted, None)
-        assert geometry.add(nose, geometry.scale(u, 50.0)) == pytest.approx(pivot, abs=1e-9)
+@pytest.mark.parametrize("pitch", ["0", "-4", "7"])
+def test_the_reference_point_holds_however_the_section_is_turned(data, overrides, pitch):
+    spec = flat(target_chord="200", leading_edge=("5", "6", "7"), reference="25",
+                pitch=pitch, **overrides)
+    nose, u, _ = export.placement(data, spec, None)
+    assert geometry.add(nose, geometry.scale(u, 50.0)) == pytest.approx((5, 6, 7), abs=1e-9)
 
 
-def test_a_pivot_without_pitch_changes_nothing(data):
-    plain = export.build_curves(data, flat(), "s")[0].points
-    pivoted = export.build_curves(data, flat(pivot="25"), "s")[0].points
-    assert pivoted == plain
-
-
-def test_a_pivot_at_the_nose_is_the_old_pitch(data):
-    blank = export.build_curves(data, flat(pitch="5", pivot=""), "s")[0].points
-    zero = export.build_curves(data, flat(pitch="5", pivot="0"), "s")[0].points
+def test_a_reference_at_the_nose_is_the_leading_edge(data):
+    blank = export.build_curves(data, flat(pitch="5", reference=""), "s")[0].points
+    zero = export.build_curves(data, flat(pitch="5", reference="0"), "s")[0].points
     assert blank == zero
-    nose, _, _ = export.placement(data, flat(pitch="5", pivot="0"), None)
+    nose, _, _ = export.placement(data, flat(pitch="5", reference="0"), None)
     assert nose == (0.0, 0.0, 0.0)
 
 
-def test_a_record_from_before_the_pivot_still_pitches_about_its_nose():
+def test_a_record_from_before_the_reference_is_placed_by_its_leading_edge(data):
     """Reopening an old part must not move a single rib."""
-    raw = flat(pitch="4").to_dict()
-    del raw["pivot"]
-    assert ExportSpec.from_dict(raw).pivot_fraction() == 0.0
+    old = flat(pitch="4", target_chord="200", leading_edge=("1", "2", "3"))
+    raw = old.to_dict()
+    del raw["reference"]
+    restored = ExportSpec.from_dict(raw)
+    assert restored.reference_fraction() == 0.0
+    assert export.placement(data, restored, None)[0] == (1.0, 2.0, 3.0)
 
 
-def test_the_pivot_reads_as_a_fraction():
-    assert flat(pivot="25").pivot_fraction() == 0.25
-    assert flat(pivot=" ").pivot_fraction() == 0.0
-    with pytest.raises(InputError, match="Pivot"):
-        flat(pivot="quarter").pivot_fraction()
+def test_the_reference_point_of_a_nose_puts_the_nose_back(data):
+    """What the window fills in for an As-loaded curve: placed by that point,
+    the section's nose is where it started, so the curve does not move."""
+    spec = flat(reference="30", target_chord="150", rotation="90°", flip=True)
+    point = export.reference_point(data, spec, None, (4.0, 5.0, 6.0))
+    placed = dataclasses.replace(spec, leading_edge=tuple(f"{c!r}" for c in point))
+    assert export.placement(data, placed, None)[0] == pytest.approx((4.0, 5.0, 6.0), abs=1e-9)
+
+
+def test_a_loaded_curve_stays_where_it_was_drawn(data, tmp_path):
+    spec = flat(reference="25", export_camber=False)
+    drawn = export.build_curves(data, spec, "s")[0]
+    path = tmp_path / drawn.filename
+    writer.write_curve(str(path), drawn.points)
+    loaded, section = export.load_source(str(path))
+    as_loaded = ExportSpec(plane_mode=export.MODE_LOADED, reference="25", export_camber=False)
+    point = export.reference_point(loaded, as_loaded, section, section.origin)
+    as_loaded = dataclasses.replace(as_loaded, leading_edge=tuple(f"{c!r}" for c in point))
+    nose, _, _ = export.placement(loaded, as_loaded, section)
+    assert nose == pytest.approx(section.origin, abs=1e-9)
+
+
+def test_the_reference_reads_as_a_fraction():
+    assert flat(reference="25").reference_fraction() == 0.25
+    assert flat(reference=" ").reference_fraction() == 0.0
+    with pytest.raises(InputError, match="Reference"):
+        flat(reference="quarter").reference_fraction()
+
 
 
 def test_a_target_chord_rescales_the_section(data):

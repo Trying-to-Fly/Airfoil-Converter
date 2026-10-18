@@ -59,11 +59,11 @@ def test_a_rib_is_its_exported_outline_without_its_own_offset(straight_wing):
     assert len(rib.outline) == (len(plain[0].points) - 1) * wing.DRAWN_STEPS + 1
 
 
-def test_a_twisted_rib_stands_where_its_export_put_it(straight_wing):
-    """A rib pitched about its quarter chord has its nose moved, and the wing
-    must stand on that nose rather than the one typed in."""
+def test_a_rib_placed_by_its_quarter_chord_stands_on_its_own_nose(straight_wing):
+    """The point typed in is the quarter chord, not the nose, and the wing must
+    stand on the nose the export actually drew."""
     record = straight_wing.records()[0]
-    spec = dataclasses.replace(record.spec, pitch="-4", pivot="25")
+    spec = dataclasses.replace(record.spec, pitch="-4", reference="25")
     record.settings = spec.to_dict()
     data = parser.parse_csv(SAMPLE_CSV)
     rib = wing.rib_from_record(record, data)

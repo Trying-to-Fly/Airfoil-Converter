@@ -137,6 +137,19 @@ def test_the_end_nearest_the_leading_edge_is_the_nose():
     assert frame(at_end)[0] == approx((-1.0, 0.0, 0.0))
 
 
+@pytest.mark.parametrize("at, reference, nose_at_start", [
+    (25.0, 0.25, True),    # front half: the nose is the nearer end
+    (75.0, 0.25, False),
+    (75.0, 0.75, True),    # back half: the nose is the further end
+    (25.0, 0.75, False),
+    (70.0, 0.70, True),
+])
+def test_the_nose_is_the_end_that_puts_the_reference_where_it_belongs(at, reference, nose_at_start):
+    placement = run(pick.PLANE_PICK, XY, ALONG_X, PickedPoint((at, 0.0, 0.0))).resolve(reference)
+    assert frame(placement)[0] == approx((1.0, 0.0, 0.0) if nose_at_start else (-1.0, 0.0, 0.0))
+    assert placement.leading_edge == (at, 0.0, 0.0)
+
+
 def test_without_a_leading_edge_the_line_keeps_its_own_direction():
     session = run(pick.PLANE_PICK, XY, PickedLine((100.0, 0.0, 0.0), (0.0, 0.0, 0.0)))
     session.skip()
@@ -191,7 +204,7 @@ def test_the_optional_steps_can_be_skipped():
 def test_the_leading_edge_pick_is_one_step_and_not_optional():
     session = pick.Pick(pick.POINT_PICK)
     assert session.skippable is False
-    assert "Click the leading edge" in session.says
+    assert "Click the reference point" in session.says
     session.accept(PickedPoint((0.0, 0.0, 0.0)))
     assert session.finished
 

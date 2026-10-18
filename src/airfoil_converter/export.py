@@ -102,18 +102,19 @@ class ExportSpec:
     flip: bool = False
     rotation: str = ROTATIONS[0]
     pitch: str = "0"
-    # Where along the chord the angle of attack turns the section, in percent
-    # from the nose. Blank in a record means the leading edge, which is what
-    # every export before this setting existed was pitched about.
-    pivot: str = "0"
+    # The point a section is placed by, in percent of the chord from the nose:
+    # ``leading_edge`` is where this point goes, and the angle of attack turns
+    # the section about it. Blank in a record means the leading edge, which is
+    # what every export before this setting existed was placed by.
+    reference: str = "0"
     p1: Tuple[str, str, str] = ("0", "0", "0")
     p2: Tuple[str, str, str] = ("0", "0", "0")
     p3: Tuple[str, str, str] = ("0", "0", "0")
     leading_edge: Tuple[str, str, str] = ("0", "0", "0")
     extension: str = ".sldcrv"
-    # Whether the leading edge is the user's own value rather than an
+    # Whether the reference point is the user's own value rather than an
     # auto-filled default. Restoring a spec without it lets the plane-mode
-    # handler clear the flag and quietly overwrite the leading edge with P1.
+    # handler clear the flag and quietly overwrite the point with P1.
     le_manual: bool = False
 
     def to_dict(self) -> Dict[str, Any]:
@@ -148,10 +149,10 @@ class ExportSpec:
         text = self.pitch.strip()
         return parse_float(text, "Angle of attack") if text else 0.0
 
-    def pivot_fraction(self) -> float:
-        """The pivot as a fraction of the chord: 0 at the nose, 0.25 at the quarter chord."""
-        text = self.pivot.strip()
-        return parse_float(text, "Pivot") / 100.0 if text else 0.0
+    def reference_fraction(self) -> float:
+        """The reference point as a fraction of the chord: 0 at the nose, 0.25 at the quarter chord."""
+        text = self.reference.strip()
+        return parse_float(text, "Reference") / 100.0 if text else 0.0
 
     def target_chord_mm(self) -> Optional[float]:
         text = self.target_chord.strip()
@@ -181,7 +182,7 @@ class ExportSpec:
 
     def vector(self, name: str) -> Vec3:
         labels = {
-            "p1": "P1", "p2": "P2", "p3": "P3", "leading_edge": "Leading edge",
+            "p1": "P1", "p2": "P2", "p3": "P3", "leading_edge": "Reference point",
         }
         texts = getattr(self, name)
         values = [parse_float(t, f"{labels[name]} {axis}") for t, axis in zip(texts, "XYZ")]
@@ -309,21 +310,34 @@ def plane_frame(spec: ExportSpec, section: Optional[geometry.FlatSection]) -> Tu
 def placement(
     data: AirfoilData, spec: ExportSpec, section: Optional[geometry.FlatSection]
 ) -> Tuple[Vec3, Vec3, Vec3]:
-    """Where the section's 2D origin lands, and the chord and up it is laid out along.
+    """Where the section's nose lands, and the chord and up it is laid out along.
 
-    The leading edge field says where the nose sits before any pitch. The pitch
-    turns the section about the pivot, so with a pivot behind the nose it is the
-    nose that moves and the pivot that stays put.
+    The leading edge field is where the reference point goes, and the pitch has
+    already turned the chord, so the nose is that far ahead of it along the
+    turned chord: the reference point stays put whatever the angle.
     """
     u, v = plane_frame(spec, section)
-    leading_edge = spec.vector("leading_edge")
-    pitch = spec.pitch_degrees()
-    fraction = spec.pivot_fraction()
-    if pitch and fraction:
-        chord = data.chord * geometry.scale_factor(data.chord, spec.target_chord_mm())
-        flat_u, _ = plane_frame(replace(spec, pitch="0"), section)
-        leading_edge = geometry.pivot_origin(leading_edge, flat_u, u, fraction * chord)
-    return leading_edge, u, v
+    point = spec.vector("leading_edge")
+    behind = spec.reference_fraction() * finished_chord(data, spec)
+    return geometry.sub(point, geometry.scale(u, behind)), u, v
+
+
+def reference_point(
+    data: AirfoilData, spec: ExportSpec, section: Optional[geometry.FlatSection], nose: Vec3
+) -> Vec3:
+    """The reference point of a section whose nose is at ``nose`` before any pitch.
+
+    What keeps a curve exported *As loaded* where it was drawn when the section
+    is placed by a point behind its nose.
+    """
+    u, _ = plane_frame(replace(spec, pitch="0"), section)
+    behind = spec.reference_fraction() * finished_chord(data, spec)
+    return geometry.add(nose, geometry.scale(u, behind))
+
+
+def finished_chord(data: AirfoilData, spec: ExportSpec) -> float:
+    """The chord in finished millimetres: the target, or the source's own."""
+    return data.chord * geometry.scale_factor(data.chord, spec.target_chord_mm())
 
 
 def finish_surface(surface: Sequence[Point2], mode: str) -> List[Tuple[str, List[Point2], bool]]:

@@ -45,9 +45,9 @@ def test_the_other_modes_name_themselves():
 
 
 def test_the_placement_readout_says_where_the_leading_edge_came_from():
-    assert ui_text.placement_readout("XY") == "where the 2D origin lands"
+    assert ui_text.placement_readout("XY") == "where the reference point lands"
     assert ui_text.placement_readout(MODE_3POINTS) == "defaults to P1"
-    assert ui_text.placement_readout(MODE_LOADED) == "the curve's own leading edge"
+    assert ui_text.placement_readout(MODE_LOADED) == "where the curve was drawn"
     assert ui_text.placement_readout("XY", manual=True) == "typed in by hand"
     assert ui_text.placement_readout("XY", manual=True, picked=True) == (
         "picked in SolidWorks"
@@ -115,7 +115,7 @@ def test_the_countdown_is_minutes_and_seconds():
 def test_a_fresh_pick_has_one_active_row_and_two_still_to_come():
     rows = ui_text.tracker_rows(pick.Pick(pick.PLANE_PICK))
     assert [r.state for r in rows] == ["active", "pending", "pending"]
-    assert [r.name for r in rows] == ["Plane", "Chord line", "Leading edge"]
+    assert [r.name for r in rows] == ["Plane", "Chord line", "Reference point"]
     assert rows[1].detail.startswith("optional · ")
 
 
@@ -178,10 +178,17 @@ def test_a_blank_chord_and_an_offset_are_said_in_words():
     assert summary.endswith("offset 0.8 mm outward")
 
 
-def test_a_pitched_record_says_what_it_turned_about():
-    summary = ui_text.record_summary(ExportSpec(pitch="-3", pivot="25"))
-    assert "pitched -3° about 25% chord" in summary
-    assert "pitched" not in ui_text.record_summary(ExportSpec(pitch="0.0", pivot="25"))
+def test_a_record_says_which_point_its_coordinates_place():
+    spec = ExportSpec(reference="25", leading_edge=("0", "0", "120"))
+    assert ui_text.record_summary(spec).startswith("25% chord at 0, 0, 120 · ")
+
+
+def test_the_placement_row_names_the_point_it_places():
+    for typed, label in [
+        ("0", "Leading edge at"), ("", "Leading edge at"), ("0.0", "Leading edge at"),
+        ("25", "25% chord at"), ("quarter", "Point at"),
+    ]:
+        assert ui_text.reference_label(typed) == label
 
 
 def test_curves_all_linked_reads_as_a_count():
