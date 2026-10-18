@@ -178,6 +178,12 @@ def test_a_blank_chord_and_an_offset_are_said_in_words():
     assert summary.endswith("offset 0.8 mm outward")
 
 
+def test_a_pitched_record_says_what_it_turned_about():
+    summary = ui_text.record_summary(ExportSpec(pitch="-3", pivot="25"))
+    assert "pitched -3° about 25% chord" in summary
+    assert "pitched" not in ui_text.record_summary(ExportSpec(pitch="0.0", pivot="25"))
+
+
 def test_curves_all_linked_reads_as_a_count():
     states = [
         store.CurveState(feature="a", state=store.LINKED),

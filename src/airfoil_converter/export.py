@@ -17,7 +17,7 @@ different from ``"0"`` — a blank target chord keeps the source's chord, while
 
 from __future__ import annotations
 
-from dataclasses import asdict, dataclass, field, fields
+from dataclasses import asdict, dataclass, field, fields, replace
 from typing import Any, Dict, List, Optional, Sequence, Tuple
 
 import math
@@ -102,6 +102,10 @@ class ExportSpec:
     flip: bool = False
     rotation: str = ROTATIONS[0]
     pitch: str = "0"
+    # Where along the chord the angle of attack turns the section, in percent
+    # from the nose. Blank in a record means the leading edge, which is what
+    # every export before this setting existed was pitched about.
+    pivot: str = "0"
     p1: Tuple[str, str, str] = ("0", "0", "0")
     p2: Tuple[str, str, str] = ("0", "0", "0")
     p3: Tuple[str, str, str] = ("0", "0", "0")
@@ -143,6 +147,11 @@ class ExportSpec:
     def pitch_degrees(self) -> float:
         text = self.pitch.strip()
         return parse_float(text, "Angle of attack") if text else 0.0
+
+    def pivot_fraction(self) -> float:
+        """The pivot as a fraction of the chord: 0 at the nose, 0.25 at the quarter chord."""
+        text = self.pivot.strip()
+        return parse_float(text, "Pivot") / 100.0 if text else 0.0
 
     def target_chord_mm(self) -> Optional[float]:
         text = self.target_chord.strip()
@@ -297,6 +306,26 @@ def plane_frame(spec: ExportSpec, section: Optional[geometry.FlatSection]) -> Tu
     return geometry.plane_frame(mode, **kwargs)
 
 
+def placement(
+    data: AirfoilData, spec: ExportSpec, section: Optional[geometry.FlatSection]
+) -> Tuple[Vec3, Vec3, Vec3]:
+    """Where the section's 2D origin lands, and the chord and up it is laid out along.
+
+    The leading edge field says where the nose sits before any pitch. The pitch
+    turns the section about the pivot, so with a pivot behind the nose it is the
+    nose that moves and the pivot that stays put.
+    """
+    u, v = plane_frame(spec, section)
+    leading_edge = spec.vector("leading_edge")
+    pitch = spec.pitch_degrees()
+    fraction = spec.pivot_fraction()
+    if pitch and fraction:
+        chord = data.chord * geometry.scale_factor(data.chord, spec.target_chord_mm())
+        flat_u, _ = plane_frame(replace(spec, pitch="0"), section)
+        leading_edge = geometry.pivot_origin(leading_edge, flat_u, u, fraction * chord)
+    return leading_edge, u, v
+
+
 def finish_surface(surface: Sequence[Point2], mode: str) -> List[Tuple[str, List[Point2], bool]]:
     """The curves one airfoil surface becomes under a trailing-edge mode."""
     if mode == TE_OPEN:
@@ -360,8 +389,7 @@ def build_curves(
 ) -> List[Curve]:
     """Everything an export produces: named, placed in space, ready to write."""
     factor = geometry.scale_factor(data.chord, spec.target_chord_mm())
-    u, v = plane_frame(spec, section)
-    leading_edge = spec.vector("leading_edge")
+    leading_edge, u, v = placement(data, spec, section)
 
     if spec.extension not in writer.EXTENSIONS:
         raise InputError(f"Unsupported extension {spec.extension!r}.")

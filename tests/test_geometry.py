@@ -250,6 +250,24 @@ def test_pitch_is_measured_against_the_chosen_up_axis():
     assert tail[1] == pytest.approx(-100 * math.sin(math.radians(10)))
 
 
+def test_a_pivot_behind_the_nose_stays_put_under_pitch():
+    """Moving the origin by pivot_origin turns the section about the pivot."""
+    flat_u, _ = g.plane_frame("XY")
+    u, v = g.plane_frame("XY", pitch=-3.0)
+    nose = g.pivot_origin((10.0, 20.0, 30.0), flat_u, u, 50.0)
+    before = g.to_3d([(50.0, 0.0)], (10.0, 20.0, 30.0), flat_u, v)[0]
+    after = g.to_3d([(50.0, 0.0)], nose, u, v)[0]
+    assert after == approx(before)
+    # Washout drops the nose by the pivot's distance times the sine of the angle.
+    assert nose[1] - 20.0 == pytest.approx(-50.0 * math.sin(math.radians(3.0)))
+
+
+def test_a_pivot_at_the_nose_leaves_the_nose_where_it_was():
+    flat_u, _ = g.plane_frame("XY")
+    u, _ = g.plane_frame("XY", pitch=12.0)
+    assert g.pivot_origin((1.0, 2.0, 3.0), flat_u, u, 0.0) == approx((1.0, 2.0, 3.0))
+
+
 def test_pitch_keeps_the_frame_orthonormal():
     u, v = g.plane_frame("3points", p1=(1, 2, 3), p2=(4, -1, 2), p3=(0, 5, 7), pitch=17.5)
     assert g.length(u) == pytest.approx(1.0)

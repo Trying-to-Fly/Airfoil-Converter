@@ -172,7 +172,9 @@ Panels are 8 px apart; the strip has 12 px padding all round.
    (92 px), disabled — the same rule the branch applies, made visible.
 7. `Rotate in plane` — 168 px segmented, mono: 0° · 90° · 180° · 270°.
 8. `Angle of attack` — 84 px field with `°`; hint *+ pitches the nose up*.
-9. A rule, then the **pick tracker** (§7).
+9. `Pivot at` — 84 px field with `%`; hint *of chord · 0 nose, 25 quarter
+   chord*.
+10. A rule, then the **pick tracker** (§7).
 
 The readout is live: `<plane> · nose <chord axis> · up <up axis>` on a main
 plane; `3 points · picked from <plane name>` after a pick; `2 points ·

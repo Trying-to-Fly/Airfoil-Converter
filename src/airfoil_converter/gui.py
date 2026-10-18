@@ -94,6 +94,7 @@ SPEC_VARS = (
     ("flip", "flip"),
     ("rotation", "rotation"),
     ("pitch", "pitch"),
+    ("pivot", "pivot"),
     ("extension", "extension"),
 )
 
@@ -209,6 +210,9 @@ class ConverterApp(ttk.Frame):
         self.flip = tk.BooleanVar(value=False)
         self.rotation = tk.StringVar(value=ROTATIONS[0])
         self.pitch = tk.StringVar(value="0")
+        # A fresh form twists about the quarter chord, as a wing is designed;
+        # a remembered export keeps the pivot it was made with.
+        self.pivot = tk.StringVar(value="25")
         default_chord, default_up = geometry.default_axes("XY")
         self.chord_axis = tk.StringVar(value=default_chord)
         self.up_axis = tk.StringVar(value=default_up)
@@ -679,14 +683,20 @@ class ConverterApp(ttk.Frame):
         )
 
         self._row_label(body, 7, "Angle of attack")
-        pitch = self._cell(body, 7, pady=0)
+        pitch = self._cell(body, 7)
         widgets.Field(pitch, self.pitch, width=84, unit="°").grid(row=0, column=0)
         self._hint(pitch, "+ pitches the nose up").grid(row=0, column=1,
                                                         padx=(theme.px(8), 0))
 
-        widgets.Rule(body, theme.TRACK).grid(row=8, column=0, columnspan=2,
+        self._row_label(body, 8, "Pivot at")
+        pivot = self._cell(body, 8, pady=0)
+        widgets.Field(pivot, self.pivot, width=84, unit="%").grid(row=0, column=0)
+        self._hint(pivot, "of chord · 0 nose, 25 quarter chord").grid(
+            row=0, column=1, padx=(theme.px(8), 0))
+
+        widgets.Rule(body, theme.TRACK).grid(row=9, column=0, columnspan=2,
                                              sticky="ew", pady=theme.px(8))
-        self._build_tracker(body).grid(row=9, column=0, columnspan=2, sticky="ew")
+        self._build_tracker(body).grid(row=10, column=0, columnspan=2, sticky="ew")
         return panel
 
     # -- the pick tracker (§7)

@@ -279,8 +279,9 @@ def quarter_turn_frame(u: Vec3, v: Vec3, turns: int) -> Tuple[Vec3, Vec3]:
 def pitch_frame(u: Vec3, v: Vec3, degrees: float) -> Tuple[Vec3, Vec3]:
     """Rotate a frame within its own plane by an angle of attack, in degrees.
 
-    Positive pitches the nose up: the leading edge is the pivot, so the trailing
-    edge swings toward -v.
+    Positive pitches the nose up: the trailing edge swings toward -v. The frame
+    turns about the 2D origin, which is the leading edge; to turn about another
+    point on the chord, move the origin with :func:`pivot_origin`.
     """
     if degrees == 0.0:
         return u, v
@@ -292,6 +293,17 @@ def pitch_frame(u: Vec3, v: Vec3, degrees: float) -> Tuple[Vec3, Vec3]:
         sub(scale(u, c), scale(v, s)),
         add(scale(u, s), scale(v, c)),
     )
+
+
+def pivot_origin(leading_edge: Vec3, flat_u: Vec3, pitched_u: Vec3, distance: float) -> Vec3:
+    """Where the leading edge goes so a pitch turns about a point on the chord.
+
+    The pivot is ``distance`` behind ``leading_edge`` along the unpitched chord
+    ``flat_u``. Pitching swings the chord to ``pitched_u``; putting the leading
+    edge ``distance`` ahead of the pivot along that swung chord leaves the pivot
+    exactly where it was.
+    """
+    return add(leading_edge, scale(sub(flat_u, pitched_u), distance))
 
 
 def plane_frame(
@@ -321,7 +333,7 @@ def plane_frame(
     about the leading edge and the way a positive angle of attack goes, so two
     turns swap nose with tail and top with bottom. ``flip`` mirrors 'up' alone.
     ``pitch`` is the angle of attack in degrees, applied last, about the leading
-    edge and relative to the final 'up'.
+    edge and relative to the final 'up'; :func:`pivot_origin` moves the pivot.
     """
     if mode == LOADED:
         if frame is None:

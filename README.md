@@ -191,11 +191,18 @@ the other way; it is not a nose-to-tail mirror. The turns are exact: `90°` swap
 and negates the plane's two axes rather than taking a sine of anything, so an
 airfoil on a main plane stays exactly on its axes.
 
-**Angle of attack** pitches the section within its plane, about the leading-edge
-point, and applies in every mode. Positive is nose-up: the leading edge stays
-put and the trailing edge swings toward the *down* side of whatever you chose as
-up. It is applied last, so it measures against the final orientation — after any
-flip or in-plane rotation. Blank or `0` leaves the section unpitched.
+**Angle of attack** pitches the section within its plane, about the **pivot**,
+and applies in every mode. Positive is nose-up: the trailing edge swings toward
+the *down* side of whatever you chose as up. It is applied last, so it measures
+against the final orientation — after any flip or in-plane rotation. Blank or `0`
+leaves the section unpitched.
+
+**Pivot at** says where along the chord the pitch turns the section, in percent
+from the nose: `0` is the leading edge, `25` the quarter chord. The leading-edge
+point is where the nose sits *before* the pitch, so with a pivot behind the nose
+the pivot stays exactly where it was and the nose moves — down, for washout. A
+fresh form starts at `25`; an export remembered from before this setting existed
+reads as `0`, so reopening an old part moves nothing.
 
 Coordinates are written as three tab-separated columns per line, six decimals,
 with `mm` on every value. The suffix is what makes the document's own unit

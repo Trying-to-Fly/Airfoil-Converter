@@ -233,6 +233,10 @@ def record_summary(spec: ExportSpec) -> str:
     """One line of a remembered export's settings, for the card under the tree."""
     parts = [f"Leading edge at {', '.join(spec.leading_edge)}"]
     parts.append(PLANE_LABELS.get(spec.plane_mode, spec.plane_mode))
+    pitch = spec.pitch.strip()
+    if pitch and pitch.strip("0.+-"):
+        # Without the pivot two cards with the same angle can hide different noses.
+        parts.append(f"pitched {pitch}° about {spec.pivot.strip() or '0'}% chord")
     parts.append(f"chord {spec.target_chord} mm" if spec.target_chord else "source chord")
     parts.append(f"TE {spec.te_thickness or '0'} mm")
     parts.append(
