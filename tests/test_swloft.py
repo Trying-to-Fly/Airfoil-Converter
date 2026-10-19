@@ -160,6 +160,8 @@ class FakeSolidWorks:
             raise SolidWorksError("no cap")
         # A planar cap is not one of the loft types features_of_type is asked for.
         self.names.append(name)
+        # It stands on the surface's edges: suppressing the surface takes it.
+        self.children[loft] = tuple(self.children.get(loft, ())) + (name,)
         return name
 
     def knit_to_solid(self, surfaces, name, solid=True):
@@ -169,8 +171,11 @@ class FakeSolidWorks:
         if solid and self.knit_sews_sheet:
             raise NotASolid("sewed a sheet")
         # What it knits stays in the tree, absorbed but still calling itself a
-        # lofted surface; the knit itself is a type of its own.
+        # lofted surface; the knit itself is a body type of its own, and built
+        # on the surface, so suppressing the surface takes it too.
         self.names.append(name)
+        self.lofts.append(name)
+        self.children[surfaces[0]] = tuple(self.children.get(surfaces[0], ())) + (name,)
         return name
 
     def rename_feature(self, current, new):
@@ -271,6 +276,34 @@ def test_replacing_a_capped_loft_clears_what_it_was_made_of(tmp_path):
     ]
 
 
+def test_replacing_a_loft_never_capped_does_not_list_the_tree_again(tmp_path):
+    """A listing is 3.7 s on a big part. The one taken at the start already
+    says there are no pieces to clear."""
+    sw = FakeSolidWorks(features=["wing_loft"])
+    sw.lofts = ["wing_loft"]
+    listed = []
+    names = sw.feature_names
+    sw.feature_names = lambda: listed.append(1) or names()
+    first, = loft_and_export(sw, PLANS[:1], str(tmp_path))
+
+    assert first.ok
+    assert len(listed) == 1
+    assert [c for c in sw.calls if c[0] == "delete"] == [("delete", "wing_loft")]
+
+
+def test_a_piece_the_knit_took_with_it_is_not_asked_for_again(tmp_path):
+    """Whatever deleting the knit took is gone, not stuck."""
+    sw = FakeSolidWorks(features=["wing_loft", "wing_loft_surface",
+                                  "wing_loft_root_cap", "wing_loft_tip_cap"])
+    sw.lofts = ["wing_loft"]
+    sw.children = {"wing_loft": ("wing_loft_tip_cap",),
+                   "wing_loft_surface": ("wing_loft_root_cap",)}
+    first, = loft_and_export(sw, PLANS[:1], str(tmp_path))
+
+    assert first.ok
+    assert "wing_loft_surface" not in sw.names
+
+
 def test_a_refused_solid_is_made_as_a_surface_and_capped(tmp_path):
     """The same geometry, built the other way round: the surface loft, a patch
     across each end curve, and the three knitted into a solid."""
@@ -301,9 +334,40 @@ def test_a_capped_loft_is_not_suppressed_by_its_own_pieces(tmp_path):
     assert results[1].capped
 
     written = {c[1].split(os.sep)[-1]: c[2] for c in sw.calls if c[0] == "step"}
-    assert "wing_inner_loft_surface" not in written["wing_loft.STEP"]
-    assert written["wing_loft.STEP"] == frozenset()
     assert written["wing_inner_loft.STEP"] == frozenset({"wing_loft"})
+
+
+def test_another_capped_loft_is_suppressed_whole(tmp_path):
+    """Suppressing only another wing's knit brings its surface and caps back as
+    loose sheets, and they would be written beside this wing's solid."""
+    sw = FakeSolidWorks()
+    sw.loft_fails = {"wing_inner_loft"}
+    results = loft_and_export(sw, PLANS, str(tmp_path))
+    assert results[1].capped
+
+    written = {c[1].split(os.sep)[-1]: c[2] for c in sw.calls if c[0] == "step"}
+    assert written["wing_loft.STEP"] == frozenset({
+        "wing_inner_loft", "wing_inner_loft_surface",
+        "wing_inner_loft_root_cap", "wing_inner_loft_tip_cap",
+    })
+    # The knit first: suppressing the surface has already taken it after.
+    suppressing = [c[1] for c in sw.calls if c[0] == "suppress"]
+    assert suppressing.index("wing_inner_loft") < suppressing.index("wing_inner_loft_surface")
+    assert sw.suppressed == set()
+
+
+def test_a_capped_loft_kept_from_before_is_written_with_its_solid(tmp_path):
+    """Kept rather than rebuilt, a loft says nothing of having been capped, and
+    its surface must still not be suppressed while it is the one written."""
+    sw = FakeSolidWorks(features=["wing_loft", "wing_loft_surface",
+                                  "wing_loft_root_cap", "wing_loft_tip_cap"])
+    sw.lofts = ["wing_loft_surface", "wing_loft"]
+    sw.children = {"wing_loft_surface": ("wing_loft_root_cap", "wing_loft_tip_cap", "wing_loft")}
+    first, = loft_and_export(sw, PLANS[:1], str(tmp_path), replace=False)
+
+    assert first.kept and not first.capped
+    written = {c[1].split(os.sep)[-1]: c[2] for c in sw.calls if c[0] == "step"}
+    assert written["wing_loft.STEP"] == frozenset()
 
 
 def test_an_accepted_solid_is_not_capped(tmp_path):

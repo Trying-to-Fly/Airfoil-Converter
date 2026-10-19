@@ -61,6 +61,7 @@ class SolidWorks(Protocol):
     def reload_curve(self, name: str, path: str) -> None: ...
     def roll_back_to(self, name: str) -> None: ...
     def roll_forward(self) -> None: ...
+    def rolled_back(self, names: Sequence[str]) -> List[str]: ...
     def set_rebuild_suppressed(self, suppressed: bool) -> None: ...
     # No argument: this module only ever rebuilds what changed.
     def rebuild(self) -> bool: ...
@@ -69,6 +70,9 @@ class SolidWorks(Protocol):
     def delete_folder(self, folder: str) -> None: ...
     def editing_sketch(self) -> bool: ...
 
+
+# What a push that left the tree rolled back names in its failures.
+ROLLBACK_BAR = "rollback bar"
 
 # What a joined curve is renamed to when it is made again.
 OLD_JOIN_SUFFIX = "_old"
@@ -254,18 +258,8 @@ def _apply(
     # below. New curves are made at the bar, which puts them beside their own
     # kind rather than at the end of the part.
     order = {name: i for i, name in enumerate(sw.feature_names())}
-    here = [c.feature for c in to_reload if c.feature in order]
-    last = max(here, key=lambda name: order[name]) if here else ""
-    rolled = False
-    if last:
-        try:
-            sw.roll_back_to(last)
-            rolled = True
-        except SolidWorksError:
-            # A bar that will not move costs time, not correctness. The push
-            # goes ahead on the live tree, the way it always used to, rather
-            # than refusing an export over how long it is going to take.
-            pass
+    here = sorted((c.feature for c in to_reload if c.feature in order), key=order.__getitem__)
+    rolled = bool(here) and _roll_back_past(sw, result, here)
 
     sw.set_rebuild_suppressed(True)
     try:
@@ -298,7 +292,7 @@ def _apply(
     finally:
         try:
             if rolled:
-                sw.roll_forward()
+                _roll_forward(sw, result)
         finally:
             # Whatever the bar does, the document must not be left suppressed.
             sw.set_rebuild_suppressed(False)
@@ -309,6 +303,51 @@ def _apply(
         # is recorded here is that the rebuild ran.
         sw.rebuild()
         result.rebuilt = True
+
+
+def _roll_back_past(sw: SolidWorks, result: PushResult, names: Sequence[str]) -> bool:
+    """Put the bar just after whichever of ``names`` comes last in the tree.
+
+    ``names`` come in the order the tree was listed in, and that is not the
+    tree's own order: ``GetFeatures``' help says its order means nothing. So
+    the bar goes after the last one listed, and while any of them is still
+    rolled back it moves on to that one. Every move is further down the tree,
+    so there are never more moves than names.
+
+    A bar that will not go, or will not settle, costs time, not correctness:
+    the push goes ahead on the live tree, the way it always used to, rather
+    than refusing an export over how long it is going to take.
+    """
+    moved = False
+    try:
+        target = names[-1]
+        for _ in names:
+            sw.roll_back_to(target)
+            moved = True
+            behind = sw.rolled_back(names)
+            if not behind:
+                return True
+            target = behind[-1]
+    except SolidWorksError:
+        pass
+    if moved:
+        _roll_forward(sw, result)
+    return False
+
+
+def _roll_forward(sw: SolidWorks, result: PushResult) -> None:
+    """Bring the bar back to the end, and say so if it will not come.
+
+    Raising here would throw away what the push has already done to the part:
+    curves inserted but never recorded, and inserted again, under names
+    SolidWorks makes up, by the next push.
+    """
+    try:
+        sw.roll_forward()
+    except SolidWorksError as exc:
+        result.failures.append(
+            (ROLLBACK_BAR, f"{exc} Drag the rollback bar to the end of the tree.")
+        )
 
 
 def _join(

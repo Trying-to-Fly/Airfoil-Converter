@@ -816,6 +816,17 @@ def test_a_tree_the_user_had_rolled_back_is_left_rolled_back_by_a_read(win32):
     assert not any(c[0] == "EditRollback" for c in doc.calls)
 
 
+def test_each_feature_says_whether_the_bar_rolled_it_back():
+    """What tells whether the bar landed after every curve: a listing of the
+    tree does not come in the tree's order."""
+    import types
+
+    session, _ = rebuilding_session()
+    behind = {"wing_s01": False, "wing_s02": True, "wing_s03": True}
+    session._curve_feature = lambda name: types.SimpleNamespace(IsRolledBack=behind[name])
+    assert session.rolled_back(["wing_s01", "wing_s02", "wing_s03"]) == ["wing_s02", "wing_s03"]
+
+
 def test_a_tree_that_answers_yes_and_stays_rolled_back_is_an_error():
     """The one state worse than a slow export: half a part, handed back."""
     session, doc = rebuilding_session(lies=[swcom.ROLLBACK_TO_END])

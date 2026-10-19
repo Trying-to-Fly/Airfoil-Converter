@@ -1106,7 +1106,7 @@ class Session:
             entities = call(data, "GetEntitiesToJoin", kinds) or ()
             return [str(call(e, "Name")) for e in entities]
         finally:
-            data.ReleaseSelectionAccess()
+            call(data, "ReleaseSelectionAccess")
             if was_forward and self._rolled_back():
                 self.roll_forward()
 
@@ -1151,6 +1151,15 @@ class Session:
         call(call(doc, "FeatureManager"), "EditRollback", ROLLBACK_TO_END, "")
         if self._rolled_back():
             raise SolidWorksError("The tree could not be rolled forward again.")
+
+    def rolled_back(self, names: Sequence[str]) -> List[str]:
+        """Which of these features the rollback bar has rolled back.
+
+        Asked of each by name, a hundredth of a second apiece: what tells
+        whether the bar landed after all of them, which a listing of the tree
+        cannot, since it does not come in the tree's order.
+        """
+        return [name for name in names if call(self._curve_feature(name), "IsRolledBack")]
 
     def _rolled_back(self) -> bool:
         """Is any of the tree rolled back? The last feature is the one to ask."""
