@@ -279,8 +279,9 @@ def quarter_turn_frame(u: Vec3, v: Vec3, turns: int) -> Tuple[Vec3, Vec3]:
 def pitch_frame(u: Vec3, v: Vec3, degrees: float) -> Tuple[Vec3, Vec3]:
     """Rotate a frame within its own plane by an angle of attack, in degrees.
 
-    Positive pitches the nose up: the leading edge is the pivot, so the trailing
-    edge swings toward -v.
+    Positive pitches the nose up: the trailing edge swings toward -v. The frame
+    turns about the 2D origin, the leading edge; ``export.placement`` moves the
+    origin so that a section turns about its reference point instead.
     """
     if degrees == 0.0:
         return u, v

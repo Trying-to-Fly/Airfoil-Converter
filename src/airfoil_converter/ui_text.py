@@ -31,7 +31,7 @@ from .swcom import PickedLine, PickedPlane, PickedPoint
 # What each step of a pick is called on its own row, and what it is waiting for
 # said as a noun phrase rather than as an instruction — a row that is still to
 # come is not telling the user to do anything yet.
-STEP_NAMES = {PLANE: "Plane", LINE: "Chord line", POINT: "Leading edge"}
+STEP_NAMES = {PLANE: "Plane", LINE: "Chord line", POINT: "Reference point"}
 STEP_WANTS = {
     PLANE: "a reference plane, or a flat face",
     LINE: "a straight edge, or a sketch line",
@@ -79,16 +79,26 @@ def plane_readout(mode: str, chord_axis: str, up_axis: str, constraint: str,
 
 
 def placement_readout(mode: str, manual: bool = False, picked: bool = False) -> str:
-    """Where the 2D origin lands — the old ``le_hint``, shortened to a readout."""
+    """Where the reference point lands — the old ``le_hint``, shortened to a readout."""
     if picked:
         return "picked in SolidWorks"
     if manual:
         return "typed in by hand"
     if mode == MODE_LOADED:
-        return "the curve's own leading edge"
+        return "where the curve was drawn"
     if mode in (MODE_3POINTS, MODE_2POINTS, MODE_NORMAL):
         return "defaults to P1"
-    return "where the 2D origin lands"
+    return "where the reference point lands"
+
+
+def reference_label(reference: str) -> str:
+    """What the placement coordinates are the coordinates of, as a row label."""
+    text = reference.strip()
+    try:
+        value = float(text) if text else 0.0
+    except ValueError:
+        return "Point at"
+    return "Leading edge at" if value == 0.0 else f"{text}% chord at"
 
 
 def source_line(name: str, chord: float, points: int, has_camber: bool,
@@ -231,7 +241,7 @@ ADOPTED_HINT = (
 
 def record_summary(spec: ExportSpec) -> str:
     """One line of a remembered export's settings, for the card under the tree."""
-    parts = [f"Leading edge at {', '.join(spec.leading_edge)}"]
+    parts = [f"{reference_label(spec.reference)} {', '.join(spec.leading_edge)}"]
     parts.append(PLANE_LABELS.get(spec.plane_mode, spec.plane_mode))
     parts.append(f"chord {spec.target_chord} mm" if spec.target_chord else "source chord")
     parts.append(f"TE {spec.te_thickness or '0'} mm")
@@ -342,7 +352,7 @@ def wing_readout(editing: str) -> str:
 
 
 def rib_columns(record: "store.ExportRecord") -> Tuple[str, str]:
-    """A rib's row in the list: its name, and where its leading edge stands.
+    """A rib's row in the list: its name, and where its reference point stands.
 
     The two halves of the Wing tab's ``rib_label``, for a list that sets them
     in two columns the way the flyout's tree does.

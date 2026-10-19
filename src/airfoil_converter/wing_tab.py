@@ -312,7 +312,7 @@ class WingTab(tk.Frame):
         body.columnconfigure(0, weight=1)
         # A tick box per rib, drawn like the flyout's tree. A list whose rows
         # toggle on a click gives no hint that it wants clicking.
-        self.rib_list = widgets.CheckList(body, "Rib", "Leading edge", empty=ui_text.NO_RIBS)
+        self.rib_list = widgets.CheckList(body, "Rib", "Placed at", empty=ui_text.NO_RIBS)
         self.rib_list.grid(row=0, column=0, sticky="ew")
 
         tools = tk.Frame(body, bg=theme.WHITE)

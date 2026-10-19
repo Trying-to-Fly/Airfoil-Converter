@@ -15,10 +15,11 @@ broken:
   understands and everything downstream — the spec, the sidecar, the export —
   carries on knowing nothing about SolidWorks.
 * **The chord runs P1 -> P2, which is nose to tail.** A line has two ends and
-  says nothing about which is which, so the leading edge decides: the end
-  nearer the point the user picked is the nose. Get this backwards and the
-  section is exported the right shape, on the right plane, facing the wrong
-  way.
+  says nothing about which is which, so the picked point decides. It is the
+  section's reference point: in the front half of the chord the nose is the
+  end nearer it, in the back half the end further from it. Get this backwards
+  and the section is exported the right shape, on the right plane, facing the
+  wrong way.
 """
 
 from __future__ import annotations
@@ -28,7 +29,7 @@ from typing import Optional, Sequence, Tuple
 
 from . import geometry
 from .export import MODE_3POINTS, MODE_NORMAL
-from .geometry import Vec3, add, dot, length, normalize, scale, sub
+from .geometry import Vec3, add, dot, normalize, scale, sub
 from .swcom import Picked, PickedLine, PickedPlane, PickedPoint, Refused
 
 # What a step is waiting for.
@@ -39,7 +40,7 @@ POINT = "point"
 _ASK = {
     PLANE: "Click the plane the airfoil sits on: a reference plane, or a flat face.",
     LINE: "Click a line for the chord: a straight edge, or a sketch line.",
-    POINT: "Click the leading edge: a sketch point, or a corner.",
+    POINT: "Click the reference point: a sketch point, or a corner.",
 }
 
 _INSTEAD = {
@@ -59,10 +60,10 @@ class Step:
         return _ASK[self.wants] + (" Or press Skip." if self.optional else "")
 
 
-# The full pick: a plane, then how the chord runs on it, then where the nose
-# goes. Only the plane is needed — without a line the chord follows the
-# normal-to-line convention, and without a point the leading edge is left to
-# fill itself in from P1.
+# The full pick: a plane, then how the chord runs on it, then where the
+# reference point goes. Only the plane is needed — without a line the chord
+# follows the normal-to-line convention, and without a point the reference
+# point is left to fill itself in from P1.
 PLANE_PICK: Tuple[Step, ...] = (
     Step(PLANE),
     Step(LINE, optional=True),
@@ -172,28 +173,32 @@ class Pick:
         self._at = len(self._steps)
         self._note = ""
 
-    def resolve(self) -> Placement:
-        """What was picked, as a plane mode and the points to put in the form."""
-        nose = self.point.where if self.point is not None else None
+    def resolve(self, reference: float = 0.0) -> Placement:
+        """What was picked, as a plane mode and the points to put in the form.
+
+        ``reference`` is where along the chord the picked point is, as a
+        fraction from the nose: it is what tells the line's nose from its tail.
+        """
+        point = self.point.where if self.point is not None else None
 
         if self.plane is None:
-            return Placement(leading_edge=nose)
+            return Placement(leading_edge=point)
 
         if self.line is not None:
-            chord = _nose_to_tail(self.line, nose)
-            anchor = nose if nose is not None else _onto(self.line.start, self.plane)
+            chord = _nose_to_tail(self.line, point, reference)
+            anchor = point if point is not None else _onto(self.line.start, self.plane)
             points = geometry.picked_points(self.plane.normal, anchor, chord)
-            return Placement(plane_mode=MODE_3POINTS, points=points, leading_edge=nose)
+            return Placement(plane_mode=MODE_3POINTS, points=points, leading_edge=point)
 
         # No line, so nothing fixes the chord on the plane. Hand the normal to
         # the mode that already has a convention for exactly that, rather than
         # inventing a second one.
-        anchor = nose if nose is not None else self.plane.root
+        anchor = point if point is not None else self.plane.root
         along = normalize(self.plane.normal, "plane normal")
         return Placement(
             plane_mode=MODE_NORMAL,
             points=(anchor, add(anchor, along)),
-            leading_edge=nose,
+            leading_edge=point,
         )
 
 
@@ -223,17 +228,21 @@ class SelectionWatch:
         return picked
 
 
-def _nose_to_tail(line: PickedLine, nose: Optional[Vec3]) -> Vec3:
+def _nose_to_tail(line: PickedLine, point: Optional[Vec3], reference: float = 0.0) -> Vec3:
     """Which way along the line the chord runs.
 
-    With a leading edge picked, the nearer end of the line is the nose and the
-    chord runs away from it. Without one there is nothing to go on, so the line
-    keeps its own direction and the user flips it if it came out backwards.
+    The picked point is the reference point, ``reference`` of the chord back
+    from the nose. In the front half of the chord that puts it nearer the nose,
+    so the nose is the nearer end of the line; in the back half, the further
+    end. Without a point there is nothing to go on, so the line keeps its own
+    direction and the user flips it if it came out backwards.
     """
-    if nose is None:
-        return sub(line.end, line.start)
-    if length(sub(line.start, nose)) <= length(sub(line.end, nose)):
-        return sub(line.end, line.start)
+    along = sub(line.end, line.start)
+    if point is None:
+        return along
+    nearer_start = dot(sub(point, line.start), along) <= 0.5 * dot(along, along)
+    if nearer_start == (reference <= 0.5):
+        return along
     return sub(line.start, line.end)
 
 

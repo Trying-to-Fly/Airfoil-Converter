@@ -57,10 +57,16 @@ download and double-click, no Python needed.
    the part open you can click the plane in SolidWorks instead of typing it; see
    *Picking the plane out of the model* below.
 8. Point the airfoil where you want it (see *Orientation* below).
-9. Set where the **leading edge** lands, by typing it or by clicking a sketch
-   point in SolidWorks. This is where the 2D origin is placed.
-   It defaults to the origin for main planes, to `P1` for custom planes, and to
-   the curve's own leading edge for a loaded curve, until you type in it yourself.
+9. Choose the **reference point** — how far along the chord, from the nose,
+   the section is placed by: `0` is the leading edge, `25` the quarter chord —
+   and set where it lands, by typing it or by clicking a sketch point in
+   SolidWorks. The angle of attack turns the section about this point, so it
+   stays exactly where you put it at any angle; a wing designed around a
+   straight quarter-chord line is placed by typing points on that line. It
+   defaults to the origin for main planes, to `P1` for custom planes, and to
+   wherever keeps a loaded curve where it was drawn, until you type in it
+   yourself. A fresh form starts at `25`; an export remembered from before this
+   setting existed reads as `0`, so reopening an old part moves nothing.
 10. **Export.** Output goes next to the source file by default.
 
 ## Curve files as input
@@ -191,11 +197,12 @@ the other way; it is not a nose-to-tail mirror. The turns are exact: `90°` swap
 and negates the plane's two axes rather than taking a sine of anything, so an
 airfoil on a main plane stays exactly on its axes.
 
-**Angle of attack** pitches the section within its plane, about the leading-edge
-point, and applies in every mode. Positive is nose-up: the leading edge stays
-put and the trailing edge swings toward the *down* side of whatever you chose as
-up. It is applied last, so it measures against the final orientation — after any
-flip or in-plane rotation. Blank or `0` leaves the section unpitched.
+**Angle of attack** pitches the section within its plane, about its
+**reference point**, and applies in every mode. Positive is nose-up: the
+trailing edge swings toward the *down* side of whatever you chose as up, and
+with a reference behind the nose the nose rises with it — or drops, for
+washout. It is applied last, so it measures against the final orientation —
+after any flip or in-plane rotation. Blank or `0` leaves the section unpitched.
 
 Coordinates are written as three tab-separated columns per line, six decimals,
 with `mm` on every value. The suffix is what makes the document's own unit
@@ -255,11 +262,12 @@ The coordinates are already in the part, so they need not be typed twice. Press
    section is placed on.
 2. **A line** — a straight edge, or a sketch line. The chord runs along it.
    Press **Skip** to leave the chord to the normal-to-line convention.
-3. **The leading edge** — a sketch point, or a corner. Press **Skip** to leave
-   the leading edge where it is.
+3. **The reference point** — a sketch point, or a corner: the leading edge
+   with the reference at `0`, the quarter chord at `25`. Press **Skip** to
+   leave the reference point where it is.
 
 The form then switches to **3 points** and fills `P1`, `P2` and `P3` in for
-you: `P1` is the leading edge, `P2` the far end of the line, `P3` one chord
+you: `P1` is the point you picked, `P2` further along the line, `P3` one chord
 length to the up side. Nothing new is stored — a picked plane is an ordinary
 3-point plane, so the settings save, reload and export exactly as a typed one
 does.
@@ -268,13 +276,15 @@ Skipping the line leaves nothing to fix the chord *on* the plane, so the form
 falls back to **Normal to line**, whose convention is described under
 *Orientation* above.
 
-There is a second **Pick** button beside the leading edge, for moving a section
-without touching its plane.
+There is a second **Pick** button beside the reference point, for moving a
+section without touching its plane.
 
 Two things worth knowing:
 
-- **The chord runs nose to tail, and a line has two ends.** The end nearer the
-  leading edge you picked becomes the nose. Skip the leading edge and the line
+- **The chord runs nose to tail, and a line has two ends.** With the reference
+  in the front half of the chord (`0` to `50`) the end nearer the point you
+  picked becomes the nose; with it in the back half, the end further from it.
+  Skip the point and the line
   keeps its own direction, which is a coin toss — press **Flip up direction**,
   or swap `P1` and `P2` by hand, if the section comes out backwards.
 - **Up follows SolidWorks, not the app's own main planes.** A picked plane is

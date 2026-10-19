@@ -59,6 +59,20 @@ def test_a_rib_is_its_exported_outline_without_its_own_offset(straight_wing):
     assert len(rib.outline) == (len(plain[0].points) - 1) * wing.DRAWN_STEPS + 1
 
 
+def test_a_rib_placed_by_its_quarter_chord_stands_on_its_own_nose(straight_wing):
+    """The point typed in is the quarter chord, not the nose, and the wing must
+    stand on the nose the export actually drew."""
+    record = straight_wing.records()[0]
+    spec = dataclasses.replace(record.spec, pitch="-4", reference="25")
+    record.settings = spec.to_dict()
+    data = parser.parse_csv(SAMPLE_CSV)
+    rib = wing.rib_from_record(record, data)
+    nose, u, v = export.placement(data, spec, None)
+    assert (rib.le, rib.u, rib.v) == (nose, u, v)
+    assert rib.le != spec.vector("leading_edge")
+    assert rib.outline[::wing.DRAWN_STEPS] == export.build_curves(data, spec, "rib")[0].points
+
+
 def test_an_adopted_rib_is_refused(straight_wing):
     record = straight_wing.records()[0]
     record.adopted, record.settings = True, {}

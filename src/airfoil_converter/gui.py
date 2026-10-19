@@ -29,6 +29,7 @@ from .export import (
     folder_name,
     joinable,
     load_source,
+    reference_point,
     section_from_dict,
     section_to_dict,
 )
@@ -94,6 +95,7 @@ SPEC_VARS = (
     ("flip", "flip"),
     ("rotation", "rotation"),
     ("pitch", "pitch"),
+    ("reference", "reference"),
     ("extension", "extension"),
 )
 
@@ -109,7 +111,7 @@ def _record_label(record: "Optional[Any]", export_id: str) -> str:
 
 
 def _record_place(record: "Optional[Any]") -> str:
-    """Where the leading edge sits, which is what distinguishes one rib from the next."""
+    """Where the reference point sits, which is what distinguishes one rib from the next."""
     if record is None:
         return ""
     if isinstance(record, store.WingRecord):
@@ -161,7 +163,7 @@ def _picked_summary(session) -> str:
         for name, value in (
             ("the plane", session.plane),
             ("the chord", session.line),
-            ("the leading edge", session.point),
+            ("the reference point", session.point),
         )
         if value is not None
     ]
@@ -209,6 +211,9 @@ class ConverterApp(ttk.Frame):
         self.flip = tk.BooleanVar(value=False)
         self.rotation = tk.StringVar(value=ROTATIONS[0])
         self.pitch = tk.StringVar(value="0")
+        # A fresh form places and twists by the quarter chord, as a wing is
+        # designed; a remembered export keeps the reference it was made with.
+        self.reference = tk.StringVar(value="25")
         default_chord, default_up = geometry.default_axes("XY")
         self.chord_axis = tk.StringVar(value=default_chord)
         self.up_axis = tk.StringVar(value=default_up)
@@ -300,6 +305,11 @@ class ConverterApp(ttk.Frame):
         for var in (self.up_axis, self.constraint, self.main_plane):
             var.trace_add("write", lambda *_: self._refresh_plane_readout())
         self.curve_name.trace_add("write", lambda *_: self._on_name_changed())
+        self.reference.trace_add("write", lambda *_: self._on_reference_changed())
+        # An As-loaded curve's reference point sits a share of its finished
+        # chord along its own chord, so these move where it sits.
+        for var in (self.target_chord, self.rotation, self.flip):
+            var.trace_add("write", lambda *_: self._sync_leading_edge())
         self._on_plane_mode_changed()
         self._show_pick()
         self._refresh_link_labels()
@@ -770,8 +780,15 @@ class ConverterApp(ttk.Frame):
         body.columnconfigure(0, minsize=theme.px(118))
         body.columnconfigure(1, weight=1)
 
-        self._row_label(body, 0, "Leading edge at")
-        cell = self._cell(body, 0, sticky="ew", pady=0)
+        self._row_label(body, 0, "Reference at")
+        reference = self._cell(body, 0)
+        widgets.Field(reference, self.reference, width=84, unit="%").grid(row=0, column=0)
+        self._hint(reference, "of chord · 0 nose, 25 quarter chord").grid(
+            row=0, column=1, padx=(theme.px(8), 0))
+
+        # Named for the point it places, since that is what the numbers are.
+        self.le_label = self._row_label(body, 1, ui_text.reference_label(self.reference.get()))
+        cell = self._cell(body, 1, sticky="ew", pady=0)
         for column in range(3):
             cell.columnconfigure(column, weight=1, uniform="le")
         self.le_entries: List[widgets.Field] = []
@@ -1014,7 +1031,7 @@ class ConverterApp(ttk.Frame):
         self.status_dot.set_color(color)
 
     def _on_le_typed(self, event: tk.Event) -> None:
-        """Stop auto-filling the leading edge once the user edits it themselves."""
+        """Stop auto-filling the reference point once the user edits it themselves."""
         if event.keysym in NAVIGATION_KEYS:
             return
         self._le_manual = True
@@ -1108,15 +1125,27 @@ class ConverterApp(ttk.Frame):
         finally:
             self._syncing_axes = False
 
+    def _on_reference_changed(self) -> None:
+        self.le_label.configure(text=ui_text.reference_label(self.reference.get()))
+        self._sync_leading_edge()
+
+    def _loaded_reference(self) -> geometry.Vec3:
+        """Where an As-loaded curve's reference point is, so it stays where it was drawn."""
+        try:
+            return reference_point(self.data, self._spec(), self.section, self.section.origin)
+        except (InputError, GeometryError):
+            # Half-typed: the curve's own nose, until the form reads again.
+            return self.section.origin
+
     def _sync_leading_edge(self) -> None:
-        """Keep the leading edge at its default until the user edits it."""
+        """Keep the reference point at its default until the user edits it."""
         if self._le_manual or self._syncing:
             return
         mode = self.plane_mode.get()
         self._syncing = True
         try:
-            if mode == MODE_LOADED and self.section is not None:
-                values = [f"{c:g}" for c in self.section.origin]
+            if mode == MODE_LOADED and self.section is not None and self.data is not None:
+                values = [f"{c:g}" for c in self._loaded_reference()]
             elif mode in (MODE_3POINTS, MODE_2POINTS, MODE_NORMAL):
                 values = [var.get() for var in self.p_vars[0]]
             else:
@@ -1423,8 +1452,9 @@ class ConverterApp(ttk.Frame):
 
     def _apply_pick(self, session) -> None:
         try:
-            placement = session.resolve()
-        except GeometryError as exc:
+            reference = ExportSpec(reference=self.reference.get()).reference_fraction()
+            placement = session.resolve(reference)
+        except (InputError, GeometryError) as exc:
             self._end_pick(f"Pick stopped: {exc}")
             return
         self._pick = None
@@ -1438,8 +1468,8 @@ class ConverterApp(ttk.Frame):
         """Put a resolved pick on the form.
 
         The order is the whole method. Setting the plane mode clears the
-        hand-typed leading-edge flag and re-syncs the leading edge from P1, so
-        the points have to be written after the mode and the leading edge after
+        hand-typed reference-point flag and re-syncs the reference point from P1,
+        so the points have to be written after the mode and the reference point after
         the points — the same order :meth:`_apply_record` follows, and for the
         same reason.
         """
@@ -1853,7 +1883,7 @@ class ConverterApp(ttk.Frame):
         self._describe_selection()
 
     def _le_place(self) -> str:
-        """Where the form says the leading edge is, in the tree's own spelling."""
+        """Where the form says the reference point is, in the tree's own spelling."""
         return ", ".join(var.get() for var in self.le_vars)
 
     def _stem(self) -> str:

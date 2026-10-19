@@ -178,8 +178,12 @@ The readout is live: `<plane> · nose <chord axis> · up <up axis>` on a main
 plane; `3 points · picked from <plane name>` after a pick; `2 points ·
 perpendicular to XY`, `Normal to line`, `As loaded` otherwise.
 
-### Placement — readout `where the 2D origin lands`
-1. `Leading edge at` — three fields that share the width, each prefixed
+### Placement — readout `where the reference point lands`
+1. `Reference at` — 84 px field with `%`; hint *of chord · 0 nose, 25 quarter
+   chord*. The angle of attack turns the section about this point.
+2. `Leading edge at` — named for the point it places: `25% chord at` with
+   the reference at 25, `Point at` while the reference does not read. Three
+   fields that share the width, each prefixed
    inside with a faint `X` / `Y` / `Z`, then a **Pick** button (cursor icon).
    The button is enabled exactly when `_can_push()` is true, like the plane
    pick. The `le_hint` text is folded into the readout; it is not a second
@@ -225,7 +229,7 @@ padding:
   `#2b2b2b`), then `step 2 of 3 · 1:12 left` in 11 px `#6e6e6e` — the
   countdown is the pick's own timeout, shown so the user knows it exists —
   and **Cancel** at the far right.
-- One row per step (`Plane`, `Chord line`, `Leading edge`; the point pick
+- One row per step (`Plane`, `Chord line`, `Reference point`; the point pick
   has one row), 24 px, with a 16 px glyph, an 88 px step name and a detail:
   - **done** — a `#1a7f37` disc with a white tick; the detail is what was
     read: the object's name in mono, then ` · reference plane` / ` · flat
@@ -246,9 +250,9 @@ padding:
 
 **Done** — the block collapses back to the idle row, but the hint is replaced
 by a green tick glyph and `_picked_summary(session)`: *Read the plane, the
-chord and the leading edge from SolidWorks.* The plane selector moves to
+chord and the reference point from SolidWorks.* The plane selector moves to
 3 points, P1–P3 fill with a `#2b2b2b` border, the readout says `3 points ·
-picked from <plane>`, and the leading edge fields fill (and their own Pick
+picked from <plane>`, and the reference point fields fill (and their own Pick
 button enables). A cancelled pick shows *Pick cancelled. Nothing on the form
 was changed.* in `#6e6e6e` the same way.
 
@@ -274,7 +278,7 @@ Header row, 26 px: `SOLIDWORKS · CURVES IN THE PART` (panel-header style) and
    names, 11.5 px states, indented 16 px per level with a chevron on group
    rows. Colour by tag exactly as `_fill_tree` sets it: `linked` green,
    `attention` red (`missing`, `drifted`, `orphan`, `not pushed`),
-   `untracked` `#777777`. A record row shows its leading edge (`0, 0, 120`)
+   `untracked` `#777777`. A record row shows its reference point (`0, 0, 120`)
    in the state column, in 600. The selected record and its children get a
    `#e9e9e9` background.
 4. A card for the selected record, white with a `#d8d8d8` border, 8 × 10 px

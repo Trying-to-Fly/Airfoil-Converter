@@ -383,8 +383,7 @@ def rib_from_record(record, data, section=None) -> Rib:
         # Sharp and left open: the loop still closes at its trailing edge.
         points, closed = g.auto_close(points), True
     factor = g.scale_factor(data.chord, plain.target_chord_mm())
-    u, v = export.plane_frame(plain, section)
-    le = plain.vector("leading_edge")
+    le, u, v = export.placement(data, plain, section)
     # Thinned just as the rib's exported curve is, then filled in along the
     # curve SolidWorks draws through those points.
     outline = as_drawn(g.thin_curve(g.to_3d(points, le, u, v, factor)))
