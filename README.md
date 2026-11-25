@@ -614,6 +614,64 @@ before you rely on it.
 
 The wing's curves go in folders like the ribs', gathered under **Wing Curves**.
 
+## MCP server
+
+Another agent can drive the Converter without its window, through an
+[MCP](https://modelcontextprotocol.io) server: read a section, finish and
+export ribs, stand a wing up from them, and get back the numbers and the loft
+plan. It does what the window does, through the same code, so a rib or a wing
+written by an agent is byte for byte the one the window would have written,
+and its records are the same `*.airfoils.json` sidecar the window keeps
+beside a part.
+
+The server is an optional extra, as the SolidWorks link is, and needs Python
+3.10 or newer:
+
+```
+pip install airfoil-converter[mcp]
+airfoil-converter-mcp --workspace C:\work\wing
+```
+
+or, from a checkout, `python -m airfoil_converter.mcp --workspace DIR` with
+`src` on the path. It talks over stdio. Every path a tool takes is resolved
+against the **workspace**, symlinks followed, and refused if it lands outside;
+nothing is ever written anywhere else. `--read-root DIR` (repeatable) adds a
+folder sources may be read from but never written to. For Claude Code, in the
+project's `.mcp.json`:
+
+```json
+{
+  "mcpServers": {
+    "airfoil-converter": {
+      "command": "airfoil-converter-mcp",
+      "args": ["--workspace", "C:\\work\\wing", "--read-root", "C:\\airfoils"]
+    }
+  }
+}
+```
+
+A **project** is a part's path, such as `wing.SLDPRT`; the part need not exist.
+Settings are the form's, by field name, as text: `converter_info` lists every
+one with its meaning and default. A new section starts as the window's form
+does when it loads one, with one difference: the reference point defaults to
+`0`, the leading edge, where the window's fresh form says `25`. The tools:
+
+| Tool | Does |
+| --- | --- |
+| `converter_info` | Version, units and axes, every `ExportSpec` and `WingSpec` field, the trailing-edge modes, whether SolidWorks is reachable, the workspace and read roots. |
+| `read_section` | A CSV or curve file: name, points, chord, leading and trailing edge, TE gap, thickness and where, and a curve's plane. |
+| `finish_section` | What an export of it would make, writing nothing: each curve's name, points, bounding box; the finished chord and TE thickness. |
+| `export_rib` | Export a rib: write its curve files and record it in the project, new or again. |
+| `list_project` | A project's ribs and wings, and whether each curve file is there and unchanged. |
+| `check_wing` | Try a wing, new or with changes (ribs, edges, ends, thickness rule, offset, folder), saving nothing: what the Result panel says, the planform, the expected wall, and what a build would retire. |
+| `build_wing` | The same, then write the wing's curves and its record together, and return the loft plan: profiles root to tip, guides, and the files. |
+
+Points come back only when asked (`include_points`), at the curve files'
+precision and capped; big geometry goes to curve files. A refusal comes back
+as a tool error carrying the Converter's own message. It does not drive
+SolidWorks: the curves and the loft plan are for whatever CAD bridge comes
+next. The plan is in `design/MCP-SERVER.md`.
+
 ## Building the executable
 
 ```
@@ -631,6 +689,9 @@ pip may have installed the scripts outside your PATH.
 pip install pytest
 python -m pytest
 ```
+
+The MCP server's tests (`tests/test_mcp_*.py`) are skipped unless the `mcp`
+extra is installed.
 
 Layout:
 
@@ -652,6 +713,11 @@ src/airfoil_converter/
   theme.py      # every colour, size and face the window uses
   widgets.py    # the controls the design asks for, drawn by hand
   ui_text.py    # the readouts and tracker rows, worked out without a window
+  mcp/          # the MCP server (optional extra; nothing else imports it)
+    server.py   #   command line, workspace and path rules, errors, make_server()
+    tools_info.py    # converter_info
+    tools_section.py # one section: read, finish, export, project records
+    tools_wing.py    # wings: define, check, build, loft plan
 tests/
 main.py         # entry point
 ```

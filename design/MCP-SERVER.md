@@ -44,9 +44,8 @@ Done when every tool below exists, has tests through a real MCP client session (
 | `finish_section` | Run the export pipeline on a source with an `ExportSpec` (partial dict over defaults) without writing: returns each curve's role, feature name, point count, closed flag, bounding box, finished chord, TE thickness; optional points. |
 | `export_rib` | Same, then write the curve files and record the rib in the project's sidecar (new or update by id/stem, exactly as the window does), keeping the window's naming and folder rules. Returns paths, feature names, sidecar path, and which files changed (`write_curve_if_changed`). |
 | `list_project` | What a project's sidecar holds: ribs and wings, their specs, curves, file paths, and whether each file is present and matches its recorded hash. |
-| `define_wing` | Create or update a wing record in the project: ribs (by id or stem), each edge (straight or a curve file), end conditions, thickness mode, offset. |
-| `check_wing` | `build_wing(check=True)`: what `wing_build.describe` says, station count, planform (span, root/tip chord, LE/TE sweep samples), expected wall when offset, and any refusal. Writes nothing. |
-| `build_wing` | Build and write the wing's curves (sections, edges, surface guides; inner set when offset), record them, and return the loft plan from `swloft.plan_for_wing`: which profiles in order and which guides, so a CAD bridge can loft without knowing the naming. |
+| `check_wing` | A wing by id or name, or a new one, with any of ribs (by id or stem), each edge (straight or a curve file), end conditions, thickness mode, offset and folder overridden: `build_wing(check=True)`, what `wing_build.describe` says, station count, planform (span, root/tip chord, LE/TE sweep samples), expected wall when offset, the curves a build would retire and whether the loft's station count would change, and any refusal. Saves nothing. |
+| `build_wing` | The same overrides, then build and write the wing's curves (sections, edges, surface guides; inner set when offset) and its record — settings, folder and curves together, the only tool that writes a wing record, as Export is in the window — and return the loft plan from `swloft.plan_for_wing`: which profiles in order and which guides, so a CAD bridge can loft without knowing the naming. |
 
 ## Phase 2 — what the winglet needs (CONVERTER_TOOLS.md)
 
