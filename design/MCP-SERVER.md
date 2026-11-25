@@ -1,6 +1,6 @@
 # MCP server
 
-**Status: in progress on branch `mcp-server`.** This file is the build plan; it becomes the server's reference once the work lands.
+**Status: Phases 1 and 2 built on branch `mcp-server`; Phase 3 left to SW-Agent.** This file was the build plan; the README's *MCP server* section is the reference for using it.
 
 ## Goal
 
@@ -62,9 +62,10 @@ Core module `src/airfoil_converter/profile.py` (pure Python, unit-tested against
 7. **Place a section in any plane.** One call: profile (2D, chord-normalised or mm), leading-edge point, chord direction, up direction, chord, twist about a chord-fraction pivot. Returns the 3D curve, written if asked. Check: round trip through `flatten_curve` gives back the plane and the profile.
 8. **Sections and guides along a caller's law.** The caller gives stations (each a placement as in 7, plus a profile or a morph weight); the server writes section curves, LE and TE curves, and surface guides through matching points at the window's guide fractions, and a loft plan. Check: every guide passes through every section within 1e-6 mm.
 
-## Phase 3 — SolidWorks (Windows only, decide before starting)
+## Phase 3 — SolidWorks: left to SW-Agent
 
-Push curves into an open part (`swlink.push`) and loft (`swloft.loft_in_part` / `loft_and_export`) when `swcom` is available. Needs a Windows Python with pywin32 and a running SolidWorks, and overlaps SW-Agent's bridge role; the alternative is to stop at curve files and loft plans and let SW-Agent do the CAD. Not started until the designer chooses.
+Decided 2026-11-25: the server stops at curve files and loft plans. It does not push curves into a part or loft them, even where `swcom` is available. SW-Agent owns the SolidWorks bridge (COM, approvals, backups, verification), so the CAD side stays in one place: an agent builds geometry here, then hands the curve files and the `loft_plan` (profiles in order, guides, joins, feature-to-file map) to SW-Agent to import and loft. The window's own SolidWorks link is unchanged.
+
 
 ## Testing
 
