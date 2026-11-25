@@ -1,9 +1,13 @@
 import math
+import os
 
 import pytest
 
 from airfoil_converter import geometry as g
+from airfoil_converter import parser
 from airfoil_converter.geometry import GeometryError
+
+SAMPLE_CSV = os.path.join(os.path.dirname(os.path.dirname(__file__)), "sd7037-il.csv")
 
 LOOP = [(100.0, 0.0), (50.0, 5.0), (0.0, 0.0), (50.0, -5.0), (100.0, 0.0)]
 OPEN_TE = [(100.0, 1.0), (50.0, 5.0), (0.0, 0.0), (50.0, -5.0), (100.0, -1.0)]
@@ -843,6 +847,49 @@ def test_keep_chord_on_a_section_that_already_ends_blunt():
 def test_keep_chord_still_rejects_a_cut_thicker_than_the_section():
     with pytest.raises(GeometryError, match="thicker than the section itself"):
         g.blunt_trailing_edge(LOOP, 20.0, keep_chord=True)
+
+
+# ----------------------------------------- blunt trailing edge, reported
+
+
+@pytest.mark.parametrize("thickness", [0.5, 2.0, 5.0])
+def test_the_cut_reports_the_scale_that_wins_back_the_chord(thickness):
+    cut = g.cut_trailing_edge(LOOP, thickness, keep_chord=True)
+    assert cut.cut
+    assert cut.chord == 100.0
+    assert cut.scale * cut.cut_chord == pytest.approx(cut.chord, abs=1e-9)
+    assert cut.points == g.blunt_trailing_edge(LOOP, thickness, keep_chord=True)
+    # The diamond stands thickness / scale thick at x = 100 - 5 * thickness / scale.
+    assert cut.station == pytest.approx(100.0 - 5.0 * thickness / cut.scale, rel=1e-9)
+    assert cut.cut_chord == pytest.approx(cut.station)
+    assert max(x for x, _ in cut.points) == pytest.approx(cut.station * cut.scale)
+
+
+@pytest.mark.parametrize("thickness", [0.1, 0.4, 0.8, 1.5])
+def test_the_scale_wins_back_a_real_section_chord(thickness):
+    data = parser.parse_csv(SAMPLE_CSV)
+    cut = g.cut_trailing_edge(data.airfoil, thickness, keep_chord=True)
+    assert abs(cut.scale * cut.cut_chord - cut.chord) <= 1e-9
+    assert cut.chord == pytest.approx(g.chord_span(data.airfoil))
+    assert cut.fraction == pytest.approx(cut.cut_chord / cut.chord)
+
+
+def test_a_plain_cut_reports_no_regrowth():
+    cut = g.cut_trailing_edge(LOOP, 2.0)
+    assert cut.cut and cut.scale == 1.0
+    assert cut.station == pytest.approx(90.0)
+    assert cut.cut_chord == pytest.approx(90.0)
+    assert cut.fraction == pytest.approx(0.9)
+    assert cut.points == g.blunt_trailing_edge(LOOP, 2.0)
+
+
+@pytest.mark.parametrize("points,thickness", [(LOOP, 0.0), (OPEN_TE, 1.0)])
+def test_a_section_left_alone_says_so(points, thickness):
+    cut = g.cut_trailing_edge(points, thickness, keep_chord=True)
+    assert not cut.cut
+    assert cut.points == points
+    assert cut.scale == 1.0
+    assert cut.station == cut.cut_chord == cut.chord == 100.0
 
 
 # ------------------------------------------------------- trailing-edge line

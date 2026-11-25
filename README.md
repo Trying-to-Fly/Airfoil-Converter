@@ -96,6 +96,24 @@ Two things to know:
   no area, so there is no wall to walk around. Offset the whole loop, and split
   it afterwards if you need the halves.
 
+## UIUC coordinate files
+
+**Browse** also opens the `.dat` files of the UIUC Airfoil Coordinates
+Database, downloaded as they are: a title line, then one `x y` pair per line in
+fractions of the chord. Both layouts in use read — *Selig*, one contour from the
+upper trailing edge round the nose to the lower, and *Lednicer*, a row of point
+counts and then each surface from the nose to the tail — and either comes in the
+plotter CSV's order, the upper surface first, whichever way round the file runs. The count row is kept aside, never
+read as a point, and the nose the two surfaces share is given once.
+
+The title names the section. The chord is measured from the origin, where a
+UIUC file puts the leading edge, to the tail, so a section in fractions has a
+chord of exactly 1 and a **target chord** of 200 scales every point by 200,
+trailing-edge ends included. A section in fractions has no size of its own, so
+it will not export until a target chord is set. The file carries no camber
+line, so that box is greyed out. As with curves, the format is read from the contents: a `.dat`
+saved as `.txt` still reads.
+
 ## Trailing edge
 
 A drawn airfoil ends in a point of no thickness. A built one cannot, so **TE
@@ -697,8 +715,9 @@ Layout:
 
 ```
 src/airfoil_converter/
-  parser.py     # CSV -> metadata + point sections; curve file -> XYZ points
+  parser.py     # CSV or UIUC .dat -> metadata + point sections; curve file -> XYZ points
   geometry.py   # plane frames, 2D<->3D transform, trailing-edge handling, offsetting
+  profile.py    # NACA sections; camber and thickness, morphs, placing, sections along a law
   writer.py     # .sldcrv / .txt output
   export.py     # the form as data, and the curves it produces
   wing.py       # a wing stood up from its ribs: axes, edge curves, the loft between

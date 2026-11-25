@@ -102,17 +102,52 @@ def reference_label(reference: str) -> str:
 
 
 def source_line(name: str, chord: float, points: int, has_camber: bool,
-                is_curve: bool) -> Tuple[str, str]:
+                is_curve: bool, in_chords: bool = False) -> Tuple[str, str]:
     """The loaded file, as a name and the rest of the line.
 
     Two pieces because the name is set in bold and the rest is not; joining
-    them here and splitting them in the window would be worse.
+    them here and splitting them in the window would be worse. A section in
+    fractions of its chord — a UIUC .dat file — has no millimetres to show.
     """
-    parts = [f"{_number(chord)} mm", f"{points} pts"]
+    size = f"chord {_number(chord)}, unitless" if in_chords else f"{_number(chord)} mm"
+    parts = [size, f"{points} pts"]
     if is_curve:
         parts.append("curve file")
+    if in_chords:
+        parts.append("UIUC .dat")
     parts.append("camber line" if has_camber else "no camber line")
     return name, " · ".join(parts)
+
+
+def loaded_summary(name: str, chord: float, points: int, has_camber: bool,
+                   is_curve: bool, in_chords: bool = False) -> str:
+    """The one-line account of what was loaded, kept for the status history."""
+    size = f"chord {_number(chord)} (fractions)" if in_chords else f"chord {_number(chord)} mm"
+    summary = f"Loaded: {name}, {size}, {points} pts"
+    if is_curve:
+        summary += " (curve file)"
+    elif in_chords:
+        summary += " (UIUC .dat, no camber line)"
+    elif not has_camber:
+        summary += " (no camber line)"
+    return summary
+
+
+def loaded_status(is_curve: bool, in_chords: bool = False) -> str:
+    """What to do next, once a source is loaded."""
+    if is_curve:
+        return "Curve loaded on its own plane. Set an offset and export."
+    if in_chords:
+        return (
+            "UIUC .dat loaded. Its points are fractions of the chord: set a target "
+            "chord in mm, then the plane, and export."
+        )
+    return "CSV loaded. Set the plane and export."
+
+
+def chord_placeholder(chord: float, in_chords: bool = False) -> str:
+    """What the empty target-chord field shows: the chord a blank keeps, or that one is needed."""
+    return "required" if in_chords else _number(chord)
 
 
 def link_headline(available: bool, snapshot: Optional[dict]) -> Tuple[str, str]:
