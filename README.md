@@ -683,6 +683,26 @@ does when it loads one, with one difference: the reference point defaults to
 | `list_project` | A project's ribs and wings, and whether each curve file is there and unchanged. |
 | `check_wing` | Try a wing, new or with changes (ribs, edges, ends, thickness rule, offset, folder), saving nothing: what the Result panel says, the planform, the expected wall, and what a build would retire. |
 | `build_wing` | The same, then write the wing's curves and its record together, and return the loft plan: profiles root to tip, guides, and the files. |
+| `naca4` | Make a NACA four-digit section (cosine-spaced, Selig order, chord 1); save it as a `.dat` file to export it. |
+| `blunt_trailing_edge` | Cut a section's trailing edge to a thickness in mm, saying where the cut fell, the chord it left and the regrowth scale. |
+| `split_section` | Camber and half-thickness on a common grid of chord stations, from the true nose. |
+| `morph_sections` | A section part way from one to another, its trailing edge held at a thickness in mm; save it as a `.dat` file. |
+| `nose_radius` | The nose radius off the curve through the points, and across a swept leading edge. |
+| `place_section` | Stand a section on any plane by its nose, chord and up directions, chord and twist; write the curve if asked. |
+| `build_law` | Sections at the caller's own stations, with edges and surface guides through them, written as curve files with a loft plan in `build_wing`'s shape. Not recorded in a project. |
+| `fetch_uiuc` | Only with `--allow-network`: download a coordinate file from the UIUC database into the workspace, with a note of its URL and when it was retrieved. |
+
+The profile tools take a section the same way: a path to a CSV, UIUC `.dat` or
+curve file, or its points inline as `[[x, y], ...]`, trailing edge round the
+nose and back. They work in the section's own chord frame — the true nose at
+the origin, the middle of the trailing edge at (1, 0) — and a section in
+fractions of its chord (a UIUC file, a NACA or morphed profile) needs its
+chord in millimetres before it can be exported or measured in millimetres.
+Their `chord_mm` is that frame's chord, nose to the middle of the trailing
+edge; an export's target chord keeps the window's meaning, the source's own
+chord. A tool that writes a file you name (`save_as`, `write`, `build_law`,
+`fetch_uiuc`) replaces only its own earlier output, never a file it did not
+write unless asked with `overwrite`, and never writes through a link.
 
 Points come back only when asked (`include_points`), at the curve files'
 precision and capped; big geometry goes to curve files. A refusal comes back
@@ -736,7 +756,8 @@ src/airfoil_converter/
     server.py   #   command line, workspace and path rules, errors, make_server()
     tools_info.py    # converter_info
     tools_section.py # one section: read, finish, export, project records
-    tools_wing.py    # wings: define, check, build, loft plan
+    tools_wing.py    # wings: check, build, loft plan
+    tools_profile.py # profiles: NACA, blunt cut, split, morph, nose, place, law, UIUC fetch
 tests/
 main.py         # entry point
 ```

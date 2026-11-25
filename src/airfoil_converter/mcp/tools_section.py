@@ -17,7 +17,7 @@ from typing import Annotated, Any, Dict, Optional, Sequence
 
 from pydantic import Field
 
-from .. import export, geometry, store, swlink, writer
+from .. import export, geometry, parser, profile, store, swlink, writer
 from ..export import ExportSpec, InputError
 from ..geometry import GeometryError
 from .server import (
@@ -33,8 +33,9 @@ from .server import (
 )
 
 Source = Annotated[str, Field(description=(
-    "A plotter CSV or a curve file (.sldcrv/.txt), relative to the workspace "
-    "or in a read root."
+    "A plotter CSV (mm), a UIUC .dat coordinate file (fractions of the chord, so it "
+    "needs a target chord to export) or a curve file (.sldcrv/.txt, mm, on its own "
+    "plane), relative to the workspace or in a read root."
 ))]
 ProjectPath = Annotated[str, Field(description=(
     "The project: a part's path relative to the workspace, such as 'wing.SLDPRT'. "
@@ -125,27 +126,53 @@ def read(ctx: ServerContext, source: str, include_points: bool = False) -> Dict[
     first, last = airfoil[0], airfoil[-1]
     gap = distance(first, last)
     chord = data.chord
-    station, thickness = geometry._thickest_station(geometry.drop_duplicate(airfoil))
+    mm = not data.in_chords
     answer: Dict[str, Any] = {
         "source": ctx.show(path),
-        "kind": "curve" if section is not None else "csv",
+        "kind": "curve" if section is not None else ("dat" if data.in_chords else "csv"),
         "name": data.name,
         "metadata": dict(data.metadata),
         "sections": list(data.sections),
+        "units": "mm" if mm else parser.CHORD_FRACTIONS,
         "point_count": len(airfoil),
-        "chord_mm": rounded(chord),
+        "chord": rounded(chord, 9),
+        "chord_mm": rounded(chord) if mm else None,
         "leading_edge": vector(nose),
         "trailing_edge": [vector(first), vector(last)],
-        "te_gap_mm": rounded(gap),
+        "te_gap": rounded(gap, 9),
+        "te_gap_mm": rounded(gap) if mm else None,
         "closed": gap <= geometry.POINT_TOL,
-        "max_thickness_mm": rounded(thickness),
-        "max_thickness_percent": rounded(100.0 * thickness / chord, 4),
-        "max_thickness_at_percent": rounded(100.0 * (station - nose[0]) / chord, 4),
         "camber_point_count": len(data.camber or []),
         "coordinates": (
-            "2D, in mm, in the section's own plane: x along the chord from the nose, y up."
+            "2D, in the section's own plane and its own units: x along the chord from the "
+            "nose, y up."
         ),
     }
+    # Thickness as the profile tools measure it: square to the chord line drawn
+    # from the true nose, on the curve SolidWorks draws through the points.
+    try:
+        split = profile.split_profile(airfoil)
+    except GeometryError as exc:
+        # A section the split will not take — one whose loop starts at its nose,
+        # say — is still measured, as it always was: across the loop at each x,
+        # the thickest station's height and where it stands.
+        station, thickness = geometry._thickest_station(geometry.drop_duplicate(airfoil))
+        answer.update(
+            max_thickness_mm=rounded(thickness) if mm else None,
+            max_thickness_percent=rounded(100.0 * thickness / chord, 4),
+            max_thickness_at_percent=rounded(100.0 * (station - nose[0]) / chord, 4),
+            thickness_note=(
+                f"Measured vertically across the loop, since the chord-frame split refused "
+                f"it: {exc}"
+            ),
+        )
+    else:
+        thickness, station = split.max_thickness()
+        answer.update(
+            max_thickness_mm=rounded(thickness * split.chord) if mm else None,
+            max_thickness_percent=rounded(100.0 * thickness, 4),
+            max_thickness_at_percent=rounded(100.0 * station, 4),
+        )
     if section is not None:
         answer["plane"] = {
             "origin": vector(section.origin),
@@ -498,5 +525,5 @@ def register(server: Any, ctx: ServerContext) -> None:
 
     add_tool(server, read_section, read_only=True, idempotent=True)
     add_tool(server, finish_section, read_only=True, idempotent=True)
-    add_tool(server, export_rib_tool, name="export_rib")
+    add_tool(server, export_rib_tool, name="export_rib", destructive=True)
     add_tool(server, list_project, read_only=True, idempotent=True)

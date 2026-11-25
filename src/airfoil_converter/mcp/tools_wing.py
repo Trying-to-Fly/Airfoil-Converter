@@ -431,4 +431,4 @@ def register(server: Any, ctx: ServerContext) -> None:
         return build(ctx, project, wing, ribs, name, spec, folder, include_points)
 
     add_tool(server, check_wing, read_only=True, idempotent=True)
-    add_tool(server, build_wing)
+    add_tool(server, build_wing, destructive=True)

@@ -33,6 +33,8 @@ SRC = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), 
 TOOLS = {
     "converter_info", "read_section", "finish_section", "export_rib", "list_project",
     "check_wing", "build_wing",
+    "blunt_trailing_edge", "naca4", "split_section", "morph_sections", "nose_radius",
+    "place_section", "build_law",
 }
 
 
@@ -66,6 +68,7 @@ async def test_read_only_tools_say_so(workspace):
     hints = {tool.name: tool.annotations.read_only_hint for tool in listed.tools}
     assert {name for name, ro in hints.items() if ro} == {
         "converter_info", "read_section", "finish_section", "list_project", "check_wing",
+        "blunt_trailing_edge", "split_section", "nose_radius",
     }
 
 

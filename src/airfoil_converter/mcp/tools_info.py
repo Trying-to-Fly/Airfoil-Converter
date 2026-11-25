@@ -33,7 +33,11 @@ MEANINGS: Dict[str, Dict[str, str]] = {
             "After a blunting cut, grow the section back about its nose until it spans its "
             "original chord again; otherwise the chord ends at the cut."
         ),
-        "target_chord": "Rescale to this chord, in mm. Blank keeps the source's chord.",
+        "target_chord": (
+            "Rescale to this chord, in mm: the source's own chord (a CSV's Chord(mm), a UIUC "
+            "file's from its origin) is scaled to it, as in the window — not the profile "
+            "tools' true-nose chord. Blank keeps the source's chord."
+        ),
         "offset": (
             "Offset the airfoil surface by this constant distance, in finished mm (never "
             "negative; offset_dir says which way). Blank for none. Not a rescale."
@@ -266,6 +270,29 @@ def describe(ctx: ServerContext) -> Dict[str, Any]:
             "available": swcom.is_available(),
             "reason": swcom.unavailable_reason(),
         },
+        "capabilities": {
+            "sources": ["plotter CSV (mm)", "UIUC .dat (fractions of the chord)",
+                        "curve file (mm, on its own plane)"],
+            "sections": ["read_section", "finish_section", "export_rib", "list_project"],
+            "wings": ["check_wing", "build_wing"],
+            "profiles": ["naca4", "blunt_trailing_edge", "split_section", "morph_sections",
+                         "nose_radius", "place_section", "build_law"],
+            "fetch_uiuc": ctx.allow_network,
+            "drives_solidworks": False,
+        },
+        "network": ctx.allow_network,
+        "chord_frame": (
+            "Profile tools work in the section's own chord frame: the true nose (the point of "
+            "the curve through the points furthest from the middle of the trailing edge) at "
+            "the origin, the middle of the trailing edge at (1, 0), thickness square to that "
+            "chord. A profile tool's chord_mm is that chord, true nose to the middle of the "
+            "trailing edge. An export's target_chord keeps the window's meaning instead: the "
+            "source's own chord scaled to it — a CSV's Chord(mm), a UIUC file's from its "
+            "origin, a curve file's longest span — which can differ from the true chord by "
+            "a few hundredths of a millimetre. A section in fractions of its chord (a UIUC "
+            ".dat, a NACA or morphed profile) needs a chord in mm to be exported or answered "
+            "in mm."
+        ),
         "workspace": ctx.workspace,
         "read_roots": list(ctx.read_roots),
     }
@@ -274,7 +301,8 @@ def describe(ctx: ServerContext) -> Dict[str, Any]:
 def register(server: Any, ctx: ServerContext) -> None:
     def converter_info() -> Dict[str, Any]:
         """What this server is: version, units and axes, the meaning of every ExportSpec
-        and WingSpec field (name, type, default, choices), the trailing-edge modes,
+        and WingSpec field (name, type, default, choices), the trailing-edge modes, the
+        profile tools' chord frame, what it can do (and whether it may use the network),
         whether SolidWorks is reachable, and the folders it may read and write."""
         return describe(ctx)
 

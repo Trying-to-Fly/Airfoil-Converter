@@ -47,15 +47,24 @@ SUMMARY_DECIMALS = 6
 
 INSTRUCTIONS = """\
 Airfoil Converter: airfoil sections to SolidWorks Curve Through XYZ Points
-files, and wings lofted from them. Millimetres and degrees throughout.
+files, and wings lofted from them. Millimetres and degrees, except where a
+section is in fractions of its chord: a UIUC .dat file, and the NACA and
+morphed profiles the profile tools make.
 
 Start with converter_info: it says what every setting means. Then:
-read_section to look at a source (a plotter CSV or a curve file);
-finish_section to see what an export would make, writing nothing;
+read_section to look at a source (a plotter CSV, a UIUC .dat file or a curve
+file); finish_section to see what an export would make, writing nothing;
 export_rib to write a rib's curve files and record it in a project;
-define_wing, check_wing and build_wing to stand a wing up from those ribs and
-write its curves, with the loft plan a CAD bridge needs; list_project to see
+check_wing to try a wing from those ribs and build_wing to write its curves
+and record it, with the loft plan a CAD bridge needs; list_project to see
 what a project holds.
+
+The profile tools work on a section's shape: naca4 makes one,
+blunt_trailing_edge cuts its trailing edge, split_section gives camber and
+thickness, morph_sections blends two, nose_radius measures the nose,
+place_section stands one in space, and build_law lays sections along stations
+of your own with edges and guides. fetch_uiuc, when the server allows the
+network, downloads a UIUC coordinate file.
 
 A project is a part's path, such as "wing.SLDPRT" (the part need not exist):
 its record is the "*.airfoils.json" file the Converter's window keeps beside
@@ -68,11 +77,15 @@ class PathError(Exception):
     """A path that resolves outside what the server may read or write."""
 
 
+class Refused(Exception):
+    """A request the server itself turns down, saying why: a fetch that failed, say."""
+
+
 # The Converter's own refusals. Each already says what to change, so it goes
 # to the client as it is; the window shows the same text in its status line.
 # Nothing broader: an error the Converter did not mean for the user is the
 # SDK's to report, which it does without its text.
-ANSWERED = (InputError, GeometryError, AirfoilParseError, store.StoreError, PathError)
+ANSWERED = (InputError, GeometryError, AirfoilParseError, store.StoreError, PathError, Refused)
 
 
 def _inside(path: str, root: str) -> bool:
@@ -104,9 +117,14 @@ class ServerContext:
     workspace: str
     read_roots: Tuple[str, ...] = ()
     lock: Any = dataclasses.field(default_factory=threading.RLock)
+    # Whether a tool may reach the network (--allow-network), and what it
+    # reaches it with: a stand-in in tests, never the real network there.
+    allow_network: bool = False
+    opener: Optional[Callable[..., Any]] = None
 
     @classmethod
-    def create(cls, workspace: str, read_roots: Sequence[str] = ()) -> "ServerContext":
+    def create(cls, workspace: str, read_roots: Sequence[str] = (), allow_network: bool = False,
+               opener: Optional[Callable[..., Any]] = None) -> "ServerContext":
         def folder(path: str, what: str) -> str:
             real = os.path.realpath(path)
             if not os.path.isdir(real):
@@ -116,6 +134,8 @@ class ServerContext:
         return cls(
             workspace=folder(workspace, "workspace"),
             read_roots=tuple(folder(root, "read root") for root in read_roots),
+            allow_network=allow_network,
+            opener=opener,
         )
 
     # -- paths --------------------------------------------------------------
@@ -213,6 +233,27 @@ class ServerContext:
             os.makedirs(real, exist_ok=True)
         return real
 
+    def target_file(self, path: str, what: str = "file", make: bool = True) -> str:
+        """Where a file named by a tool is written: its folder resolved, its name not.
+
+        Only the folder is resolved, and must lie in the workspace; the name is
+        joined on as given and :meth:`check_targets` refuses it if it, or its
+        ``.tmp``, is a link. Resolving the whole path instead would follow a
+        link at the name itself and write wherever it points — into a project's
+        record, say — and check the extension of the name given rather than the
+        file written.
+        """
+        if not isinstance(path, str) or not path.strip():
+            raise PathError(f"No {what} was given.")
+        folder, base = os.path.split(os.path.join(self.workspace, path))
+        if base in ("", ".", ".."):
+            raise PathError(f"The {what} {path} names a folder, not a file.")
+        target = os.path.join(self.output_folder(folder, make=make), base)
+        if os.path.isdir(target):
+            raise PathError(f"The {what} {path} is a folder.")
+        self.check_targets([target])
+        return target
+
     def check_targets(self, paths: Sequence[str]) -> None:
         """Refuse to write any of ``paths`` unless every one can be written safely.
 
@@ -230,6 +271,24 @@ class ServerContext:
                         "is a symbolic link, and the server does not write through one."
                     )
                 self.writable(target)
+
+    def write_file(self, path: str, data: bytes) -> bool:
+        """Write ``data`` to a checked path the way the writer does, if it changed.
+
+        Through a temporary file beside it, renamed over it, so nothing ever
+        sees half a file; and only after :meth:`check_targets`. Returns whether
+        the file changed.
+        """
+        self.check_targets([path])
+        if os.path.isfile(path):
+            with open(path, "rb") as handle:
+                if handle.read() == data:
+                    return False
+        temporary = path + ".tmp"
+        with open(temporary, "wb") as handle:
+            handle.write(data)
+        os.replace(temporary, path)
+        return True
 
 
 # -- the shapes answers share ------------------------------------------------
@@ -322,6 +381,7 @@ def add_tool(
     read_only: bool = False,
     destructive: bool = False,
     idempotent: bool = False,
+    open_world: bool = False,
 ) -> None:
     """Register ``fn`` as a tool whose answer is its dict, and whose refusals are answers.
 
@@ -352,18 +412,24 @@ def add_tool(
             read_only_hint=read_only,
             destructive_hint=destructive,
             idempotent_hint=idempotent,
-            open_world_hint=False,
+            open_world_hint=open_world,
         ),
     )
 
 
-def make_server(workspace: str, read_roots: Sequence[str] = ()) -> MCPServer:
-    """The server, every tool registered, bounded by ``workspace``."""
-    from . import tools_info, tools_section, tools_wing
+def make_server(workspace: str, read_roots: Sequence[str] = (), allow_network: bool = False,
+                opener: Optional[Callable[..., Any]] = None) -> MCPServer:
+    """The server, every tool registered, bounded by ``workspace``.
 
-    ctx = ServerContext.create(workspace, read_roots)
+    ``allow_network`` registers the tools that fetch from the internet, and
+    nothing else does; ``opener`` replaces how they fetch (see
+    :func:`.tools_profile.fetch_url`), for tests.
+    """
+    from . import tools_info, tools_profile, tools_section, tools_wing
+
+    ctx = ServerContext.create(workspace, read_roots, allow_network, opener)
     server = MCPServer(NAME, version=__version__, instructions=INSTRUCTIONS)
-    for module in (tools_info, tools_section, tools_wing):
+    for module in (tools_info, tools_section, tools_wing, tools_profile):
         module.register(server, ctx)
     return server
 
@@ -381,13 +447,17 @@ def build_parser() -> argparse.ArgumentParser:
         "--read-root", action="append", default=[], dest="read_roots", metavar="DIR",
         help="another folder sources may be read from (read only; repeatable)",
     )
+    parser.add_argument(
+        "--allow-network", action="store_true",
+        help="offer fetch_uiuc, which downloads coordinate files from the UIUC database",
+    )
     return parser
 
 
 def main(argv: Optional[Sequence[str]] = None) -> int:
     args = build_parser().parse_args(argv)
     try:
-        server = make_server(args.workspace, args.read_roots)
+        server = make_server(args.workspace, args.read_roots, args.allow_network)
     except PathError as exc:
         print(f"airfoil-converter-mcp: {exc}", file=sys.stderr)
         return 2

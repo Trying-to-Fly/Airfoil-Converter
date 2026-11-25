@@ -43,8 +43,8 @@ def workspace_with_sample(folder):
     return str(folder)
 
 
-def session(workspace, read_roots=()):
-    return Client(make_server(workspace, read_roots))
+def session(workspace, read_roots=(), **options):
+    return Client(make_server(workspace, read_roots, **options))
 
 
 # A rib on a YZ plane, nose toward +Z, as conftest's synthetic wings stand.
