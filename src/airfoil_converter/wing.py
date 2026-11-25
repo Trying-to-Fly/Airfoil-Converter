@@ -129,6 +129,14 @@ class Spline:
             + (3.0 * b * b - 1.0) / 6.0 * h * m[i + 1]
         )
 
+    def bend(self, t: float) -> float:
+        """The second derivative: how fast the slope is changing at ``t``."""
+        i = self._segment(t)
+        h = self._h[i]
+        a = (self.x[i + 1] - t) / h
+        b = (t - self.x[i]) / h
+        return a * self._m[i] + b * self._m[i + 1]
+
 
 # -- the wing's own axes ----------------------------------------------------
 

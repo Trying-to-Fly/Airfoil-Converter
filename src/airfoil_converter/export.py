@@ -243,12 +243,15 @@ def joinable(curves: Sequence[Curve]) -> Tuple[str, ...]:
 
 
 def load_source(path: str) -> Tuple[AirfoilData, Optional[geometry.FlatSection]]:
-    """Read a CSV, or a curve file back onto the plane it was drawn on.
+    """Read a CSV, a UIUC .dat file, or a curve file back onto the plane it was drawn on.
 
-    A curve file comes back with the section it was flattened into, which is
-    what an *As loaded* plane stands on.
+    Which it is is read from the file's contents, never its name. A curve file
+    comes back with the section it was flattened into, which is what an *As
+    loaded* plane stands on.
     """
     if not parser.is_curve_file(path):
+        if parser.is_dat_file(path):
+            return parser.parse_dat(path), None
         return parser.parse_csv(path), None
     section = geometry.flatten_curve(parser.parse_curve(path))
     data = AirfoilData(
@@ -362,6 +365,11 @@ def finish_surface(surface: Sequence[Point2], mode: str) -> List[Tuple[str, List
 def build_sections(data: AirfoilData, spec: ExportSpec) -> List[Tuple[str, List[Point2], bool]]:
     """The 2D curves an export produces, as ``(role, points, closed)``."""
     curves: List[Tuple[str, List[Point2], bool]] = []
+    if data.in_chords and spec.target_chord_mm() is None:
+        raise InputError(
+            f"{data.name} is given in fractions of its chord, not millimetres, so it has "
+            "no size of its own. Set a target chord in millimetres to export it."
+        )
     factor = geometry.scale_factor(data.chord, spec.target_chord_mm())
 
     if spec.export_airfoil:
