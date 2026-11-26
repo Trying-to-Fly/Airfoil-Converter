@@ -23,6 +23,7 @@ from mcp_tools import (  # noqa: E402
     refused,
     rib_spec,
     session,
+    symlink,
     workspace_with_sample,
 )
 
@@ -152,8 +153,8 @@ async def test_an_absolute_path_inside_the_workspace_is_fine(workspace):
 
 
 async def test_a_symlink_out_of_the_workspace_is_refused(workspace, outside):
-    os.symlink(os.path.join(outside, "sd7037-il.csv"), os.path.join(workspace, "linked.csv"))
-    os.symlink(outside, os.path.join(workspace, "linked_dir"))
+    symlink(os.path.join(outside, "sd7037-il.csv"), os.path.join(workspace, "linked.csv"))
+    symlink(outside, os.path.join(workspace, "linked_dir"))
     async with session(workspace) as client:
         assert "outside" in await refused(client, "read_section", source="linked.csv")
         assert "outside" in await refused(
@@ -167,7 +168,7 @@ async def test_a_symlink_out_of_the_workspace_is_refused(workspace, outside):
 
 
 async def test_a_symlink_that_stays_inside_is_followed(workspace):
-    os.symlink(os.path.join(workspace, "sd7037-il.csv"), os.path.join(workspace, "same.csv"))
+    symlink(os.path.join(workspace, "sd7037-il.csv"), os.path.join(workspace, "same.csv"))
     async with session(workspace) as client:
         answer = await call(client, "read_section", source="same.csv")
     assert answer["source"] == "sd7037-il.csv"
@@ -216,6 +217,17 @@ def test_paths_are_checked_after_resolving(tmp_path):
     os.makedirs(str(tmp_path / "ws2"))
     with pytest.raises(mcp_server.PathError):
         ctx.readable(str(tmp_path / "ws2" / "x.csv"))
+
+
+def test_preflight_rejects_a_file_where_a_parent_folder_is_needed(tmp_path):
+    ctx = mcp_server.ServerContext.create(str(tmp_path))
+    (tmp_path / "occupied").write_text("kept")
+    target = tmp_path / "occupied" / "nested" / "rib.sldcrv"
+    with pytest.raises(mcp_server.PathError, match="output folder occupied is a file"):
+        ctx.check_targets([str(target)])
+    with pytest.raises(mcp_server.PathError, match="output folder occupied is a file"):
+        ctx.output_folder(str(target.parent), make=False)
+    assert (tmp_path / "occupied").read_text() == "kept"
 
 
 # -- errors are answers -------------------------------------------------------
@@ -268,6 +280,54 @@ async def test_a_file_that_is_not_text_is_said_to_be_so(workspace):
 # -- writing through links -------------------------------------------------------
 
 
+async def test_a_link_to_another_project_record_is_readable_but_cannot_be_written(workspace):
+    async with session(workspace) as client:
+        await call(client, "export_rib", project="original.SLDPRT", source="sd7037-il.csv",
+                   name="root", spec=rib_spec(200))
+    original = os.path.join(workspace, "original.airfoils.json")
+    alias = os.path.join(workspace, "alias.airfoils.json")
+    symlink(original, alias)
+    with open(original, "rb") as handle:
+        before = handle.read()
+    paths = sorted(os.listdir(workspace))
+
+    async with session(workspace) as client:
+        listed = await call(client, "list_project", project="alias.SLDPRT")
+        assert [rib["name"] for rib in listed["ribs"]] == ["root"]
+        for tool in ("check_wing", "build_wing"):
+            text = await refused(client, tool, project="alias.SLDPRT", ribs=["root"])
+            assert "alias.airfoils.json" in text and "symbolic link" in text
+        text = await refused(client, "export_rib", project="alias.SLDPRT",
+                             source="sd7037-il.csv", name="tip", spec=rib_spec(120))
+        assert "alias.airfoils.json" in text and "symbolic link" in text
+
+    with open(original, "rb") as handle:
+        assert handle.read() == before
+    assert sorted(os.listdir(workspace)) == paths
+    assert os.path.islink(alias)
+
+
+@pytest.mark.parametrize("temporary_link", [False, True])
+async def test_a_link_prevents_quarantining_a_corrupt_record(workspace, temporary_link):
+    record = os.path.join(workspace, "part.airfoils.json")
+    other = os.path.join(workspace, "other.airfoils.json")
+    corrupt = record if temporary_link else other
+    link = record + ".tmp" if temporary_link else record
+    with open(corrupt, "w", encoding="utf-8") as handle:
+        handle.write("malformed record")
+    symlink(corrupt, link)
+    paths = sorted(os.listdir(workspace))
+
+    async with session(workspace) as client:
+        text = await refused(client, "export_rib", project="part.SLDPRT",
+                             source="sd7037-il.csv", name="root", spec=rib_spec(200))
+        assert os.path.basename(link) in text and "symbolic link" in text
+
+    with open(corrupt, encoding="utf-8") as handle:
+        assert handle.read() == "malformed record"
+    assert sorted(os.listdir(workspace)) == paths
+
+
 @pytest.mark.parametrize("planted", [
     "root_airfoil.sldcrv.tmp", "part.airfoils.json.tmp", "root_airfoil.sldcrv",
     "part.airfoils.json",
@@ -276,7 +336,7 @@ async def test_nothing_is_written_through_a_planted_link(workspace, outside, pla
     target = os.path.join(outside, "victim.txt")
     with open(target, "w") as handle:
         handle.write("untouched")
-    os.symlink(target, os.path.join(workspace, planted))
+    symlink(target, os.path.join(workspace, planted))
     async with session(workspace) as client:
         text = await refused(client, "export_rib", project="part.SLDPRT",
                              source="sd7037-il.csv", name="root", spec=rib_spec(200))
@@ -290,7 +350,7 @@ async def test_a_link_inside_the_workspace_is_not_written_through_either(workspa
     real = os.path.join(workspace, "kept.sldcrv")
     with open(real, "w") as handle:
         handle.write("kept")
-    os.symlink(real, os.path.join(workspace, "root_airfoil.sldcrv"))
+    symlink(real, os.path.join(workspace, "root_airfoil.sldcrv"))
     async with session(workspace) as client:
         text = await refused(client, "export_rib", project="part.SLDPRT",
                              source="sd7037-il.csv", name="root", spec=rib_spec(200))
@@ -299,19 +359,29 @@ async def test_a_link_inside_the_workspace_is_not_written_through_either(workspa
         assert handle.read() == "kept"
 
 
-async def test_a_wing_is_not_written_through_a_planted_link(workspace, outside):
+@pytest.mark.parametrize("obstruction", ["link", "directory"])
+async def test_a_wing_refuses_an_obstructed_target(workspace, outside, obstruction):
     target = os.path.join(outside, "victim.txt")
     with open(target, "w") as handle:
         handle.write("untouched")
+    temporary = os.path.join(workspace, "wing_le.sldcrv.tmp")
+    if obstruction == "link":
+        symlink(target, temporary)
+        message = "symbolic link"
+    else:
+        os.mkdir(temporary)
+        message = "is a folder"
     async with session(workspace) as client:
         await call(client, "export_rib", project="part.SLDPRT", source="sd7037-il.csv",
                    name="root", spec=rib_spec(200))
         await call(client, "export_rib", project="part.SLDPRT", source="sd7037-il.csv",
                    name="tip", spec=rib_spec(120, x=-300, z=-20))
-        os.symlink(target, os.path.join(workspace, "wing_le.sldcrv.tmp"))
+        preview_text = await refused(client, "check_wing", project="part.SLDPRT",
+                                     ribs=["root", "tip"], name="wing")
         text = await refused(client, "build_wing", project="part.SLDPRT",
                              ribs=["root", "tip"], name="wing")
-    assert "symbolic link" in text
+    assert message in text
+    assert message in preview_text
     with open(target) as handle:
         assert handle.read() == "untouched"
     assert not any(name.startswith("wing_") and name.endswith(".sldcrv")

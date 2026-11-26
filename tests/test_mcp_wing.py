@@ -130,6 +130,18 @@ async def test_only_a_build_writes_a_wings_record(workspace):
     assert swloft.plans_for_part(store.load(record)) == []
 
 
+async def test_check_and_build_refuse_to_use_the_part_path_as_a_folder(workspace):
+    async with session(workspace) as client:
+        await two_ribs(client)
+        before = snapshot(workspace)
+        for tool in ("check_wing", "build_wing"):
+            text = await refused(client, tool, project=PROJECT, ribs=RIBS, name="wing",
+                                 folder=f"{PROJECT}/curves")
+            assert f"would use {PROJECT} as a folder" in text
+    assert snapshot(workspace) == before
+    assert not os.path.exists(os.path.join(workspace, PROJECT))
+
+
 async def test_moving_a_built_wings_folder_moves_its_curves_with_it(workspace):
     async with session(workspace) as client:
         await two_ribs(client)
@@ -159,7 +171,8 @@ async def test_a_check_says_what_a_build_would_retire_and_whether_the_loft_chang
                              spec={"offset": ""})
         assert snapshot(workspace) == before
         rebuilt = await call(client, "build_wing", project=PROJECT, wing="wing",
-                             spec={"offset": ""})
+                             spec={"offset": ""}, folder="elsewhere")
+        listed = await call(client, "list_project", project=PROJECT)
     assert "wing_s01_upper" in checked["retires"]
     assert checked["station_count_change"] == {
         "from": built["station_count"], "to": checked["station_count"],
@@ -167,6 +180,9 @@ async def test_a_check_says_what_a_build_would_retire_and_whether_the_loft_chang
     assert checked["station_count"] != built["station_count"]
     assert rebuilt["retired"] == checked["retires"]
     assert "profiles" in rebuilt["warnings"][0]
+    retired = [c for c in listed["wings"][0]["curves"] if c["retired"] and not c["derived"]]
+    assert retired
+    assert all(c["file"].startswith("ribs/") and c["present"] and c["matches"] for c in retired)
 
 
 async def test_ribs_closed_by_a_trailing_edge_line_say_what_to_join(workspace):

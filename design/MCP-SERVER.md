@@ -9,7 +9,7 @@ Let another agent drive the Airfoil Converter without its window: read a section
 
 ## Ground rules
 
-- **The core stays dependency-free.** `mcp` is an optional extra (`pip install airfoil-converter[mcp]`), exactly as `pywin32` is for the SolidWorks link. Nothing under `src/airfoil_converter/` outside `mcp/` may import it, and the core keeps Python 3.9 support; numpy and scipy are not added.
+- **The core stays dependency-free.** Install the `mcp` extra from the checkout with `python -m pip install -e ".[mcp]"` on Python 3.10 or newer. Nothing under `src/airfoil_converter/` outside `mcp/` imports the SDK, and the core keeps Python 3.9 support.
 - **One code path.** A tool calls the same functions the window does (`export.build_curves`, `wing_build.build_wing`, `store`, `writer`). A rib exported through the server and the same rib exported from the window give byte-identical curve files. New geometry goes into a core module with its own unit tests, then gets a thin tool.
 - **Projects are sidecars.** A project is a part path; its record is the same `*.airfoils.json` sidecar the window keeps (`store.sidecar_path`). The part file need not exist. If it does (a real `.SLDPRT` on Windows), the window opens the same records the agent wrote, and the reverse.
 - **A workspace bounds the server.** Started with `--workspace DIR`; every path a tool takes is resolved against it and refused if it escapes (symlinks resolved). Extra read-only roots via `--read-root DIR` (repeatable) for source CSVs kept elsewhere. Writes only inside the workspace.

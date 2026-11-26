@@ -643,15 +643,16 @@ and its records are the same `*.airfoils.json` sidecar the window keeps
 beside a part.
 
 The server is an optional extra, as the SolidWorks link is, and needs Python
-3.10 or newer:
+3.10 or newer. From the repository checkout, install it and pass an existing
+directory as the workspace.
 
 ```
-pip install airfoil-converter[mcp]
+python -m pip install -e ".[mcp]"
 airfoil-converter-mcp --workspace C:\work\wing
 ```
 
-or, from a checkout, `python -m airfoil_converter.mcp --workspace DIR` with
-`src` on the path. It talks over stdio. Every path a tool takes is resolved
+You can also run `python -m airfoil_converter.mcp --workspace DIR` after
+installation. It talks over stdio. Every path a tool takes is resolved
 against the **workspace**, symlinks followed, and refused if it lands outside;
 nothing is ever written anywhere else. `--read-root DIR` (repeatable) adds a
 folder sources may be read from but never written to. For Claude Code, in the

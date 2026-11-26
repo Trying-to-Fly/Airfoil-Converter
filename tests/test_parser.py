@@ -309,6 +309,12 @@ def test_a_lednicer_lower_block_may_leave_out_the_shared_nose():
     assert data.airfoil == [(1.0, 0.001), (0.5, 0.06), (0.0, 0.0), (0.5, -0.04), (1.0, -0.001)]
 
 
+def test_a_lednicer_file_can_run_tail_to_nose():
+    lines = ["TEST", "3. 3.", "", "1 0.001", "0.5 0.06", "0 0", "", "1 -0.001", "0.5 -0.04"]
+    data = parse_dat_lines(lines)
+    assert data.airfoil == [(1.0, 0.001), (0.5, 0.06), (0.0, 0.0), (0.5, -0.04), (1.0, -0.001)]
+
+
 def test_a_line_that_cannot_be_read_is_named():
     with pytest.raises(AirfoilParseError, match=r"Line 4 is not an x y pair: '1 2 3'"):
         parse_dat_lines(["TITLE", "1 0", "0 0", "1 2 3", "1 -0.1"])

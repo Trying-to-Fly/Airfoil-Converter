@@ -191,12 +191,13 @@ class ServerContext:
     # -- projects -----------------------------------------------------------
 
     def open_project(self, project: str, create: bool = False,
-                     read_only: bool = False) -> Project:
+                     read_only: bool = False, check_writes: bool = False) -> Project:
         """A project's record, or a fresh one when ``create`` and there is none yet.
 
         A record that cannot be read is moved aside by :func:`store.load`, as
         the window does, and the error says so — unless ``read_only``, when it
-        is left where it is: a tool that only reads changes nothing.
+        is left where it is: a tool that only reads changes nothing. A preview
+        can use ``check_writes`` to validate the same targets as the actual write.
         """
         part = self.writable(project, "project")
         if os.path.isdir(part):
@@ -204,7 +205,11 @@ class ServerContext:
                 f"The project {project} is a folder. A project is a part's path, "
                 "such as wing.SLDPRT; the part itself need not exist."
             )
-        sidecar_path = self.writable(store.sidecar_path(part), "project record")
+        sidecar_path = store.sidecar_path(part)
+        if not read_only or check_writes:
+            self.check_targets([sidecar_path])
+        else:
+            sidecar_path = self.writable(sidecar_path, "project record")
         sidecar = store.load(sidecar_path, move_aside=not read_only)
         if sidecar is None:
             if not create:
@@ -227,11 +232,21 @@ class ServerContext:
     def output_folder(self, folder: str, make: bool = True) -> str:
         """A folder to write curves into, made if it is not there yet and ``make``."""
         real = self.writable(folder, "output folder")
-        if os.path.exists(real) and not os.path.isdir(real):
-            raise PathError(f"The output folder {folder} is a file.")
+        self._check_folder(real)
         if make:
             os.makedirs(real, exist_ok=True)
         return real
+
+    def _check_folder(self, folder: str) -> None:
+        """Check that the nearest existing ancestor can contain an output folder."""
+        parent = folder
+        while parent and not os.path.isdir(parent):
+            if os.path.lexists(parent):
+                raise PathError(f"The output folder {self.show(parent)} is a file.")
+            ancestor = os.path.dirname(parent)
+            if parent == ancestor:
+                break
+            parent = ancestor
 
     def target_file(self, path: str, what: str = "file", make: bool = True) -> str:
         """Where a file named by a tool is written: its folder resolved, its name not.
@@ -254,15 +269,19 @@ class ServerContext:
         self.check_targets([target])
         return target
 
-    def check_targets(self, paths: Sequence[str]) -> None:
+    def check_targets(self, paths: Sequence[str], *, reserved: Sequence[str] = ()) -> None:
         """Refuse to write any of ``paths`` unless every one can be written safely.
 
         The writer and the store write through ``path + ".tmp"`` and rename it
         over the file, and ``open`` follows a link: a link planted at either
         name would carry the write wherever it points. So neither may be a
         link, and both must resolve inside the workspace. All are checked
-        before anything is written.
+        before anything is written, including directories that occupy a file
+        name and files that occupy a parent directory, including files this
+        same operation plans to write. Reserved paths cannot be used for
+        output files or directories.
         """
+        files = []
         for path in paths:
             for target in (path, path + ".tmp"):
                 if os.path.islink(target):
@@ -270,7 +289,25 @@ class ServerContext:
                         f"{os.path.basename(target)} in {self.show(os.path.dirname(target))} "
                         "is a symbolic link, and the server does not write through one."
                     )
-                self.writable(target)
+                files.append(self.writable(target))
+                if os.path.isdir(target):
+                    raise PathError(f"The file {self.show(target)} is a folder.")
+                self._check_folder(os.path.dirname(target))
+
+        reserved_paths = {os.path.normcase(path) for path in reserved}
+        planned_files = {os.path.normcase(file) for file in files}
+        for file in files:
+            if os.path.normcase(file) in reserved_paths:
+                raise PathError(f"The output would overwrite {self.show(file)}.")
+            parent = os.path.dirname(file)
+            while os.path.dirname(parent) != parent:
+                if os.path.normcase(parent) in reserved_paths:
+                    raise PathError(f"The output would use {self.show(parent)} as a folder.")
+                if os.path.normcase(parent) in planned_files:
+                    raise PathError(
+                        f"The output needs {self.show(parent)} as both a file and a folder."
+                    )
+                parent = os.path.dirname(parent)
 
     def write_file(self, path: str, data: bytes) -> bool:
         """Write ``data`` to a checked path the way the writer does, if it changed.

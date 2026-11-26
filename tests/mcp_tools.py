@@ -43,6 +43,16 @@ def workspace_with_sample(folder):
     return str(folder)
 
 
+def symlink(target, link):
+    """Create a symlink, skipping on Windows when the process lacks privilege."""
+    try:
+        os.symlink(target, link, target_is_directory=os.path.isdir(target))
+    except OSError as exc:
+        if getattr(exc, "winerror", None) == 1314:
+            pytest.skip("Windows did not grant this process permission to create symlinks")
+        raise
+
+
 def session(workspace, read_roots=(), **options):
     return Client(make_server(workspace, read_roots, **options))
 

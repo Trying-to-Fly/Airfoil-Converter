@@ -9,6 +9,7 @@ import math
 import os
 import shutil
 import urllib.error
+from types import SimpleNamespace
 
 import pytest
 
@@ -23,6 +24,7 @@ from mcp_tools import (  # noqa: E402
     refused,
     rib_spec,
     session,
+    symlink,
     workspace_with_sample,
 )
 
@@ -101,6 +103,13 @@ async def test_a_section_inline_is_the_same_section_as_its_file(workspace):
     assert inline["section"]["source"] is None and inline["section"]["units"] == "mm"
 
 
+async def test_a_blunt_cut_preserves_regrowth_precision_at_a_large_chord(workspace):
+    async with session(workspace) as client:
+        cut = await call(client, "blunt_trailing_edge", section="sd7037-il.csv",
+                         chord_mm=100_000, thickness_mm=230, keep_chord=True)
+    assert cut["scale"] * cut["cut_chord_mm"] == pytest.approx(cut["span_mm"], abs=1e-9)
+
+
 async def test_a_section_in_fractions_needs_its_chord_in_mm(workspace):
     async with session(workspace) as client:
         text = await refused(client, "blunt_trailing_edge", section="sd7037.dat",
@@ -128,6 +137,7 @@ async def test_a_naca_0012_is_twelve_percent_thick_at_thirty_percent(workspace):
     assert answer["nose_radius"] == pytest.approx(1.1019 * 0.12 ** 2, rel=0.01)
     assert answer["te_gap"] == 0.0 and answer["sharp"]
     assert sized["max_thickness_mm"] == pytest.approx(24.0, abs=0.2)
+    assert sized["point_units"] == "mm"
     xs = [p[0] for p in sized["points"]]
     assert max(xs) - min(xs) == pytest.approx(200.0)
     assert files_under(workspace) == ["clarky.dat", "sd7037-il.csv", "sd7037.dat"]
@@ -136,14 +146,16 @@ async def test_a_naca_0012_is_twelve_percent_thick_at_thirty_percent(workspace):
 async def test_a_saved_naca_section_exports_once_it_has_a_chord(workspace):
     async with session(workspace) as client:
         saved = await call(client, "naca4", digits="2412", save_as="profiles/naca2412.dat")
-        read = await call(client, "read_section", source=saved["saved"])
+        read = await call(client, "read_section", source=saved["saved"], include_points=True)
         text = await refused(client, "export_rib", project="part.SLDPRT", source=saved["saved"])
         rib = await call(client, "export_rib", project="part.SLDPRT", source=saved["saved"],
                          name="naca", spec=rib_spec(150))
     assert saved["saved"] == "profiles/naca2412.dat" and saved["changed"]
     assert read["kind"] == "dat" and read["name"] == "NACA 2412" and read["point_count"] == 321
+    assert read["chord"] == 1.0
     assert "fractions of its chord" in text and "target chord" in text
-    assert rib["chord_mm"] == pytest.approx(150.0, abs=1e-6)
+    xs = [x for x, _ in read["airfoil"]["points"]]
+    assert rib["chord_mm"] == pytest.approx(150.0 * (max(xs) - min(xs)), abs=1e-6)
 
 
 @pytest.mark.parametrize("digits, said", [("24", "four digits"), ("2012", "nose")])
@@ -266,7 +278,7 @@ async def test_a_fetch_is_not_written_through_a_planted_link(workspace, tmp_path
     victim = tmp_path / "victim.txt"
     victim.write_text("untouched")
     os.makedirs(os.path.join(workspace, "uiuc"))
-    os.symlink(str(victim), os.path.join(workspace, "uiuc", planted))
+    symlink(str(victim), os.path.join(workspace, "uiuc", planted))
     opener = Opener(sd7037_bytes())
     async with session(workspace, allow_network=True, opener=opener) as client:
         text = await refused(client, "fetch_uiuc", name="sd7037")
@@ -412,6 +424,13 @@ async def test_a_law_writes_sections_and_guides_and_a_loft_plan_like_a_wings(wor
         clash = await refused(client, "build_law", name="winglet", project="part.SLDPRT",
                               folder="other", stations=[station(0, 175, profile="sd7037.dat"),
                                                         station(50, 150, profile="sd7037.dat")])
+        if os.name == "nt":
+            case_clash = await refused(
+                client, "build_law", name="WINGLET", project="part.SLDPRT", overwrite=True,
+                folder="other", stations=[station(0, 175, profile="sd7037.dat"),
+                                          station(50, 150, profile="sd7037.dat")],
+            )
+            assert "already a curve of a record" in case_clash
         listed = await call(client, "list_project", project="part.SLDPRT")
     assert set(built["loft_plan"]) == set(wing["loft_plan"])
     assert built["recorded"] is False and built["folder"] == "law"
@@ -441,7 +460,7 @@ async def test_a_law_is_not_written_through_a_planted_link(workspace, tmp_path):
     victim = tmp_path / "victim.txt"
     victim.write_text("untouched")
     os.makedirs(os.path.join(workspace, "law"))
-    os.symlink(str(victim), os.path.join(workspace, "law", "w_le.sldcrv.tmp"))
+    symlink(str(victim), os.path.join(workspace, "law", "w_le.sldcrv.tmp"))
     async with session(workspace) as client:
         text = await refused(client, "build_law", name="w", folder="law",
                              stations=[station(0, 175, profile="sd7037.dat"),
@@ -485,11 +504,11 @@ async def test_a_link_at_the_name_asked_for_is_never_written_through(workspace):
     async with session(workspace) as client:
         await call(client, "export_rib", project="part.SLDPRT", source="sd7037-il.csv",
                    name="root", spec=rib_spec(200))
-        os.symlink(os.path.join(workspace, "part.airfoils.json"),
-                   os.path.join(workspace, "placed.sldcrv"))
-        os.symlink(os.path.join(workspace, "sd7037-il.csv"),
-                   os.path.join(workspace, "naca.dat"))
-        before = snapshot_all(workspace)
+    symlink(os.path.join(workspace, "part.airfoils.json"),
+            os.path.join(workspace, "placed.sldcrv"))
+    symlink(os.path.join(workspace, "sd7037-il.csv"), os.path.join(workspace, "naca.dat"))
+    before = snapshot_all(workspace)
+    async with session(workspace) as client:
         placing = await refused(client, "place_section", section="sd7037-il.csv",
                                 leading_edge=[0, 0, 0], chord_direction=[1, 0, 0],
                                 up_direction=[0, 1, 0], write="placed.sldcrv", overwrite=True)
@@ -553,6 +572,49 @@ async def test_a_fetch_replaces_only_its_own_earlier_fetch(workspace):
     assert {name for name, w in worlds.items() if w} == {"fetch_uiuc"}
 
 
+async def test_a_fetch_preserves_a_file_written_while_waiting_for_the_network(workspace):
+    path = os.path.join(workspace, "new.dat")
+    existing = b"someone else's file"
+
+    def opener(url, timeout, limit):
+        with open(path, "wb") as handle:
+            handle.write(existing)
+        return url, sd7037_bytes()
+
+    async with session(workspace, allow_network=True, opener=opener) as client:
+        assert "already there" in await refused(client, "fetch_uiuc", name="new", folder=".")
+    with open(path, "rb") as handle:
+        assert handle.read() == existing
+    assert not os.path.exists(os.path.join(workspace, "new.source.json"))
+
+
+async def test_a_repeat_fetch_preserves_locally_edited_coordinates(workspace):
+    body = sd7037_bytes()
+    opener = Opener(body)
+    async with session(workspace, allow_network=True, opener=opener) as client:
+        first = await call(client, "fetch_uiuc", name="sd7037")
+        path = os.path.join(workspace, first["saved"])
+        note = os.path.join(workspace, first["note"])
+        with open(note, "rb") as handle:
+            receipt = handle.read()
+        edited = body.replace(b"SD7037-092-88", b"My foils")
+        assert edited != body
+        with open(path, "wb") as handle:
+            handle.write(edited)
+
+        assert "already there" in await refused(client, "fetch_uiuc", name="sd7037")
+        assert len(opener.asked) == 1
+        with open(path, "rb") as handle:
+            assert handle.read() == edited
+        with open(note, "rb") as handle:
+            assert handle.read() == receipt
+
+        forced = await call(client, "fetch_uiuc", name="sd7037", overwrite=True)
+        assert forced["changed"]
+        with open(path, "rb") as handle:
+            assert handle.read() == body
+
+
 @pytest.mark.parametrize("folder", ["../outside", "sd7037-il.csv"])
 async def test_a_fetch_checks_where_it_would_go_before_asking(workspace, folder):
     opener = Opener(sd7037_bytes())
@@ -610,6 +672,43 @@ async def test_a_law_never_takes_a_name_a_project_in_its_folder_records(workspac
                                        station(50, 150, profile="sd7037.dat")], overwrite=True)
     assert "already a curve of a record in part.airfoils.json" in text
     assert snapshot_all(workspace) == before
+
+
+@pytest.mark.parametrize(("folder", "reason"), [
+    (None, "would overwrite"),
+    ("parts/w_s01.sldcrv/nested", "as a folder"),
+])
+async def test_a_law_reserves_the_named_project_path(workspace, folder, reason):
+    project = "parts/w_s01.sldcrv"
+    stations = [station(0, 175, profile="sd7037.dat"), station(50, 150, profile="sd7037.dat")]
+    async with session(workspace) as client:
+        await call(client, "export_rib", project=project, source="sd7037-il.csv",
+                   name="rib", spec=rib_spec(200))
+        before = snapshot_all(workspace)
+        text = await refused(client, "build_law", name="w", project=project, folder=folder,
+                             stations=stations, overwrite=True)
+    assert reason in text and project in text
+    assert snapshot_all(workspace) == before
+    assert not os.path.exists(os.path.join(workspace, project))
+
+
+@pytest.mark.parametrize("linked", [False, True], ids=["outside-path", "symlink"])
+async def test_a_law_checks_a_discovered_project_record_before_reading(
+        workspace, tmp_path, monkeypatch, linked):
+    record = tmp_path / "outside.airfoils.json"
+    record.write_text("invalid JSON", encoding="utf-8")
+    if linked:
+        symlink(str(record), os.path.join(workspace, "linked.airfoils.json"))
+    else:
+        escaped_folder = SimpleNamespace(escape=lambda path: path, glob=lambda pattern: [str(record)])
+        monkeypatch.setattr(tools_profile, "glob", escaped_folder)
+    before = snapshot_all(workspace)
+    stations = [station(0, 175, profile="sd7037.dat"), station(50, 150, profile="sd7037.dat")]
+    async with session(workspace) as client:
+        text = await refused(client, "build_law", name="w", stations=stations)
+    assert "project record" in text and "outside the folders this server may read" in text
+    assert snapshot_all(workspace) == before
+    assert record.read_text(encoding="utf-8") == "invalid JSON"
 
 
 async def test_a_laws_trailing_edge_is_one_figure_only_when_every_station_holds_it(workspace):

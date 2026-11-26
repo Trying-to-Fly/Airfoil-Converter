@@ -111,8 +111,8 @@ def cosine_stations(count: int = STATIONS) -> List[float]:
 def _with_fractions(stations: Sequence[float], extra: Sequence[float]) -> List[float]:
     """The stations, with each extra chord fraction in among them.
 
-    A station all but on top of an extra one gives way to it, so the grid
-    never holds two points a hair apart.
+    An interior station all but on top of an extra one gives way to it.
+    The endpoints always stay at the nose and the trailing edge.
     """
     wanted = []
     for f in extra:
@@ -120,8 +120,8 @@ def _with_fractions(stations: Sequence[float], extra: Sequence[float]) -> List[f
         if not 0.0 < f < 1.0:
             raise GeometryError(f"A chord fraction must lie between 0 and 1 (got {f:g}).")
         wanted.append(f)
-    grid = [s for s in stations if all(abs(s - f) > 1e-6 for f in wanted)]
-    return sorted(set(grid) | set(wanted))
+    grid = [s for s in stations[1:-1] if all(abs(s - f) > 1e-6 for f in wanted)]
+    return [stations[0], *sorted(set(grid) | set(wanted)), stations[-1]]
 
 
 # -- NACA four-digit sections ----------------------------------------------
@@ -142,7 +142,7 @@ def naca4(digits: str, points: int = NACA_POINTS, closed_te: bool = True) -> Lis
     code = str(digits).strip()
     if code.upper().startswith("NACA"):
         code = code[4:].strip()
-    if len(code) != 4 or not code.isdigit():
+    if len(code) != 4 or any(digit not in "0123456789" for digit in code):
         raise GeometryError(f"A NACA four-digit section is named by four digits (got {digits!r}).")
     m = int(code[0]) / 100.0
     p = int(code[1]) / 10.0
@@ -946,7 +946,8 @@ def build_law(
     millimetres thick at its own chord. Every section is rebuilt on the same
     stations along its chord, with a point of its own at each guide fraction,
     so a guide runs through the same point of every section, exactly, and the
-    leading edge through every nose.
+    leading edge through every nose. Successive guide and edge points along
+    each section must be far enough apart to write as distinct spline points.
 
     A trailing edge is judged in millimetres at each station's own chord: one
     thinner than :data:`geometry.MIN_STEP` is closed to a point, since a line
@@ -964,10 +965,18 @@ def build_law(
     if len(stations) < 2:
         raise GeometryError("A loft needs at least two stations.")
     fractions = sorted(_number(f, "guide fraction") for f in fractions)
+    for fraction in fractions:
+        if not 0.0 < fraction < 1.0:
+            raise GeometryError(f"A chord fraction must lie between 0 and 1 (got {fraction:g}).")
     for f, after in zip(fractions, fractions[1:]):
         if after - f <= 1e-6:
             raise GeometryError(
                 f"The guide fraction {f:g} is given twice. Each guide needs a fraction of its own."
+            )
+        if wing.guide_tag("upper", f) == wing.guide_tag("upper", after):
+            raise GeometryError(
+                f"Guide fractions {f:g} and {after:g} give the same curve name. "
+                "Choose fractions with different values when rounded to tenths of a percent."
             )
     if te_thickness is not None:
         te_thickness = _number(te_thickness, "trailing-edge thickness")
@@ -1018,7 +1027,7 @@ def build_law(
     nose_at = count - 1
     upper_at = {f: count - 1 - shapes[0].x.index(f) for f in fractions}
     lower_at = {f: count - 1 + shapes[0].x.index(f) for f in fractions}
-    keep = [nose_at] + list(upper_at.values()) + list(lower_at.values())
+    keep = sorted({0, 2 * nose_at, nose_at, *upper_at.values(), *lower_at.values()})
 
     curves: List[Curve] = []
     joins: List[Tuple[Tuple[str, ...], str]] = []
@@ -1038,6 +1047,12 @@ def build_law(
         if placed and g.length(g.sub(section.origin, placed[-1].origin)) < g.MIN_STEP:
             raise GeometryError(
                 f"Stations {number - 1} and {number} stand in the same place."
+            )
+        if any(math.dist(section.points[a], section.points[b]) < g.MIN_STEP
+               for a, b in zip(keep, keep[1:])):
+            raise GeometryError(
+                f"At station {number}, successive guide or edge points must be at least "
+                f"{g.MIN_STEP:g} mm apart. Use more widely spaced guide fractions."
             )
         placed.append(section)
         kept = _thin_keeping(section.points, keep)

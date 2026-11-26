@@ -177,6 +177,49 @@ async def test_a_second_rib_of_the_same_name_takes_the_next_index(workspace):
     assert second["curves"][0]["feature"] == "sd7037-il_airfoil_2"
 
 
+async def test_new_rib_creates_separate_curve_and_project_folders(workspace):
+    async with session(workspace) as client:
+        answer = await call(client, "export_rib", project="project/part.SLDPRT",
+                            source="sd7037-il.csv", name="root", folder="curves",
+                            spec=rib_spec(200))
+    assert answer["record"] == "project/part.airfoils.json"
+    assert os.path.isfile(os.path.join(workspace, answer["record"]))
+    assert os.path.isfile(os.path.join(workspace, answer["curves"][0]["file"]))
+
+
+async def test_obstructed_project_folder_refuses_rib_before_creating_curve_folder(workspace):
+    with open(os.path.join(workspace, "project"), "w") as handle:
+        handle.write("keep")
+    async with session(workspace) as client:
+        text = await refused(client, "export_rib", project="project/nested/part.SLDPRT",
+                             source="sd7037-il.csv", name="root", folder="curves",
+                             spec=rib_spec(200))
+    assert "project is a file" in text
+    assert not os.path.exists(os.path.join(workspace, "curves"))
+
+
+@pytest.mark.parametrize("folder", ["part.airfoils.json", "part.airfoils.json.tmp/nested"])
+async def test_rib_refuses_curve_folder_conflicting_with_planned_project_file(workspace, folder):
+    async with session(workspace) as client:
+        text = await refused(client, "export_rib", project="part.SLDPRT",
+                             source="sd7037-il.csv", name="root", folder=folder,
+                             spec=rib_spec(200))
+    assert "both a file and a folder" in text
+    assert os.listdir(workspace) == ["sd7037-il.csv"]
+
+
+@pytest.mark.parametrize(("project", "folder", "message"), [
+    ("part.SLDPRT", "part.SLDPRT/curves", "would use part.SLDPRT as a folder"),
+    ("root_airfoil.sldcrv", ".", "would overwrite root_airfoil.sldcrv"),
+])
+async def test_rib_refuses_to_occupy_part_path(workspace, project, folder, message):
+    async with session(workspace) as client:
+        text = await refused(client, "export_rib", project=project, folder=folder,
+                             source="sd7037-il.csv", name="root", spec=rib_spec(200))
+    assert message in text
+    assert os.listdir(workspace) == ["sd7037-il.csv"]
+
+
 async def test_exporting_a_rib_again_keeps_its_identity_and_changes_only_what_changed(workspace):
     async with session(workspace) as client:
         first = await call(client, "export_rib", project="part.SLDPRT", source="sd7037-il.csv",
@@ -199,12 +242,15 @@ async def test_a_curve_the_new_settings_no_longer_make_is_retired_not_forgotten(
         await call(client, "export_rib", project="part.SLDPRT", source="sd7037-il.csv",
                    name="root", spec=rib_spec(200, te_mode=export.TE_LINE, te_thickness="0.5"))
         answer = await call(client, "export_rib", project="part.SLDPRT", rib="root",
-                            spec={"te_mode": export.TE_CLOSE})
+                            spec={"te_mode": export.TE_CLOSE}, folder="new")
         assert answer["retired"] == ["root_airfoil_te"]
         listed = await call(client, "list_project", project="part.SLDPRT")
     curves = {c["feature"]: c for c in listed["ribs"][0]["curves"]}
-    assert curves["root_airfoil_te"]["retired"]
+    retired = curves["root_airfoil_te"]
+    assert retired["retired"] and retired["present"] and retired["matches"]
+    assert retired["file"] == "root_airfoil_te.sldcrv"
     assert not curves["root_airfoil"]["retired"]
+    assert curves["root_airfoil"]["file"] == "new/root_airfoil.sldcrv"
 
 
 async def test_a_project_with_no_record_is_not_invented_by_a_read(workspace):
@@ -301,6 +347,23 @@ async def test_a_new_ribs_missing_source_is_said_to_be_missing(workspace):
         text = await refused(client, "export_rib", project="part.SLDPRT", source="missing.csv")
     assert "The source missing.csv is not there." in text
     assert os.path.realpath(workspace) not in text
+
+
+async def test_a_ribs_source_can_be_replaced_after_losing_access_to_the_old_source(
+    workspace, tmp_path,
+):
+    outside = workspace_with_sample(tmp_path / "outside")
+    async with session(outside) as client:
+        await call(client, "export_rib", project="part.SLDPRT", source="sd7037-il.csv",
+                   name="old", spec=rib_spec(180))
+    old_source = os.path.join(outside, "old_airfoil.sldcrv")
+    async with session(workspace, read_roots=(outside,)) as client:
+        first = await call(client, "export_rib", project="part.SLDPRT",
+                           source=old_source, name="rib")
+    async with session(workspace) as client:
+        updated = await call(client, "export_rib", project="part.SLDPRT", rib=first["rib"],
+                             source="sd7037-il.csv", spec=rib_spec(200))
+    assert updated["rib"] == first["rib"] and updated["source"] == "sd7037-il.csv"
 
 
 async def test_reading_a_spoiled_record_leaves_it_where_it_is(workspace):

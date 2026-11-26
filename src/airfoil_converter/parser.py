@@ -299,18 +299,29 @@ def _surfaces(
     if len(blocks) == 2:
         upper, lower = blocks
         if len(upper) == upper_count and len(lower) in (lower_count, lower_count - 1):
-            return upper, lower if len(lower) == lower_count else [upper[0]] + lower
+            upper = _nose_first(upper)
+            return upper, _lednicer_lower(upper[0], lower, lower_count)
         raise AirfoilParseError(
             f"The count row promises {upper_count} upper and {lower_count} lower points, "
             f"but the two blocks hold {len(upper)} and {len(lower)}. A Lednicer file gives "
-            "each surface as its own block, nose to tail, as many points as it counts."
+            "each surface as its own block, as many points as it counts."
         )
     if len(blocks) == 1:
         if len(flat) == upper_count + lower_count:
-            return flat[:upper_count], flat[upper_count:]
+            return _nose_first(flat[:upper_count]), _nose_first(flat[upper_count:])
         if len(flat) == upper_count + lower_count - 1:
-            return flat[:upper_count], [flat[0]] + flat[upper_count:]
+            upper = _nose_first(flat[:upper_count])
+            return upper, _lednicer_lower(upper[0], flat[upper_count:], lower_count)
     return None
+
+
+def _nose_first(surface: List[Point2]) -> List[Point2]:
+    return list(reversed(surface)) if surface[0][0] > surface[-1][0] else surface
+
+
+def _lednicer_lower(nose: Point2, lower: List[Point2], count: int) -> List[Point2]:
+    lower = _nose_first(lower)
+    return lower if len(lower) == count else [nose] + lower
 
 
 def _upper_first(contour: List[Point2]) -> List[Point2]:
@@ -334,9 +345,9 @@ def parse_dat_lines(lines: Sequence[str], name: str = "airfoil") -> AirfoilData:
     upper trailing edge round the nose to the lower, whichever way round the
     file runs — and in the file's own units, normally fractions of the chord.
     The chord runs from the origin, where a UIUC file puts the leading edge, to
-    the tail — or from the nose, if that lies ahead of the origin — so a
-    section given in fractions has a chord of exactly 1 and scales to a target
-    chord point for point. The title names the section; ``name`` stands in when
+    the midpoint of the trailing edge along x. A cambered profile can extend
+    ahead of the origin or have a slanted trailing edge without changing its
+    nominal chord. The title names the section; ``name`` stands in when
     there is none. A Lednicer file's count row is kept in the metadata, never
     read as a point, and the nose its two surfaces share is given once.
     """
@@ -375,8 +386,8 @@ def parse_dat_lines(lines: Sequence[str], name: str = "airfoil") -> AirfoilData:
     contour = _upper_first(contour)
 
     xs = [x for x, _ in contour]
-    chord = max(xs) - min(min(xs), 0.0)
-    if chord <= 0.0:
+    chord = 0.5 * xs[0] + 0.5 * xs[-1]
+    if chord <= 0.0 or max(xs) == min(xs):
         raise AirfoilParseError("The coordinates span no chord.")
     label = title or name
     metadata["Name"] = label

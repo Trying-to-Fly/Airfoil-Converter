@@ -285,11 +285,11 @@ def blunt(ctx: ServerContext, section: Any, thickness_mm: float, keep_chord: boo
         "keep_chord": keep_chord,
         "cut": cut.cut,
         "chord_mm": true_chord,
-        "span_mm": rounded(cut.chord * factor, 9),
+        "span_mm": cut.chord * factor,
         "station_mm": rounded((cut.station - cut.nose) * factor),
         "fraction": rounded(cut.fraction, FINE),
-        "cut_chord_mm": rounded(cut.cut_chord * factor, 9),
-        "scale": rounded(cut.scale, 12),
+        "cut_chord_mm": cut.cut_chord * factor,
+        "scale": cut.scale,
         "point_count": len(pts),
         "te_thickness_mm": rounded(distance(pts[0], pts[-1]) * factor),
         "finished_chord_mm": rounded(geometry.chord_span(pts) * factor),
@@ -327,6 +327,7 @@ def naca(ctx: ServerContext, digits: str, points: int, closed_te: bool,
     if save_as:
         answer.update(save_dat(ctx, save_as, name, outline, overwrite))
     if include_points:
+        answer["point_units"] = parser.CHORD_FRACTIONS if size is None else "mm"
         answer.update(point_list(outline if size is None else scaled(outline, size)))
     return answer
 
@@ -387,6 +388,7 @@ def morph(ctx: ServerContext, first: Any, second: Any, weight: float,
         answer.update(save_dat(ctx, save_as, f"{a.name} to {b.name} at {rounded(weight, 12):g}",
                                outline, overwrite))
     if include_points:
+        answer["point_units"] = parser.CHORD_FRACTIONS if size is None else "mm"
         answer.update(point_list(outline if size is None else scaled(outline, size)))
         answer["split"] = split_points(made)
     return answer
@@ -488,20 +490,23 @@ def law(ctx: ServerContext, name: str, stations: List[Dict[str, Any]], folder: O
     with ctx.lock:
         default = ctx.workspace
         records: List[Tuple[str, store.Sidecar]] = []
+        reserved = ()
         if project:
             proj = ctx.open_project(project, read_only=True)
             records.append((ctx.show(proj.part_path), proj.sidecar))
             default = os.path.dirname(proj.part_path)
+            reserved = (proj.part_path,)
         out = ctx.output_folder(folder or default, make=False)
         # Every project kept in the folder the curves go to, as well as the one
         # named: a law's curve taking a recorded curve's name would write over it.
         for path in sorted(glob.glob(os.path.join(glob.escape(out), "*" + store.SIDECAR_SUFFIX))):
+            path = ctx.readable(path, "project record")
             sidecar = store.load(path, move_aside=False)
             if sidecar is not None:
                 records.append((ctx.show(path), sidecar))
         for where, sidecar in records:
-            taken = set(sidecar.all_feature_names())
-            clash = [n for n in names if n in taken]
+            taken = {os.path.normcase(n) for n in sidecar.all_feature_names()}
+            clash = [n for n in names if os.path.normcase(n) in taken]
             if clash:
                 raise InputError(
                     f"{clash[0]} is already a curve of a record in {where}. Give the surface "
@@ -509,7 +514,7 @@ def law(ctx: ServerContext, name: str, stations: List[Dict[str, Any]], folder: O
                 )
         targets = [os.path.join(out, c.filename) for c in built.curves]
         manifest = os.path.join(out, base + LAW_SUFFIX)
-        ctx.check_targets(targets + [manifest])
+        ctx.check_targets(targets + [manifest], reserved=reserved)
         own = law_files(manifest, base)
         if own is None:
             may_replace(ctx, manifest, None, overwrite)
@@ -633,14 +638,31 @@ def fetch_url(url: str, timeout: float, limit: int) -> Tuple[str, bytes]:
         return response.geturl(), b"".join(chunks)
 
 
-def fetched_before(path: str, url: str) -> bool:
-    """Whether the note beside a fetched file says this tool fetched it from ``url``."""
+def fetch_digest(path: str, url: str) -> Optional[str]:
+    """The digest recorded by a prior fetch of this URL, if any."""
     try:
         with open(path, encoding="utf-8") as handle:
             note = json.load(handle)
     except (OSError, ValueError):
-        return False
-    return isinstance(note, dict) and note.get("url") == url
+        return None
+    if isinstance(note, dict) and note.get("url") == url and isinstance(note.get("sha256"), str):
+        return note["sha256"]
+    return None
+
+
+def check_fetch_replacement(ctx: ServerContext, path: str, note_path: str,
+                            url: str, overwrite: bool) -> None:
+    if overwrite:
+        return
+    digest = fetch_digest(note_path, url)
+    if digest is None:
+        may_replace(ctx, note_path, None, False)
+    if digest is not None and os.path.isfile(path):
+        with open(path, "rb") as handle:
+            body = handle.read(FETCH_LIMIT + 1)
+        if len(body) <= FETCH_LIMIT and writer.sha256_hex(body) == digest:
+            return
+    may_replace(ctx, path, None, False)
 
 
 def fetch(ctx: ServerContext, name: str, folder: str, overwrite: bool = False) -> Dict[str, Any]:
@@ -655,9 +677,7 @@ def fetch(ctx: ServerContext, name: str, folder: str, overwrite: bool = False) -
     path = os.path.join(out, f"{name}.dat")
     note_path = os.path.join(out, f"{name}.source.json")
     ctx.check_targets([path, note_path])
-    if not overwrite and not fetched_before(note_path, url):
-        for target in (path, note_path):
-            may_replace(ctx, target, None, False)
+    check_fetch_replacement(ctx, path, note_path, url, overwrite)
     opener = ctx.opener or fetch_url
     try:
         final, body = opener(url, FETCH_TIMEOUT, FETCH_LIMIT)
@@ -690,11 +710,12 @@ def fetch(ctx: ServerContext, name: str, folder: str, overwrite: bool = False) -
         "format": data.metadata.get("Format"),
     }
     with ctx.lock:
-        ctx.output_folder(folder)
         ctx.check_targets([path, note_path])
+        check_fetch_replacement(ctx, path, note_path, url, overwrite)
+        ctx.output_folder(folder)
         changed = ctx.write_file(path, body)
         ctx.write_file(note_path, (json.dumps(note, indent=2, sort_keys=True) + "\n").encode())
-    answer = tools_section.read(ctx, path)
+        answer = tools_section.read(ctx, path)
     answer.update(saved=ctx.show(path), changed=changed, note=ctx.show(note_path), url=url,
                   retrieved=note["retrieved"])
     return answer
@@ -896,8 +917,8 @@ def register(server: Any, ctx: ServerContext) -> None:
             "Where to save it in the workspace; made if missing."
         ))] = "uiuc",
         overwrite: Annotated[bool, Field(description=(
-            "Replace a name.dat or name.source.json already there that was not fetched "
-            "from this name's address."
+            "Replace a name.dat or name.source.json already there, including locally edited "
+            "coordinates. Without this, an earlier download must still match its fetch note."
         ))] = False,
     ) -> Dict[str, Any]:
         """Download a coordinate file from the UIUC Airfoil Coordinates Database

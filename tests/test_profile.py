@@ -94,7 +94,7 @@ def test_naca_open_trailing_edge_keeps_the_published_gap():
     assert pts[0][1] - pts[-1][1] == pytest.approx(0.00252, abs=1e-5)
 
 
-@pytest.mark.parametrize("digits", ["001", "00a2", "2012", "0000", ""])
+@pytest.mark.parametrize("digits", ["001", "00a2", "2012", "0000", "", "00²2"])
 def test_naca_rejects_what_is_not_a_four_digit_section(digits):
     with pytest.raises(GeometryError):
         profile.naca4(digits)
@@ -259,6 +259,15 @@ def test_extra_fractions_are_stations_of_their_own():
     assert split.x == sorted(split.x)
     with pytest.raises(GeometryError, match="between 0 and 1"):
         profile.split_profile(profile.naca4("0012"), extra=(1.5,))
+
+
+def test_extra_fractions_close_to_the_edges_preserve_both_endpoints():
+    fractions = (0.0000005, 0.9999995)
+    split = profile.split_profile(profile.naca4("0012", closed_te=False), extra=fractions)
+    assert split.x[:2] == [0.0, fractions[0]]
+    assert split.x[-2:] == [fractions[1], 1.0]
+    assert split.outline()[len(split.x) - 1] == (0.0, 0.0)
+    assert split.outline()[0] == (1.0, split.te_thickness / 2)
 
 
 def test_a_split_reports_as_plain_numbers():
@@ -670,8 +679,22 @@ def test_a_law_refuses_what_it_cannot_build():
     with pytest.raises(GeometryError, match="given twice"):
         profile.build_law([st(0.0, profile=sharp), st(10.0, profile=sharp)], "w",
                           fractions=(0.3, 0.5, 0.3))
+    with pytest.raises(GeometryError, match="same curve name"):
+        profile.build_law([st(0.0, profile=sharp), st(10.0, profile=sharp)], "w",
+                          fractions=(0.3, 0.3001))
     with pytest.raises(GeometryError, match="thinner than the 0.01 mm"):
         profile.build_law([st(0.0, profile=sharp), st(10.0, profile=sharp)], "w",
                           te_thickness=0.004)
     with pytest.raises(GeometryError, match="same place"):
         profile.build_law([st(0.0, profile=sharp), st(0.0, profile=sharp)], "w")
+
+
+@pytest.mark.parametrize("fraction", [0.0000005, 0.9999995])
+def test_a_law_refuses_guides_that_crowd_an_edge(fraction):
+    section = tuple(profile.naca4("0012"))
+    stations = [
+        profile.LawStation((0, 0, z), (1, 0, 0), (0, 1, 0), 50.0, profile=section)
+        for z in (0, 10)
+    ]
+    with pytest.raises(GeometryError, match="successive guide or edge points"):
+        profile.build_law(stations, "w", fractions=(fraction,))

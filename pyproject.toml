@@ -14,8 +14,8 @@ dependencies = []
 # curve files, and the tests still run on a machine with no Windows at all.
 live = ["pywin32>=306; sys_platform == 'win32'"]
 # The MCP server, for driving the Converter from another agent. Optional for
-# the same reason: the core never imports it.
-mcp = ["mcp>=2.3,<3"]
+# the same reason: the core never imports it. The SDK requires Python 3.10.
+mcp = ["mcp>=2.3,<3; python_version >= '3.10'"]
 dev = [
     "pytest>=7",
     "pyinstaller>=6",

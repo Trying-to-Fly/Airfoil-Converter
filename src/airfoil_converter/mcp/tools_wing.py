@@ -29,7 +29,7 @@ from .server import (
     settings_from,
     vector,
 )
-from .tools_section import ProjectPath, IncludePoints, find_rib
+from .tools_section import ProjectPath, IncludePoints, find_rib, retained_curve
 
 # Where along the span the planform is sampled, as fractions root to tip.
 PLANFORM_SAMPLES = (0.0, 0.25, 0.5, 0.75, 1.0)
@@ -65,7 +65,7 @@ def left_behind(record: store.WingRecord, curves, joins) -> List[str]:
 
 def wing_settings(ctx: ServerContext, proj, wing_key: Optional[str],
                   ribs: Optional[Sequence[str]], name: Optional[str],
-                  spec: Optional[Dict[str, Any]], folder: Optional[str], make: bool):
+                  spec: Optional[Dict[str, Any]], folder: Optional[str]):
     """Everything a check or a build of a wing needs, read off the call and the record.
 
     ``WingTab._prepare`` with the form's fields given here instead: the wing
@@ -126,7 +126,7 @@ def wing_settings(ctx: ServerContext, proj, wing_key: Optional[str],
         # As the Wing tab fills its folder in: from the first rib that has one.
         out = next((r.output_folder for r in sidecar.exports if r.output_folder),
                    os.path.dirname(proj.part_path))
-    out = ctx.output_folder(out, make=make)
+    out = ctx.output_folder(out, make=False)
     index = record.name_index if record is not None else sidecar.next_index(stem)
     return record, stem, index, settings, out
 
@@ -245,10 +245,12 @@ def check(ctx: ServerContext, project: str, wing_key: Optional[str],
           ribs: Optional[Sequence[str]], name: Optional[str], spec: Optional[Dict[str, Any]],
           folder: Optional[str]) -> Dict[str, Any]:
     with ctx.lock:
-        proj = ctx.open_project(project, read_only=True)
+        proj = ctx.open_project(project, read_only=True, check_writes=True)
         record, stem, index, settings, out = wing_settings(
-            ctx, proj, wing_key, ribs, name, spec, folder, make=False)
+            ctx, proj, wing_key, ribs, name, spec, folder)
         made = stand_up(ctx, proj.sidecar, record, settings, stem, index, check=True)
+        ctx.check_targets([os.path.join(out, c.filename) for c in made.curves]
+                          + [proj.sidecar_path], reserved=(proj.part_path,))
     answer = {
         "wing": record.export_id if record is not None else None,
         "name": export.wing_base(stem, index),
@@ -262,7 +264,7 @@ def check(ctx: ServerContext, project: str, wing_key: Optional[str],
     return answer
 
 
-def remember(sidecar: store.Sidecar, record: Optional[store.WingRecord],
+def remember(ctx: ServerContext, sidecar: store.Sidecar, record: Optional[store.WingRecord],
              build: wing_build.WingBuild, spec: WingSpec, stem: str, folder: str, index: int,
              hashes: Dict[str, str], retire: Sequence[str] = ()) -> store.WingRecord:
     """Replace the wing's record with what this export made of it.
@@ -291,10 +293,9 @@ def remember(sidecar: store.Sidecar, record: Optional[store.WingRecord],
         for c in record.curves:
             if c.feature in known:
                 continue
-            if c.feature in retiring:
-                fresh.curves.append(dataclasses.replace(c, retired=True))
-            elif c.retired or c.is_derived:
-                fresh.curves.append(c)
+            retired = c.retired or c.feature in retiring
+            if retired or c.is_derived:
+                fresh.curves.append(retained_curve(ctx, c, record.output_folder, folder, retired))
         sidecar.wings[sidecar.wings.index(record)] = fresh
     else:
         sidecar.wings.append(fresh)
@@ -333,7 +334,7 @@ def build(ctx: ServerContext, project: str, wing_key: Optional[str],
         proj = ctx.open_project(project)
         sidecar = proj.sidecar
         record, stem, index, settings, out = wing_settings(
-            ctx, proj, wing_key, ribs, name, spec, folder, make=True)
+            ctx, proj, wing_key, ribs, name, spec, folder)
         made = stand_up(ctx, sidecar, record, settings, stem, index,
                         check=bool(settings.offset_mm()))
         ahead = foresee(record, made)
@@ -345,9 +346,10 @@ def build(ctx: ServerContext, project: str, wing_key: Optional[str],
                 "A loft picks its profiles one by one, so it will need them picked again."
             )
         ctx.check_targets([os.path.join(out, c.filename) for c in made.curves]
-                          + [proj.sidecar_path])
+                          + [proj.sidecar_path], reserved=(proj.part_path,))
+        ctx.output_folder(out)
         changed, hashes = swlink.write_files(made.curves, out)
-        fresh = remember(sidecar, record, made, settings, stem, out, index, hashes,
+        fresh = remember(ctx, sidecar, record, made, settings, stem, out, index, hashes,
                          retire=ahead["retires"])
         saved = ctx.save_project(proj)
         plan = loft_plan(ctx, fresh, sidecar, made.joins)

@@ -265,7 +265,21 @@ def find_rib(sidecar: store.Sidecar, key: str) -> store.ExportRecord:
     raise InputError(f"This project has no rib {key}. Ribs: {ribs}.")
 
 
-def remember(sidecar: store.Sidecar, record: Optional[store.ExportRecord],
+def retained_curve(ctx: ServerContext, curve: store.CurveRecord, previous_folder: str, folder: str,
+                   retired: bool) -> store.CurveRecord:
+    """Keep a curve's original file when the rest of its record moves folders."""
+    path = curve.file
+    old = os.path.join(ctx.workspace, previous_folder)
+    if path and os.path.normcase(os.path.normpath(old)) != os.path.normcase(folder):
+        path = store.resolve_file(curve, old)
+        try:
+            path = os.path.relpath(path, folder).replace(os.sep, "/")
+        except ValueError:  # Files on another Windows drive must keep an absolute path.
+            pass
+    return dataclasses.replace(curve, file=path, retired=retired)
+
+
+def remember(ctx: ServerContext, sidecar: store.Sidecar, record: Optional[store.ExportRecord],
              curves: Sequence[export.Curve], spec: ExportSpec, stem: str, source: str,
              folder: str, index: int, hashes: Dict[str, str],
              loaded_section: Optional[Dict[str, Any]],
@@ -296,10 +310,9 @@ def remember(sidecar: store.Sidecar, record: Optional[store.ExportRecord],
         for c in record.curves:
             if c.feature in known:
                 continue
-            if c.feature in retire:
-                fresh.curves.append(dataclasses.replace(c, retired=True))
-            elif c.retired:
-                fresh.curves.append(c)
+            if c.feature in retire or c.retired:
+                fresh.curves.append(retained_curve(
+                    ctx, c, record.output_folder, folder, retired=True))
         sidecar.exports[sidecar.exports.index(record)] = fresh
     else:
         sidecar.exports.append(fresh)
@@ -328,7 +341,7 @@ def export_rib(ctx: ServerContext, project: str, source: Optional[str], rib: Opt
         # A rib remembers the plane its curve file stood on, as the window
         # restores it, unless it is now being made from a different file.
         if record is not None and record.loaded_section and record.source and \
-                ctx.readable(record.source, "rib's source") == path:
+                ctx.resolved(record.source) == path:
             section = export.section_from_dict(record.loaded_section)
 
         # Typed names are stripped, as the window strips its name field.
@@ -344,7 +357,7 @@ def export_rib(ctx: ServerContext, project: str, source: Optional[str], rib: Opt
                     else new_settings(data, section, spec))
         default = (record.output_folder if record is not None and record.output_folder
                    else os.path.dirname(proj.part_path))
-        out = ctx.output_folder(folder or default)
+        out = ctx.output_folder(folder or default, make=False)
 
         curves = export.build_curves(data, settings, stem, section, index=index)
         # Two names can make one feature name once sanitized ("root" and
@@ -361,11 +374,14 @@ def export_rib(ctx: ServerContext, project: str, source: Optional[str], rib: Opt
         # in the part, so the record keeps them, retired.
         orphans = (swlink.orphaned([c.feature for c in record.written_curves()], curves)
                    if record is not None else [])
-        ctx.check_targets([os.path.join(out, c.filename) for c in curves] + [proj.sidecar_path])
+        ctx.check_targets([os.path.join(out, c.filename) for c in curves] + [proj.sidecar_path],
+                          reserved=(proj.part_path,))
+        ctx.output_folder(os.path.dirname(proj.sidecar_path))
+        ctx.output_folder(out)
         changed, hashes = swlink.write_files(curves, out)
         loaded = (export.section_to_dict(section)
                   if section is not None and settings.plane_mode == export.MODE_LOADED else None)
-        fresh = remember(sidecar, record, curves, settings, stem, path, out, index, hashes,
+        fresh = remember(ctx, sidecar, record, curves, settings, stem, path, out, index, hashes,
                          loaded, retire=orphans)
         saved = ctx.save_project(proj)
 
