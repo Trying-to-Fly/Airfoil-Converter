@@ -116,6 +116,14 @@ def test_an_unreadable_record_is_moved_aside_never_deleted(tmp_path):
     assert any(p.name.startswith("Wing.airfoils.json.bad-") for p in tmp_path.iterdir())
 
 
+def test_a_reader_that_must_change_nothing_leaves_an_unreadable_record_where_it_is(tmp_path):
+    path = tmp_path / "Wing.airfoils.json"
+    path.write_text("{not json at all", encoding="utf-8")
+    with pytest.raises(StoreError, match="left as it is"):
+        store.load(str(path), move_aside=False)
+    assert [p.name for p in tmp_path.iterdir()] == ["Wing.airfoils.json"]
+
+
 @pytest.mark.parametrize("raw", [
     {"schemaVersion": 1, "exports": [{"stem": "rib"}]},                   # no id
     {"schemaVersion": 1, "document": "Wing.SLDPRT"},                       # not an object

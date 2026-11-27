@@ -65,6 +65,22 @@ def test_a_curve_file_says_so_and_a_missing_camber_line_says_so():
     assert detail == "120 mm · 40 pts · curve file · no camber line"
 
 
+def test_a_uiuc_file_shows_its_chord_without_millimetres():
+    _, detail = ui_text.source_line("SD7037-092-88", 1.0, 61, False, False, in_chords=True)
+    assert detail == "chord 1, unitless · 61 pts · UIUC .dat · no camber line"
+    summary = ui_text.loaded_summary("SD7037-092-88", 1.0, 61, False, False, in_chords=True)
+    assert "mm" not in summary and "UIUC .dat" in summary
+
+
+def test_loading_a_uiuc_file_asks_for_a_target_chord():
+    assert ui_text.loaded_status(False, in_chords=True).startswith("UIUC .dat loaded.")
+    assert "target chord" in ui_text.loaded_status(False, in_chords=True)
+    assert ui_text.loaded_status(False) == "CSV loaded. Set the plane and export."
+    assert ui_text.loaded_status(True).startswith("Curve loaded")
+    assert ui_text.chord_placeholder(1.0, in_chords=True) == "required"
+    assert ui_text.chord_placeholder(175.0) == "175"
+
+
 # ----------------------------------------------------------------- the link
 
 

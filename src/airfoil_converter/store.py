@@ -302,11 +302,13 @@ def _record(cls, raw: Any, what: str):
         raise StoreError(f"The curve record holds a {what} that could not be read: {exc}") from None
 
 
-def load(path: str) -> Optional[Sidecar]:
+def load(path: str, move_aside: bool = True) -> Optional[Sidecar]:
     """Read a sidecar, or None when there is not one yet.
 
     A file that cannot be parsed is moved aside rather than deleted or
     overwritten: it is the only copy of settings someone may still want.
+    ``move_aside=False`` leaves it where it is and only says so, for a reader
+    that must change nothing.
     """
     if not os.path.exists(path):
         return None
@@ -322,6 +324,10 @@ def load(path: str) -> Optional[Sidecar]:
     except UnknownSchema:
         raise
     except (StoreError, UnicodeDecodeError):
+        if not move_aside:
+            raise StoreError(
+                "The curve record beside this part could not be read. It was left as it is."
+            ) from None
         spoiled = f"{path}.bad-{time.strftime('%Y%m%d-%H%M%S')}"
         os.replace(path, spoiled)
         raise StoreError(
