@@ -577,6 +577,37 @@ def chord_span(points: Sequence[Point2]) -> float:
     return max(xs) - min(xs)
 
 
+@dataclass
+class BluntCut:
+    """What a trailing-edge cut did, as well as the section it left.
+
+    ``station`` is where the vertical cut was made, in the section's own
+    chordwise coordinate before any regrowth, and ``cut_chord`` how far the
+    section reached, nose to cut, at that point. ``scale`` is the factor the
+    cut section was grown by to win back its chord — 1 when it was not — so
+    ``scale * cut_chord`` is ``chord`` again whenever the chord was kept.
+
+    Both are continuous in the trailing edge asked for, relative to the chord,
+    but only piecewise smooth: the cut is made on the polyline, so they turn a
+    corner wherever the cut crosses one of its points. A caller who needs a
+    family of sections smooth in chord can sample a few chords and spline the
+    station and scale between them; splining the cut points would not do.
+    """
+
+    points: List[Point2]
+    station: float
+    cut_chord: float
+    chord: float
+    nose: float
+    scale: float = 1.0
+    cut: bool = True
+
+    @property
+    def fraction(self) -> float:
+        """The cut station as a fraction of the original chord, from the nose."""
+        return (self.station - self.nose) / self.chord if self.chord > 0.0 else 1.0
+
+
 def blunt_trailing_edge(
     points: Sequence[Point2], thickness: float, keep_chord: bool = False
 ) -> List[Point2]:
@@ -594,13 +625,28 @@ def blunt_trailing_edge(
     section carries both the chord it came in with and a trailing edge exactly
     ``thickness`` thick. Growing it is a true scaling — the profile is unchanged,
     just very slightly larger. A thickness of zero leaves the loop as it stands.
+
+    :func:`cut_trailing_edge` makes the same cut and also says where it fell.
     """
+    return cut_trailing_edge(points, thickness, keep_chord).points
+
+
+def cut_trailing_edge(
+    points: Sequence[Point2], thickness: float, keep_chord: bool = False
+) -> BluntCut:
+    """:func:`blunt_trailing_edge`, reporting the cut station and the regrowth scale."""
+
+    def untouched() -> BluntCut:
+        xs = [x for x, _ in points]
+        nose, tail = (min(xs), max(xs)) if xs else (0.0, 0.0)
+        return BluntCut(list(points), tail, tail - nose, tail - nose, nose, 1.0, cut=False)
+
     if not math.isfinite(thickness):
         raise GeometryError("Trailing-edge thickness must be a finite number.")
     if thickness < 0.0:
         raise GeometryError("Trailing-edge thickness must not be negative.")
     if thickness <= POINT_TOL:
-        return list(points)
+        return untouched()
 
     loop = clean_loop(points)
     if len(loop) < 3:
@@ -610,7 +656,7 @@ def blunt_trailing_edge(
     tail = max(x for x, _ in loop)
     ends = [y for x, y in loop if x >= tail - POINT_TOL]
     if max(ends) - min(ends) >= thickness:
-        return list(points)
+        return untouched()
 
     station, thickest = _thickest_station(loop)
     if thickness >= thickest:
@@ -641,15 +687,16 @@ def blunt_trailing_edge(
         else:
             hi = mid
 
-    cut = clean_open_curve(_cut_at(loop, 0.5 * (lo + hi)))
-    if not keep_chord:
-        return cut
-
+    station = 0.5 * (lo + hi)
+    cut = clean_open_curve(_cut_at(loop, station))
     span = chord_span(cut)
+    if not keep_chord:
+        return BluntCut(cut, station, span, chord, nose)
+
     if span <= POINT_TOL:
         raise GeometryError("The trailing-edge cut leaves no chord to grow back.")
     factor = chord / span
-    return [(x * factor, y * factor) for x, y in cut]
+    return BluntCut([(x * factor, y * factor) for x, y in cut], station, span, chord, nose, factor)
 
 
 def trailing_edge_line(points: Sequence[Point2]) -> List[Point2]:

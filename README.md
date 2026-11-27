@@ -96,6 +96,24 @@ Two things to know:
   no area, so there is no wall to walk around. Offset the whole loop, and split
   it afterwards if you need the halves.
 
+## UIUC coordinate files
+
+**Browse** also opens the `.dat` files of the UIUC Airfoil Coordinates
+Database, downloaded as they are: a title line, then one `x y` pair per line in
+fractions of the chord. Both layouts in use read — *Selig*, one contour from the
+upper trailing edge round the nose to the lower, and *Lednicer*, a row of point
+counts and then each surface from the nose to the tail — and either comes in the
+plotter CSV's order, the upper surface first, whichever way round the file runs. The count row is kept aside, never
+read as a point, and the nose the two surfaces share is given once.
+
+The title names the section. The chord is measured from the origin, where a
+UIUC file puts the leading edge, to the tail, so a section in fractions has a
+chord of exactly 1 and a **target chord** of 200 scales every point by 200,
+trailing-edge ends included. A section in fractions has no size of its own, so
+it will not export until a target chord is set. The file carries no camber
+line, so that box is greyed out. As with curves, the format is read from the contents: a `.dat`
+saved as `.txt` still reads.
+
 ## Trailing edge
 
 A drawn airfoil ends in a point of no thickness. A built one cannot, so **TE
@@ -614,6 +632,85 @@ before you rely on it.
 
 The wing's curves go in folders like the ribs', gathered under **Wing Curves**.
 
+## MCP server
+
+Another agent can drive the Converter without its window, through an
+[MCP](https://modelcontextprotocol.io) server: read a section, finish and
+export ribs, stand a wing up from them, and get back the numbers and the loft
+plan. It does what the window does, through the same code, so a rib or a wing
+written by an agent is byte for byte the one the window would have written,
+and its records are the same `*.airfoils.json` sidecar the window keeps
+beside a part.
+
+The server is an optional extra, as the SolidWorks link is, and needs Python
+3.10 or newer. From the repository checkout, install it and pass an existing
+directory as the workspace.
+
+```
+python -m pip install -e ".[mcp]"
+airfoil-converter-mcp --workspace C:\work\wing
+```
+
+You can also run `python -m airfoil_converter.mcp --workspace DIR` after
+installation. It talks over stdio. Every path a tool takes is resolved
+against the **workspace**, symlinks followed, and refused if it lands outside;
+nothing is ever written anywhere else. `--read-root DIR` (repeatable) adds a
+folder sources may be read from but never written to. For Claude Code, in the
+project's `.mcp.json`:
+
+```json
+{
+  "mcpServers": {
+    "airfoil-converter": {
+      "command": "airfoil-converter-mcp",
+      "args": ["--workspace", "C:\\work\\wing", "--read-root", "C:\\airfoils"]
+    }
+  }
+}
+```
+
+A **project** is a part's path, such as `wing.SLDPRT`; the part need not exist.
+Settings are the form's, by field name, as text: `converter_info` lists every
+one with its meaning and default. A new section starts as the window's form
+does when it loads one, with one difference: the reference point defaults to
+`0`, the leading edge, where the window's fresh form says `25`. The tools:
+
+| Tool | Does |
+| --- | --- |
+| `converter_info` | Version, units and axes, every `ExportSpec` and `WingSpec` field, the trailing-edge modes, whether SolidWorks is reachable, the workspace and read roots. |
+| `read_section` | A CSV or curve file: name, points, chord, leading and trailing edge, TE gap, thickness and where, and a curve's plane. |
+| `finish_section` | What an export of it would make, writing nothing: each curve's name, points, bounding box; the finished chord and TE thickness. |
+| `export_rib` | Export a rib: write its curve files and record it in the project, new or again. |
+| `list_project` | A project's ribs and wings, and whether each curve file is there and unchanged. |
+| `check_wing` | Try a wing, new or with changes (ribs, edges, ends, thickness rule, offset, folder), saving nothing: what the Result panel says, the planform, the expected wall, and what a build would retire. |
+| `build_wing` | The same, then write the wing's curves and its record together, and return the loft plan: profiles root to tip, guides, and the files. |
+| `naca4` | Make a NACA four-digit section (cosine-spaced, Selig order, chord 1); save it as a `.dat` file to export it. |
+| `blunt_trailing_edge` | Cut a section's trailing edge to a thickness in mm, saying where the cut fell, the chord it left and the regrowth scale. |
+| `split_section` | Camber and half-thickness on a common grid of chord stations, from the true nose. |
+| `morph_sections` | A section part way from one to another, its trailing edge held at a thickness in mm; save it as a `.dat` file. |
+| `nose_radius` | The nose radius off the curve through the points, and across a swept leading edge. |
+| `place_section` | Stand a section on any plane by its nose, chord and up directions, chord and twist; write the curve if asked. |
+| `build_law` | Sections at the caller's own stations, with edges and surface guides through them, written as curve files with a loft plan in `build_wing`'s shape. Not recorded in a project. |
+| `fetch_uiuc` | Only with `--allow-network`: download a coordinate file from the UIUC database into the workspace, with a note of its URL and when it was retrieved. |
+
+The profile tools take a section the same way: a path to a CSV, UIUC `.dat` or
+curve file, or its points inline as `[[x, y], ...]`, trailing edge round the
+nose and back. They work in the section's own chord frame — the true nose at
+the origin, the middle of the trailing edge at (1, 0) — and a section in
+fractions of its chord (a UIUC file, a NACA or morphed profile) needs its
+chord in millimetres before it can be exported or measured in millimetres.
+Their `chord_mm` is that frame's chord, nose to the middle of the trailing
+edge; an export's target chord keeps the window's meaning, the source's own
+chord. A tool that writes a file you name (`save_as`, `write`, `build_law`,
+`fetch_uiuc`) replaces only its own earlier output, never a file it did not
+write unless asked with `overwrite`, and never writes through a link.
+
+Points come back only when asked (`include_points`), at the curve files'
+precision and capped; big geometry goes to curve files. A refusal comes back
+as a tool error carrying the Converter's own message. It does not drive
+SolidWorks: the curves and the loft plan are for whatever CAD bridge comes
+next. The plan is in `design/MCP-SERVER.md`.
+
 ## Building the executable
 
 ```
@@ -632,12 +729,16 @@ pip install pytest
 python -m pytest
 ```
 
+The MCP server's tests (`tests/test_mcp_*.py`) are skipped unless the `mcp`
+extra is installed.
+
 Layout:
 
 ```
 src/airfoil_converter/
-  parser.py     # CSV -> metadata + point sections; curve file -> XYZ points
+  parser.py     # CSV or UIUC .dat -> metadata + point sections; curve file -> XYZ points
   geometry.py   # plane frames, 2D<->3D transform, trailing-edge handling, offsetting
+  profile.py    # NACA sections; camber and thickness, morphs, placing, sections along a law
   writer.py     # .sldcrv / .txt output
   export.py     # the form as data, and the curves it produces
   wing.py       # a wing stood up from its ribs: axes, edge curves, the loft between
@@ -652,6 +753,12 @@ src/airfoil_converter/
   theme.py      # every colour, size and face the window uses
   widgets.py    # the controls the design asks for, drawn by hand
   ui_text.py    # the readouts and tracker rows, worked out without a window
+  mcp/          # the MCP server (optional extra; nothing else imports it)
+    server.py   #   command line, workspace and path rules, errors, make_server()
+    tools_info.py    # converter_info
+    tools_section.py # one section: read, finish, export, project records
+    tools_wing.py    # wings: check, build, loft plan
+    tools_profile.py # profiles: NACA, blunt cut, split, morph, nose, place, law, UIUC fetch
 tests/
 main.py         # entry point
 ```

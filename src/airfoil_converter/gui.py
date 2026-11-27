@@ -1157,10 +1157,11 @@ class ConverterApp(ttk.Frame):
 
     def _browse_csv(self) -> None:
         path = filedialog.askopenfilename(
-            title="Select an airfoil CSV or a curve file",
+            title="Select an airfoil CSV, a UIUC .dat file or a curve file",
             filetypes=[
-                ("Airfoil CSV or curve", "*.csv *.sldcrv *.txt"),
+                ("Airfoil CSV, .dat or curve", "*.csv *.dat *.sldcrv *.txt"),
                 ("Airfoil CSV", "*.csv"),
+                ("UIUC coordinates", "*.dat"),
                 ("Curve files", "*.sldcrv *.txt"),
                 ("All files", "*.*"),
             ],
@@ -1199,14 +1200,14 @@ class ConverterApp(ttk.Frame):
             return
 
         name, detail = ui_text.source_line(
-            data.name, data.chord, len(data.airfoil), bool(data.camber), curve
+            data.name, data.chord, len(data.airfoil), bool(data.camber), curve, data.in_chords
         )
         self.loaded_name.set(name)
         self.loaded_detail.set(f"· {detail}")
         self.loaded_name_label.configure(fg=theme.INK)
         self.outline.grid()
         self.outline.show(data.airfoil)
-        self.target_field.set_placeholder(f"{data.chord:g}")
+        self.target_field.set_placeholder(ui_text.chord_placeholder(data.chord, data.in_chords))
         self._relayout()
 
     def _load(self, path: str) -> None:
@@ -1225,12 +1226,9 @@ class ConverterApp(ttk.Frame):
         if not has_camber:
             self.export_camber.set(False)
 
-        summary = f"Loaded: {data.name}, chord {data.chord:g} mm, {len(data.airfoil)} pts"
-        if curve:
-            summary += " (curve file)"
-        elif not has_camber:
-            summary += " (no camber line)"
-        self.loaded_text.set(summary)
+        self.loaded_text.set(ui_text.loaded_summary(
+            data.name, data.chord, len(data.airfoil), has_camber, curve, data.in_chords
+        ))
         self._show_loaded(data, curve)
 
         # A new curve is named after the file it came from until someone says
@@ -1248,11 +1246,7 @@ class ConverterApp(ttk.Frame):
 
         if not self.out_folder.get():
             self.out_folder.set(os.path.dirname(os.path.abspath(path)))
-        self._set_status(
-            "Curve loaded on its own plane. Set an offset and export."
-            if curve
-            else "CSV loaded. Set the plane and export."
-        )
+        self._set_status(ui_text.loaded_status(curve, data.in_chords))
 
     # ---------------------------------------------------------------- export
 
